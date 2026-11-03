@@ -56,3 +56,7 @@ PR: (none)
 - 2026-11-03 04:40 - Task 5.1 verified (scoped clean, tests pass) and committed. Handoff for 5.4: mix_allowed per tick -> StreamResampler(48000, provider_rate, in_channels=2); output StreamResampler(provider_rate, 48000, out_channels=2)
 - 2026-11-03 04:41 - Task 2.2 verified (scoped clean, tests pass) and committed. Deviation accepted: task created after routing+permission (no task numbers burned on refusals/_control). Handoffs: 6.1.3 receipt needs reserved task number (tasks numbered after routing); tool-style refusal/_control/who's-asking paths send no function output yet (Phase 6); unused prompts HERMES_UNREACHABLE/not_configured; 2.4 needs configured router
 - 2026-11-03 04:41 - Dispatched sdlc-coder: Task 2.4
+- 2026-11-03 04:42 - Task 4.1 verified and committed. Handoff for 4.2: let WireError propagate from connect() for retry_connect; emit Closed(wire.close_reason) when events() ends w/o session.closed; ignore ping
+- 2026-11-03 04:43 - Dispatched sdlc-coder: Tasks 4.2, 3.1
+- 2026-11-03 04:43 - Task 3.2 verified and committed. OPEN WIRING ITEM: nothing builds decisions/jev backends from config yet; service must call DecisionsBackend.from_config(config.router.decisions, config.secrets) and close() on shutdown — assign to Task 3.4 or a follow-up after 2.4/3.1 land
+- 2026-11-03 04:43 - Dispatched sdlc-coder: Task 3.3

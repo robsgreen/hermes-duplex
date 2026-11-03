@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 71 / 161 sub-tasks complete (Phase 1, Tasks 2.1-2.3, 5.1 done)
+> **Progress:** 78 / 161 sub-tasks complete
 
 **Read before every task:**
 
@@ -526,18 +526,18 @@ tests/contract/test_router_decisions.py       (create)
 
 **Sub-tasks:**
 
-- [ ] **3.2.1** — `configure()` builds the three questions from `ProfileSpec`s, with `_control` as a choice using a fixed description ("status or cancel of running voice tasks"). `classify()` sends the request text plus the last few history lines (as a message list) and respects `deadline_ms` with a client timeout.
-- [ ] **3.2.2** — Map answers to `BackendResult`: `profile_probs` and `effort_probs` from the probabilities lists, `followup_prob` from the predicate; refusal or malformed answer → raise a backend error (counts toward the breaker). API key from the env var named in config.
-- [ ] **3.2.3** — Contract tests against an aiohttp fake: request body shape (model, three questions, choices with descriptions, `_control` present); response mapping; refusal; HTTP 5xx; slow response beyond the deadline.
+- [x] **3.2.1** — `configure()` builds the three questions from `ProfileSpec`s, with `_control` as a choice using a fixed description ("status or cancel of running voice tasks"). `classify()` sends the request text plus the last few history lines (as a message list) and respects `deadline_ms` with a client timeout.
+- [x] **3.2.2** — Map answers to `BackendResult`: `profile_probs` and `effort_probs` from the probabilities lists, `followup_prob` from the predicate; refusal or malformed answer → raise a backend error (counts toward the breaker). API key from the env var named in config.
+- [x] **3.2.3** — Contract tests against an aiohttp fake: request body shape (model, three questions, choices with descriptions, `_control` present); response mapping; refusal; HTTP 5xx; slow response beyond the deadline.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/contract/test_router_decisions.py` passes with every case in 3.2.3.
-- [ ] **Requirements:**
-    - [ ] "hermes_duplex/router/decisions.py — OpenAI Decisions backend (POST /v1/decisions; choice: profile, choice: effort, predicate: follow-up)".
-    - [ ] "decision backends get `_control` as a choice with a fixed description."
-- [ ] **Verify:** With `OPENAI_API_KEY` set (optional, manual), run one classification and confirm the log line shows `source=decisions`.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/contract/test_router_decisions.py` passes with every case in 3.2.3.
+- [x] **Requirements:**
+    - [x] "hermes_duplex/router/decisions.py — OpenAI Decisions backend (POST /v1/decisions; choice: profile, choice: effort, predicate: follow-up)".
+    - [x] "decision backends get `_control` as a choice with a fixed description."
+- [x] **Verify:** With `OPENAI_API_KEY` set (optional, manual), run one classification and confirm the log line shows `source=decisions`.
 
 ---
 
@@ -618,18 +618,18 @@ tests/unit/test_wire.py               (create)
 
 **Sub-tasks:**
 
-- [ ] **4.1.1** — `WireClient` over `websockets` 15 (`websockets.asyncio.client.connect`): URL plus `additional_headers` (`Authorization: Bearer <key>`), `max_size=None`, JSON send, an async iterator of decoded JSON events, tolerance for application-level `{"type":"ping"}` and unknown event types (pass them through; adapters ignore them), and clean close.
-- [ ] **4.1.2** — Reconnect helper with exponential backoff (for example 0.5 s, 1 s, 2 s) and a max attempts parameter; the session (Task 4.4) decides when to reconnect.
-- [ ] **4.1.3** — `tests/fakes/fake_ws_server.py`: a `websockets` server that replays a recorded JSONL event script, can wait for a client event type before replying, records every client event, and can drop the connection on cue. Contract tests in Tasks 4.2 and 6.1 use it.
-- [ ] **4.1.4** — Unit tests: headers sent, JSON round trip, ping/unknown tolerated, close, backoff timing (injected sleep).
+- [x] **4.1.1** — `WireClient` over `websockets` 15 (`websockets.asyncio.client.connect`): URL plus `additional_headers` (`Authorization: Bearer <key>`), `max_size=None`, JSON send, an async iterator of decoded JSON events, tolerance for application-level `{"type":"ping"}` and unknown event types (pass them through; adapters ignore them), and clean close.
+- [x] **4.1.2** — Reconnect helper with exponential backoff (for example 0.5 s, 1 s, 2 s) and a max attempts parameter; the session (Task 4.4) decides when to reconnect.
+- [x] **4.1.3** — `tests/fakes/fake_ws_server.py`: a `websockets` server that replays a recorded JSONL event script, can wait for a client event type before replying, records every client event, and can drop the connection on cue. Contract tests in Tasks 4.2 and 6.1 use it.
+- [x] **4.1.4** — Unit tests: headers sent, JSON round trip, ping/unknown tolerated, close, backoff timing (injected sleep).
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_wire.py` passes.
-- [ ] **Requirements:**
-    - [ ] "hermes_duplex/providers/wire.py — shared WebSocket client (websockets 15): connect with auth headers, JSON event send/recv, ping tolerance, reconnect backoff".
-- [ ] **Verify:** `grep -n "import openai" -r hermes_duplex` prints nothing.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_wire.py` passes.
+- [x] **Requirements:**
+    - [x] "hermes_duplex/providers/wire.py — shared WebSocket client (websockets 15): connect with auth headers, JSON event send/recv, ping tolerance, reconnect backoff".
+- [x] **Verify:** `grep -n "import openai" -r hermes_duplex` prints nothing.
 
 ---
 
