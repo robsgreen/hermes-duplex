@@ -21,3 +21,6 @@ PR: (none)
 
 - 2026-11-03 00:53 - Spec created
 - 2026-11-03 00:54 - Workspace setup complete (no commands established yet); permissions allowlist skipped (blocked by auto-mode classifier)
+- 2026-11-03 00:57 - Router research returned (research-router.md)
+- 2026-11-03 00:58 - Prior-art research returned (research-prior-art.md)
+- 2026-11-03 00:59 - Hermes research returned (research-hermes.md)

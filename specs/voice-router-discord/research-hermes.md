@@ -1,0 +1,12 @@
+# Research: Hermes internals (sdlc-researcher, 2026-11-03; hermes-agent @6112c2a)
+
+- Plugin: plugin.yaml (manifest v2: api_version, python_dependencies/pyproject, config_schema -> plugins.entries.<id>.settings) + register(ctx). ctx: register_tool/hook/command/cli_command/platform/platform_handler/auxiliary_task, dispatch_tool, llm.complete_structured(task=), spawn_task(coro), post_message, profile_name, on_unload. Must run in-process (isolation: host refuses register_platform). Policy: third-party integrations ship as standalone repos; no runtime patching of core (catalog rejects); internal imports not API.
+- Profiles: ~/.hermes/profiles/<n>/ (own config, .env, SOUL, memory, skills, state.db). Gateway multiplexes profiles by default.
+- BEST DISPATCH SEAM: API server (port 8642, Bearer API_SERVER_KEY per profile) POST /p/<profile>/v1/runs {input, session_id, model, provider, model_options:{reasoning_effort, service_tier}} -> 202 run_id; GET .../events SSE (message.delta, tool.started/completed, run.completed/failed/cancelled); /stop, /steer, /approval, /clarify; Idempotency-Key. session_id gives per-(speaker,profile) continuity. Fallback: `hermes -p X -z ... -m --provider` (no effort flag).
+- delegate_task / DelegationProvider: profile route ignores effort/model; child has no conversation -> not suitable.
+- Classifier home: ctx.register_auxiliary_task("duplex_router") + ctx.llm.complete_structured (host creds). smart_model_routing is dead; #123388 open.
+- Discord voice in core: plugins/platforms/discord/adapter.py, discord.py[voice]==2.7.1, custom VoiceReceiver (NaCl + DAVE via davey, per-SSRC opus), utterance-based (1.5s silence) -> STT -> agent -> TTS. NO plugin hook for voice frames. hermes-talk borrows private internals.
+- Core full duplex only: Desktop GPT-Live (gpt-live-1, WebRTC, POST /v1/live/sessions with delegation:{type:"client"}) -> each session.delegation.created becomes a Hermes turn. ==> "client dispatch mode" = GPT-Live client delegation. LIVE_PERSONA / VOICE_LIVE_TURN_NOTE templates in tools/voice_live.py.
+- RFC #77111 (open, needs-decision): core RealtimeVoiceProvider ABC; consensus: vendor transports in plugins, voice model only talks + delegates.
+- Runtime: Python 3.14 in practice, asyncio/aiohttp, uv, pytest, MIT.
+- Discord audio options: (a) own platform adapter + own bot token, implement receive+DAVE ourselves; (b) borrow core adapter internals like hermes-talk (fragile, catalog-rejected); (c) push upstream hook via #77111.
