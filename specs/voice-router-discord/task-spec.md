@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 149 / 161 sub-tasks complete (4.3.6 MAY deferred)
+> **Progress:** 153 / 161 sub-tasks complete (4.3.6 MAY deferred)
 
 **Read before every task:**
 
@@ -1066,19 +1066,19 @@ CLAUDE.md                         (create)
 
 **Sub-tasks:**
 
-- [ ] **7.2.1** — `README.md`: what it is; install (`hermes plugins install <repo URL>`, standalone `uv sync` + `hermes-duplex serve`); Discord bot setup (create the second bot, intents, invite scopes `bot` + `applications.commands`, voice permissions); Hermes API server setup (`API_SERVER_ENABLED`, per-profile `API_SERVER_KEY`); `duplex.yaml` walkthrough incl. people and permissions and the model table; usage on Discord and web; provider switching (`provider.name`); testing tiers and their commands; the CI e2e status (record "local only" if Task 2.5.5 found Hermes not installable in CI).
-- [ ] **7.2.2** — `docs/system/architecture.md`: layers (transport, provider, router, dispatcher) around VoiceSession and TaskTracker; the GPT-Live and Realtime hand-off flows; barge-in for both families; router policy; time base and attribution; the lifecycle seam (keep Task 2.4's section).
-- [ ] **7.2.3** — `docs/live-checklist.md`: manual checks for Discord DAVE receive, barge-in (Realtime and GPT-Live), gate threshold tuning, multi-speaker attribution, allowlist removal, rejoin after channel move, Grok switch, and a 60-minute call (session expiry and reconnect). Each item has steps and an expected result.
-- [ ] **7.2.4** — `AGENTS.md`: layout, commands (the standard validation commands, `-m e2e`, `-m live`, eval-router), and rules (no Hermes internals, no `openai` dependency, deps must contain Hermes pins, session branches on capabilities only, secrets only via env). `CLAUDE.md`: a one-line pointer that imports `AGENTS.md`.
+- [x] **7.2.1** — `README.md`: what it is; install (`hermes plugins install <repo URL>`, standalone `uv sync` + `hermes-duplex serve`); Discord bot setup (create the second bot, intents, invite scopes `bot` + `applications.commands`, voice permissions); Hermes API server setup (`API_SERVER_ENABLED`, per-profile `API_SERVER_KEY`); `duplex.yaml` walkthrough incl. people and permissions and the model table; usage on Discord and web; provider switching (`provider.name`); testing tiers and their commands; the CI e2e status (record "local only" if Task 2.5.5 found Hermes not installable in CI).
+- [x] **7.2.2** — `docs/system/architecture.md`: layers (transport, provider, router, dispatcher) around VoiceSession and TaskTracker; the GPT-Live and Realtime hand-off flows; barge-in for both families; router policy; time base and attribution; the lifecycle seam (keep Task 2.4's section).
+- [x] **7.2.3** — `docs/live-checklist.md`: manual checks for Discord DAVE receive, barge-in (Realtime and GPT-Live), gate threshold tuning, multi-speaker attribution, allowlist removal, rejoin after channel move, Grok switch, and a 60-minute call (session expiry and reconnect). Each item has steps and an expected result.
+- [x] **7.2.4** — `AGENTS.md`: layout, commands (the standard validation commands, `-m e2e`, `-m live`, eval-router), and rules (no Hermes internals, no `openai` dependency, deps must contain Hermes pins, session branches on capabilities only, secrets only via env). `CLAUDE.md`: a one-line pointer that imports `AGENTS.md`.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest -m "not live and not e2e"` passes (no code change expected).
-- [ ] **Requirements:**
-    - [ ] "README.md — install, Discord bot setup, config, usage, provider switching, testing tiers".
-    - [ ] "docs/system/architecture.md — how it works (layers, flows)"; "docs/live-checklist.md — manual Discord/GPT-Live/Grok checklist"; "AGENTS.md (+ CLAUDE.md pointer) — contributor entry point: layout, commands, rules".
-    - [ ] Manual tier items: "Discord DAVE receive, barge-in, multi-speaker, allowlist removal, Grok switch, 60-min call".
-- [ ] **Verify:** Every command in README and AGENTS.md runs as written (copy-paste each one that does not need secrets).
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest -m "not live and not e2e"` passes (no code change expected).
+- [x] **Requirements:**
+    - [x] "README.md — install, Discord bot setup, config, usage, provider switching, testing tiers".
+    - [x] "docs/system/architecture.md — how it works (layers, flows)"; "docs/live-checklist.md — manual Discord/GPT-Live/Grok checklist"; "AGENTS.md (+ CLAUDE.md pointer) — contributor entry point: layout, commands, rules".
+    - [x] Manual tier items: "Discord DAVE receive, barge-in, multi-speaker, allowlist removal, Grok switch, 60-min call".
+- [x] **Verify:** Every command in README and AGENTS.md runs as written (copy-paste each one that does not need secrets).
 
 <!-- END OF SPEC -->
