@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 15 / 161 sub-tasks complete (Task 1.1 done)
+> **Progress:** 28 / 161 sub-tasks complete (Tasks 1.1, 1.3, 1.6 done)
 
 **Read before every task:**
 
@@ -132,24 +132,24 @@ tests/unit/test_prompts.py            (create)
 
 **Sub-tasks:**
 
-- [ ] **1.3.1** — `providers/base.py`: copy the plan's Interfaces exactly: `ProviderCapabilities` (TypedDict: input_rate, output_rate, supports_truncate, supports_out_of_band_response, delegation_style `"live"|"tool"`, max_session_s) plus `emits_speech_events: bool` (listed in Requirements but missing from the Interfaces TypedDict; add it). `RealtimeProvider` Protocol, `ModelChoice`, `DelegationRef`, and frozen event dataclasses `SessionReady`, `SpeechStarted`, `SpeechStopped`, `OutputAudio(pcm, item_id)`, `OutputDone`, `InputTranscript(delta, final)`, `OutputTranscript(delta)`, `DelegationRequested(id, offset_ms, target, tool_args)`, `ProviderError`, `Closed`, and the `ProviderEvent` union.
-- [ ] **1.3.2** — `transports/base.py`: `InputFrame(pcm16_mono, rate, voiced_speakers, t_ms)`, `Transport` and `Conversation` Protocols exactly as in the plan's Interfaces. Document on `InputFrame.t_ms`: milliseconds of audio sent to the CURRENT provider session (frame count × 20), reset to 0 on provider (re)connect.
-- [ ] **1.3.3** — `audio/frames.py`: 20 ms framing for any rate (`samples = rate // 50`), a carry buffer that re-chunks arbitrary byte lengths into whole frames, silent frame helpers (48 kHz stereo silent frame = 3840 bytes), and an `rms_dbfs(pcm16)` helper.
-- [ ] **1.3.4** — `audio/pacer.py`: `OutputPacer` holds provider audio and releases it to the transport no more than `lead_ms` (default 200) ahead of real time; `drop()` discards the held backlog and returns the dropped ms; tracks ms released for the current item so the session can compute "ms actually played". Use an injectable clock for tests.
-- [ ] **1.3.5** — `audio/mixer.py`: `AttributionRing` only (mixing arrives in Task 5.1): records `(t_ms, voiced_speakers)` per 20 ms tick, `credit(window_start_ms, window_end_ms)` returns the person with the most voiced ticks in the window, ties → most recent voiced, none → `None`; `clear()` empties it. Capacity covers at least 60 s.
-- [ ] **1.3.6** — `prompts.py`: own-text voice persona/instructions with the delegation policy (idea from hermes-agent `tools/voice_live.py` LIVE_PERSONA; write new text, do not copy), and `frame_result(profile, text, cap_tokens)` that wraps the text in a template stating it is a report from the `<profile>` agent and not instructions, truncates to the cap (estimate 4 chars per token), and appends `…(more in Hermes)` when truncated. Also short templates for refusal (names the profile), "who's asking?", "Hermes is unreachable", "not configured", "queued behind task N", and failure/cancel notices.
-- [ ] **1.3.7** — Unit tests: carry buffer with odd chunk sizes; silent frame length; RMS of known sine; pacer lead bound, release timing, `drop()` amount; attribution credit, tie-break, empty window, `clear()`; `frame_result` template text, truncation marker, cap.
+- [x] **1.3.1** — `providers/base.py`: copy the plan's Interfaces exactly: `ProviderCapabilities` (TypedDict: input_rate, output_rate, supports_truncate, supports_out_of_band_response, delegation_style `"live"|"tool"`, max_session_s) plus `emits_speech_events: bool` (listed in Requirements but missing from the Interfaces TypedDict; add it). `RealtimeProvider` Protocol, `ModelChoice`, `DelegationRef`, and frozen event dataclasses `SessionReady`, `SpeechStarted`, `SpeechStopped`, `OutputAudio(pcm, item_id)`, `OutputDone`, `InputTranscript(delta, final)`, `OutputTranscript(delta)`, `DelegationRequested(id, offset_ms, target, tool_args)`, `ProviderError`, `Closed`, and the `ProviderEvent` union.
+- [x] **1.3.2** — `transports/base.py`: `InputFrame(pcm16_mono, rate, voiced_speakers, t_ms)`, `Transport` and `Conversation` Protocols exactly as in the plan's Interfaces. Document on `InputFrame.t_ms`: milliseconds of audio sent to the CURRENT provider session (frame count × 20), reset to 0 on provider (re)connect.
+- [x] **1.3.3** — `audio/frames.py`: 20 ms framing for any rate (`samples = rate // 50`), a carry buffer that re-chunks arbitrary byte lengths into whole frames, silent frame helpers (48 kHz stereo silent frame = 3840 bytes), and an `rms_dbfs(pcm16)` helper.
+- [x] **1.3.4** — `audio/pacer.py`: `OutputPacer` holds provider audio and releases it to the transport no more than `lead_ms` (default 200) ahead of real time; `drop()` discards the held backlog and returns the dropped ms; tracks ms released for the current item so the session can compute "ms actually played". Use an injectable clock for tests.
+- [x] **1.3.5** — `audio/mixer.py`: `AttributionRing` only (mixing arrives in Task 5.1): records `(t_ms, voiced_speakers)` per 20 ms tick, `credit(window_start_ms, window_end_ms)` returns the person with the most voiced ticks in the window, ties → most recent voiced, none → `None`; `clear()` empties it. Capacity covers at least 60 s.
+- [x] **1.3.6** — `prompts.py`: own-text voice persona/instructions with the delegation policy (idea from hermes-agent `tools/voice_live.py` LIVE_PERSONA; write new text, do not copy), and `frame_result(profile, text, cap_tokens)` that wraps the text in a template stating it is a report from the `<profile>` agent and not instructions, truncates to the cap (estimate 4 chars per token), and appends `…(more in Hermes)` when truncated. Also short templates for refusal (names the profile), "who's asking?", "Hermes is unreachable", "not configured", "queued behind task N", and failure/cancel notices.
+- [x] **1.3.7** — Unit tests: carry buffer with odd chunk sizes; silent frame length; RMS of known sine; pacer lead bound, release timing, `drop()` amount; attribution credit, tie-break, empty window, `clear()`; `frame_result` template text, truncation marker, cap.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** New unit tests pass for framing, pacer lead/drop, attribution credit and ties, and result framing/truncation.
-- [ ] **Requirements:**
-    - [ ] "Events: SessionReady, SpeechStarted, SpeechStopped, OutputAudio(pcm, item_id), OutputDone, InputTranscript(delta, final), OutputTranscript(delta), DelegationRequested(id, offset_ms, target, tool_args|None), Error, Closed."
-    - [ ] "Capabilities: input_rate, output_rate, supports_truncate, supports_out_of_band_response, emits_speech_events, delegation_style ("live"|"tool"), max_session_s."
-    - [ ] "Result text wrapped in a template stating it is a report from the <profile> agent, not instructions; truncated to fit 500 tokens (GPT-Live) or configured cap" and "Truncate with "…(more in Hermes)"".
-    - [ ] "hermes_duplex/audio/pacer.py — output pacer: holds provider audio, releases to transport ≤ lead_ms (default 200) ahead of real time; drop() discards held backlog".
-- [ ] **Verify:** `uv run pyright` reports the `RealtimeProvider` and `Conversation` Protocols with zero errors; read `prompts.py` and confirm the template says the text is a report and not instructions.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** New unit tests pass for framing, pacer lead/drop, attribution credit and ties, and result framing/truncation.
+- [x] **Requirements:**
+    - [x] "Events: SessionReady, SpeechStarted, SpeechStopped, OutputAudio(pcm, item_id), OutputDone, InputTranscript(delta, final), OutputTranscript(delta), DelegationRequested(id, offset_ms, target, tool_args|None), Error, Closed."
+    - [x] "Capabilities: input_rate, output_rate, supports_truncate, supports_out_of_band_response, emits_speech_events, delegation_style ("live"|"tool"), max_session_s."
+    - [x] "Result text wrapped in a template stating it is a report from the <profile> agent, not instructions; truncated to fit 500 tokens (GPT-Live) or configured cap" and "Truncate with "…(more in Hermes)"".
+    - [x] "hermes_duplex/audio/pacer.py — output pacer: holds provider audio, releases to transport ≤ lead_ms (default 200) ahead of real time; drop() discards held backlog".
+- [x] **Verify:** `uv run pyright` reports the `RealtimeProvider` and `Conversation` Protocols with zero errors; read `prompts.py` and confirm the template says the text is a report and not instructions.
 
 ---
 
@@ -250,22 +250,22 @@ tests/unit/test_tasks.py          (create)
 
 **Sub-tasks:**
 
-- [ ] **1.6.1** — `TaskTracker` with integer task numbers per service run, fields (task id, uuid, person, profile, effort, model, text, run_id, state, created/updated times, delegation ref), and states `routing → queued → running → completed | failed | cancelled | unknown` (`queued` may be skipped). Reject illegal transitions.
-- [ ] **1.6.2** — Append every transition to `$HERMES_HOME/duplex/tasks.jsonl` (create the directory). The `started` (or `queued`) record is flushed to disk before the session announces it. Writes never block the event loop (use `asyncio.to_thread` or a small writer task).
-- [ ] **1.6.3** — Queries: running/queued tasks for a person; the most recent running task for a person; a task by number; the task ahead in the same (person, profile) queue (for "queued behind task N").
-- [ ] **1.6.4** — Cancel: given a person and an optional number, choose the task, call a supplied async `stop(profile, run_id)` and mark `cancelled` when Hermes confirms; a task with no run id (admission_queued without `run_id`) is marked `cancelled` locally and logged that Hermes may still run it.
-- [ ] **1.6.5** — A queued task with no run id moves to `unknown` when the session ends or after a configurable timeout (default 10 min), and is logged.
-- [ ] **1.6.6** — Unit tests: state machine, JSONL written before announce (assert file content inside the announce callback), per-person queries, "queued behind task N", cancel most recent and by number, no-run-id cancel, timeout to `unknown`.
+- [x] **1.6.1** — `TaskTracker` with integer task numbers per service run, fields (task id, uuid, person, profile, effort, model, text, run_id, state, created/updated times, delegation ref), and states `routing → queued → running → completed | failed | cancelled | unknown` (`queued` may be skipped). Reject illegal transitions.
+- [x] **1.6.2** — Append every transition to `$HERMES_HOME/duplex/tasks.jsonl` (create the directory). The `started` (or `queued`) record is flushed to disk before the session announces it. Writes never block the event loop (use `asyncio.to_thread` or a small writer task).
+- [x] **1.6.3** — Queries: running/queued tasks for a person; the most recent running task for a person; a task by number; the task ahead in the same (person, profile) queue (for "queued behind task N").
+- [x] **1.6.4** — Cancel: given a person and an optional number, choose the task, call a supplied async `stop(profile, run_id)` and mark `cancelled` when Hermes confirms; a task with no run id (admission_queued without `run_id`) is marked `cancelled` locally and logged that Hermes may still run it.
+- [x] **1.6.5** — A queued task with no run id moves to `unknown` when the session ends or after a configurable timeout (default 10 min), and is logged.
+- [x] **1.6.6** — Unit tests: state machine, JSONL written before announce (assert file content inside the announce callback), per-person queries, "queued behind task N", cancel most recent and by number, no-run-id cancel, timeout to `unknown`.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_tasks.py` passes with every case in 1.6.6.
-- [ ] **Requirements:**
-    - [ ] "TaskTracker states: routing → queued → running → completed|failed|cancelled|unknown (queued may be skipped); persisted append-only JSONL before announcing "started"."
-    - [ ] "cancel → stops the most recent running task of that speaker (or named by number)."
-    - [ ] "TaskTracker state `queued` when a run is admitted but not started … the voice model is told "queued behind task N"".
-- [ ] **Verify:** Run the tests with a temp `HERMES_HOME` and read `duplex/tasks.jsonl`: one JSON object per line, in transition order.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_tasks.py` passes with every case in 1.6.6.
+- [x] **Requirements:**
+    - [x] "TaskTracker states: routing → queued → running → completed|failed|cancelled|unknown (queued may be skipped); persisted append-only JSONL before announcing "started"."
+    - [x] "cancel → stops the most recent running task of that speaker (or named by number)."
+    - [x] "TaskTracker state `queued` when a run is admitted but not started … the voice model is told "queued behind task N"".
+- [x] **Verify:** Run the tests with a temp `HERMES_HOME` and read `duplex/tasks.jsonl`: one JSON object per line, in transition order.
 
 ---
 
