@@ -33,3 +33,9 @@
 - B1-F8 low logic: bot.py move handling force-rejoins (discord.py handles moves natively).
 - Note: B says response.create right after function output is acceptable (contradicts A1-F1) — investigate.
 - Gaps: GPT-Live timeline wall-clock vs input-audio; out-of-band interrupt behaviour; browser echo cancel; Realtime 4s attribution window vs long model speech before tool call.
+
+## Prompt/layout review (baa2178...6e7837c) — Seat B
+- PB1 medium logic: openai/prompt.py:76, xai/prompt.py:57 — unconditional "Do not call a tool again with the same arguments" (guide says "after failure"); blocks repeated task_status and fresh re-delegation.
+- PB2 medium logic Red flag — Information Leakage: delegate receipt {"status":"started"} written in session.py:582, realtime adapter.py:70, openai/prompt.py:64 — make DELEGATE_RECEIPT constant.
+- PB3 low logic: prompts/base.py:133-136 json_report shrink loop over-truncates escape-heavy text (measured).
+- PB4 low mechanical: session.py:5 and AGENTS.md:46 say session adapts only via ProviderCapabilities (also prompter now).

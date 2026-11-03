@@ -105,3 +105,20 @@ Final checks: pass
 - Observations carried to PR gate: P7, P10, P17, P18, P20, P21, P22, P25, P26, P27, P28, P29.
 - Needs user decision: P23, P24, P30.
 Review complete (two-round cap reached; no unresolved critical/high or gating-mechanical findings).
+
+## Review round 3 — user-directed prompt strategy + provider layout (baa2178...6e7837c)
+Panel: A=sdlc-reviewer/opus, B=sdlc-reviewer/opus (full four passes over the two commits). Contract tier 3; gate none.
+Mechanical (6e7837c): uv sync, ruff check, ruff format --check, pyright pass; default 719 passed; e2e 4 passed; goldens identical across the move.
+Selected for fix:
+- Q1 medium logic (both seats) — realtime/openai/prompt.py:76-77, realtime/xai/prompt.py:57 — unconditional "Do not call a tool again with the same arguments" blocks repeat task_status / fresh delegate (guide scopes it to after failure). Escalated. Fix: scope to delegate of in-flight work.
+- Q2 medium Red flag — Information Leakage (B) — delegate receipt {"status":"started"} in session.py:582, realtime/adapter.py:70, openai/prompt.py:64. Fix: one DELEGATE_RECEIPT constant rendered with json.dumps; goldens byte-identical.
+- Q3 medium logic (A) — persona key means different things per provider (drops assistant.name on GPT-Live/Grok; contradictory identity on Realtime); whitespace-only persona/name accepted. Escalated. Fix: identity line always from name; persona replaces only style/tone; reject whitespace-only.
+- Q4 medium logic (A) — gpt_live/prompt.py lost the progress-notes rule while the session still sends thinking appends. Escalated.
+- Q5 medium mechanical — Concepts and vocabulary: RealtimePrompter is OpenAI-only though "Realtime" names the family (A). Vocabulary escalation. Fix: rename OpenAiRealtimePrompter (+ docs).
+- Q6 low logic (B, A noted) — prompts/base.py json_report over-truncates escape-heavy text. Escalated (cheap).
+- Q7 low mechanical (B) — session.py:5, AGENTS.md:46 say session adapts only via ProviderCapabilities.
+- Q8 low logic (A) — TaskReport status Literal wider than produced. Escalated: narrow or document.
+- Q9 low Red flag — Information Leakage (A) — ProviderSpec.prompter duplicates provider.prompter; golden test checks the spec's. Fix: goldens derive from a built provider's prompter (or drop spec field).
+Pre-existing:
+- Q10 config.py:23,441-469; doctor.py:21-23 — provider names/xai VAD rule duplicated outside the registry (follow-up).
+Needs user decision (resolved): Q11 cancel confirmation — user chose A (2026-11-03): cancel immediately when a task is named or only one is running; ask "which one?" when several run and none is named.
