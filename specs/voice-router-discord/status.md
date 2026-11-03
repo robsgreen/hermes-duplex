@@ -99,3 +99,4 @@ PR: (none)
 - 2026-11-03 06:47 - Review round 1 consolidated: 2 high (P1,P2), 8 medium, 12 low, 2 needs-user-decision; reproduce P1,P2
 - 2026-11-03 06:49 - P2 repro: reviewer-right (tester label 'reproduced-correct' contradicted by its evidence; recorded as reviewer-right). repro-P2.md saved
 - 2026-11-03 06:50 - P1 repro reviewer-right; Fix Once dispatched (one coder, selected set P1,P2,M1/P13,P3,P4,P5,P6,P7,P8,P9,P11,P12,P14,P15,P16,P19)
+- 2026-11-03 07:16 - Fix Once verified and committed; scoped re-review dispatched (both seats)

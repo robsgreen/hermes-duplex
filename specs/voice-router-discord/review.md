@@ -65,3 +65,8 @@ Contract tier: 3 (all four dispatches; new repo, no external consumers). Contrac
 ## Reproductions (cycle 1)
 - P1: reviewer-right — 2 new tests fail (response.create sent before the calling response's response.done; receipt 5.4-5.6 ms). Source: repro-P1.md.
 - P2: reviewer-right — stranger on unmapped SSRC delivered as 'rob' with DAVE off and on; preserve cases pass. Tester labelled it "reproduced-correct" but its evidence shows the bug; recorded as reviewer-right. Source: repro-P2.md.
+
+## Fix Once (cycle 1) — commit after e5c2a70
+Coder fixed all 17 selected (P1-P9, P11-P16, P19; M1). Orchestrator verification: build gate pass; default tier 667 passed ×3; e2e 4 passed; wait-cap test 0/20 failures; P8 description no longer promises a number (realtime.py:63-64); P9 docstrings say attribution keys by session input ms (transports/base.py:26-29, mixer.py:60-61); P14 no absolute self-imports (grep empty) + AST test; P15 dead prompts removed (grep empty).
+Deviations accepted: P19 uses TaskTracker.stopping() so _end stays quiet during a cancel (one confirmation on tool and control paths); P12 passes a `permitted` predicate into route(); P15 deleted dead prompts; P1 changes send_function_output to return bool (Tier 3); P7 2.5 chars/token applies to all providers.
+Logic fixes sent to scoped re-review: P1, P2, P3, P4, P5, P6, P7, P11, P12, P13, P15, P16, P19.

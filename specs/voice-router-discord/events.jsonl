@@ -53,3 +53,5 @@
 {"event":"dispatch","ts":"2026-11-03 06:47","agent":"sdlc-tester"}
 {"event":"dispatch","ts":"2026-11-03 06:50","agent":"sdlc-coder"}
 {"event":"review_fix_cycle","ts":"2026-11-03 06:50"}
+{"event":"dispatch","ts":"2026-11-03 07:16","agent":"sdlc-reviewer"}
+{"event":"dispatch","ts":"2026-11-03 07:16","agent":"sdlc-reviewer"}
