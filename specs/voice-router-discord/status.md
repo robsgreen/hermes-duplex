@@ -112,3 +112,4 @@ PR: (none)
 - 2026-11-03 14:01 - Provider layout move verified (gate green, 719 default, 4 e2e, goldens byte-identical) and committed; scoped review of 309819d+move dispatched
 - 2026-11-03 14:39 - Round 3 review consolidated (5 medium, 4 low); user chose cancel-confirm option A; fix dispatched
 - 2026-11-03 14:51 - Round 3 fix verified (gate green, 732 default, 4 e2e; only instructions goldens changed) and committed; scoped re-review dispatched
+- 2026-11-03 14:54 - Round 3 re-review: Q1-Q9,Q11 resolved; Q12,Q13 (medium), Q14 (low) surfaced at cap; final checks pass; back at PR gate

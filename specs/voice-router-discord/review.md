@@ -122,3 +122,14 @@ Selected for fix:
 Pre-existing:
 - Q10 config.py:23,441-469; doctor.py:21-23 — provider names/xai VAD rule duplicated outside the registry (follow-up).
 Needs user decision (resolved): Q11 cancel confirmation — user chose A (2026-11-03): cancel immediately when a task is named or only one is running; ask "which one?" when several run and none is named.
+
+### Round 3 fix (92c9d65) — scoped re-review
+Both seats: Q1–Q9 resolved, preserves kept; Q11 option A implemented in all three prompts.
+Surfaced at two-round cap (observations, reason: surfaced at two-round cap):
+- Q12 medium logic introduced (both seats) — realtime/openai/prompt.py:82-83, realtime/xai/prompt.py:60-61 — "unless the user explicitly asks you to check again" lets the model re-delegate work still running (duplicate run / side effects, e.g. trades). Fix: while running, "check again" → task_status; re-delegate only after the report arrived and the user asks to check again.
+- Q13 medium logic newly exposed (Seat A) — openai/prompt.py:74-77, xai/prompt.py:49-52, gpt_live/prompt.py:28-31 — "names the task" includes by description, but task_id is only passed for spoken numbers; without task_id the session cancels the latest running task → wrong task. Fix: pass task_id whenever the model knows which task; if several run and the number is unclear, ask which one (or task_status first).
+- Q14 low logic introduced (Seat B) — cancel policy hand-written in three prompters while architecture.md says shared rules live once in blocks.py. Fix: CANCEL_POLICY in blocks.py or reword the doc.
+### Final checks (92c9d65)
+- Check: uv sync --frozen → pass; ruff check → pass; ruff format --check → pass; pyright → pass
+- Check: pytest -m "not live and not e2e" → pass (732, 2 runs); pytest -m e2e (real Hermes) → pass (4)
+Final checks: pass
