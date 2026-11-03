@@ -64,3 +64,5 @@ PR: (none)
 - 2026-11-03 04:46 - Dispatched sdlc-coder: Task 5.3
 - 2026-11-03 04:53 - Task 4.2 verified and committed. Handoffs: 4.3 transcript windows must use start_ms/end_ms (GPT-Live never final); 4.4 adapter raises RuntimeError after failed reconnect until connect() succeeds; FakeWsServer __aexit__ hangs with pending wait_for (test-infra follow-up)
 - 2026-11-03 04:53 - Dispatched sdlc-coder: Task 4.3
+- 2026-11-03 04:54 - Task 3.1 verified and committed. Backends matched by name to router.backend/fast_path; backend .name must equal config value when wiring decisions/jev in service
+- 2026-11-03 04:54 - Dispatched sdlc-coder: Task 6.1

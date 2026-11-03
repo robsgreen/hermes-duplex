@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 89 / 161 sub-tasks complete
+> **Progress:** 93 / 161 sub-tasks complete
 
 **Read before every task:**
 
@@ -489,21 +489,21 @@ tests/unit/test_router_composite.py       (modify)
 
 **Sub-tasks:**
 
-- [ ] **3.1.1** — Run fast path (knn, when enabled) and main path (configured backend) concurrently. Main-path deadline `deadline_ms` (default 300, configurable). Accept the fast path early when its top prob ≥ 0.85, margin ≥ 0.3, and it agrees with the sticky profile (cancel the main path then).
-- [ ] **3.1.2** — Fallback order when the main path misses the deadline or fails: knn if its top ≥ 0.5 → `hint` (source `hint`) when given and knn is not confident → active profile → default profile; effort `medium`. Use the main path's effort probabilities and follow-up probability when it answers.
-- [ ] **3.1.3** — Circuit breaker: after 3 consecutive main-path failures or timeouts, skip the main path for 30 s; log open and close.
-- [ ] **3.1.4** — Unit tests (stub backends with injectable delays): main path answers in time → source = backend; "Decisions timeout" (stub sleeps 1 s) → knn used, `source=knn`, latency < 350 ms; early fast-path accept; hint used only when main times out and knn is not confident; all backends fail → active profile else default, effort medium, `source=fallback`; breaker opens after 3 and closes after 30 s (injected clock); sticky rule with real `followup_prob`.
+- [x] **3.1.1** — Run fast path (knn, when enabled) and main path (configured backend) concurrently. Main-path deadline `deadline_ms` (default 300, configurable). Accept the fast path early when its top prob ≥ 0.85, margin ≥ 0.3, and it agrees with the sticky profile (cancel the main path then).
+- [x] **3.1.2** — Fallback order when the main path misses the deadline or fails: knn if its top ≥ 0.5 → `hint` (source `hint`) when given and knn is not confident → active profile → default profile; effort `medium`. Use the main path's effort probabilities and follow-up probability when it answers.
+- [x] **3.1.3** — Circuit breaker: after 3 consecutive main-path failures or timeouts, skip the main path for 30 s; log open and close.
+- [x] **3.1.4** — Unit tests (stub backends with injectable delays): main path answers in time → source = backend; "Decisions timeout" (stub sleeps 1 s) → knn used, `source=knn`, latency < 350 ms; early fast-path accept; hint used only when main times out and knn is not confident; all backends fail → active profile else default, effort medium, `source=fallback`; breaker opens after 3 and closes after 30 s (injected clock); sticky rule with real `followup_prob`.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_router_composite.py` passes with every case in 3.1.4.
-- [ ] **Requirements:**
-    - [ ] "Composite: main-path deadline default 300 ms (configurable); fast path accepted early when top prob ≥ 0.85 and margin ≥ 0.3 and consistent with sticky profile; fallback order main → knn (if top ≥ 0.5) → active profile → `general` (configurable default profile), effort default medium."
-    - [ ] "Circuit breaker: after 3 consecutive main-path failures/timeouts, skip main path for 30 s."
-    - [ ] "Pass an optional `profile_hint` from the Realtime `delegate` tool into RouteRequest; router uses it only as fallback when main path times out and knn is not confident." (router side)
-    - [ ] Scenario "Decisions timeout: stub main backend sleeps 1 s → knn result used, source=knn, latency < 350 ms".
-- [ ] **Verify:** Run the timeout test 20 times in a bash loop (`for i in $(seq 20); do uv run pytest -q -k timeout tests/unit/test_router_composite.py || break; done`) and confirm no failure.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_router_composite.py` passes with every case in 3.1.4.
+- [x] **Requirements:**
+    - [x] "Composite: main-path deadline default 300 ms (configurable); fast path accepted early when top prob ≥ 0.85 and margin ≥ 0.3 and consistent with sticky profile; fallback order main → knn (if top ≥ 0.5) → active profile → `general` (configurable default profile), effort default medium."
+    - [x] "Circuit breaker: after 3 consecutive main-path failures/timeouts, skip main path for 30 s."
+    - [x] "Pass an optional `profile_hint` from the Realtime `delegate` tool into RouteRequest; router uses it only as fallback when main path times out and knn is not confident." (router side)
+    - [x] Scenario "Decisions timeout: stub main backend sleeps 1 s → knn result used, source=knn, latency < 350 ms".
+- [x] **Verify:** Run the timeout test 20 times in a bash loop (`for i in $(seq 20); do uv run pytest -q -k timeout tests/unit/test_router_composite.py || break; done`) and confirm no failure.
 
 ---
 
