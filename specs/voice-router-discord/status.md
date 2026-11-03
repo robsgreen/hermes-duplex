@@ -118,3 +118,4 @@ PR: (none)
 - 2026-11-03 15:16 - User decision 3: A (fix all six + decision-1 work before push)
 - 2026-11-03 15:38 - User decision P7: A (split long results across appends)
 - 2026-11-03 15:39 - Decision 5: A (squash, push, draft PR after green). change-final-fixes.md written; coder dispatched
+- 2026-11-03 16:07 - Final fixes verified (gate green, 760 default x2, 4 e2e) and committed; review dispatched
