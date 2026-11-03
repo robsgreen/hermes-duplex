@@ -29,3 +29,5 @@ PR: (none)
 - 2026-11-03 01:15 - User chose v1 scope: Discord + web page
 - 2026-11-03 01:17 - User chose multi-user allowlist with per-profile permissions
 - 2026-11-03 01:34 - Success criteria confirmed; approaches presented
+- 2026-11-03 01:50 - Design checkpoint approved (+ real-Hermes e2e); writing master-plan.md; skills: master-plan-format, stop-slop
+- 2026-11-03 01:53 - master-plan.md written; refinement pass done (visual, density, stop-slop)
