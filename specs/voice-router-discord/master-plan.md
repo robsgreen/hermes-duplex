@@ -1,7 +1,7 @@
 # Master Plan: hermes-duplex (voice router over Discord and web)
 
 Created: 2026-11-03
-Status: draft
+Status: confirmed
 
 ---
 
