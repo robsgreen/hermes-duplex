@@ -13,7 +13,7 @@ PR: (none)
 - [x] **Testing**
 - [x] **Documentation**
 - [x] **Review**
-- [ ] **Wrap-up**
+- [x] **Wrap-up**
 - [ ] **PR**
 - [ ] **Archive**
 
@@ -103,3 +103,5 @@ PR: (none)
 - 2026-11-03 07:23 - Review complete: round 2 surfaced P25,P27 (medium), P26,P28,P29 (low); P7 unresolved; final checks pass. Observations + P23/P24/P30 go to PR gate
 - 2026-11-03 07:23 - Phase → Wrap-up
 - 2026-11-03 07:27 - Post-mortem written (drift 2/11/1, 7 action items); dispatching doc-keeper for retro
+- 2026-11-03 07:30 - Retro: docs/specs/202611/voice-router-discord.md; living docs changed: README.md, AGENTS.md, docs/system/architecture.md, docs/live-checklist.md; committed
+- 2026-11-03 07:30 - Phase → PR (hard gate: awaiting user)

@@ -5,11 +5,11 @@
   "harnessVersion": "0.1.0",
   "rubricVersion": "1.0",
   "specName": "voice-router-discord",
-  "generatedAt": "2026-11-03T07:23:05Z",
+  "generatedAt": "2026-11-03T07:30:46Z",
   "specStatus": "in-progress",
   "velocity": {
-    "wallClockMinutes": 390,
-    "timeToPrMinutes": null,
+    "wallClockMinutes": 397,
+    "timeToPrMinutes": 397,
     "sessionCount": 1,
     "phaseDurationsMinutes": {
       "planning": 168,
@@ -18,11 +18,11 @@
       "testing": 19,
       "review": 48,
       "houseKeeping": 5,
-      "postMortem": 0
+      "postMortem": 7
     }
   },
   "lifecycle": {
-    "furthestPhase": "Review",
+    "furthestPhase": "Wrap-up",
     "stalled": false
   },
   "throughput": {
@@ -34,8 +34,8 @@
     "hardGateInterventions": 0,
     "resumeCount": 0,
     "reviewFixCycles": 1,
-    "subAgentDispatches": 48,
-    "postMortemActionItems": 0,
+    "subAgentDispatches": 50,
+    "postMortemActionItems": 7,
     "autonomousCompletion": false,
     "postPrRevisionCycles": 0
   },
@@ -47,11 +47,11 @@
       "low": 15
     },
     "crossLensConvergence": 2,
-    "significantSpecDeviations": 0,
+    "significantSpecDeviations": 13,
     "planDrift": {
-      "high": 0,
-      "medium": 0,
-      "low": 0
+      "high": 2,
+      "medium": 11,
+      "low": 1
     },
     "postPanelReview": {
       "runs": 0,
@@ -61,23 +61,23 @@
     }
   },
   "cost": {
-    "filesCreated": 134,
+    "filesCreated": 135,
     "filesModified": 1,
     "filesDeleted": 0,
-    "linesAdded": 24567,
+    "linesAdded": 24750,
     "linesRemoved": 1
   },
   "scopeDelta": {
     "plannedFiles": 52,
-    "actualFiles": 135,
-    "deltaFiles": 83
+    "actualFiles": 136,
+    "deltaFiles": 84
   },
   "pr": {
     "prIds": [],
     "prUrls": []
   },
   "parseHealth": {
-    "eventsValid": 59,
+    "eventsValid": 62,
     "eventsMalformed": 0,
     "eventsUnknownType": 0,
     "eventsReviewRounds": 2,
@@ -85,7 +85,7 @@
     "statusMd": true,
     "taskSpec": true,
     "reviewMd": true,
-    "driftSummaryBlock": false,
+    "driftSummaryBlock": true,
     "masterPlanMd": true,
     "gitStats": true
   },
