@@ -41,3 +41,4 @@ PR: (none)
 - 2026-11-03 03:57 - Worktree created at /home/user/hermes-duplex-worktrees/voice-router-discord (no install yet: no pyproject until Task 1.1)
 - 2026-11-03 03:57 - Dispatched sdlc-coder: Task 1.1
 - 2026-11-03 04:03 - Task 1.1 verified (build gate green, 9 tests) and committed; workspace.md commands recorded; dispatched sdlc-coder: Tasks 1.3, 1.6 (parallel)
+- 2026-11-03 04:07 - Task 1.6 report: complete (30 tests). Handoff for Task 2.2: narrow Task.model→ModelChoice|None, effort→Effort; tracker takes resolved hermes_home Path. Awaiting Task 1.3 before group verify/commit
