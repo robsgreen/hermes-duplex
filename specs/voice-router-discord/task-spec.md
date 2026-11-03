@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 128 / 161 sub-tasks complete (4.3.6 MAY deferred)
+> **Progress:** 138 / 161 sub-tasks complete (4.3.6 MAY deferred)
 
 **Read before every task:**
 
@@ -448,29 +448,29 @@ tests/e2e/test_real_hermes.py                 (create)
 
 **Sub-tasks:**
 
-- [ ] **2.5.1** — `tests/fakes/fake_llm.py`: an aiohttp OpenAI-compatible stub with `GET /v1/models` and `POST /v1/chat/completions` (non-streaming JSON and `stream: true` SSE chunks ending with `data: [DONE]`). It returns deterministic text per model name (for example `stock-picker says: portfolio up 2%`), answers tool-call-free, and records every request body (model, `reasoning_effort` if present) for assertions. Runnable as a module with `--port`.
-- [ ] **2.5.2** — `tests/fixtures/hermes_home/`: templates for the default profile `.env` (API server on), profile `general` and `stock-picker` (`config.yaml` with the `fake` provider; `.env` with per-profile keys), and a `duplex.yaml` that uses provider `fake` with `script` and `record_path`, router `knn` with the Task 2.4 phrases, profile keys env names, rob (all profiles) and alex (general only), web transport on a free port, and a stock-picker model table cell for `high` and `medium`.
-- [ ] **2.5.3** — `tests/e2e/conftest.py`: mark `e2e`; skip with a clear reason when the `hermes` command is not on PATH or `import hermes_cli` fails. Fixture: create a temp `HERMES_HOME` from the templates; start `fake_llm`; run `hermes plugins validate <repo>` and assert exit 0; install the plugin from the repo path (try `hermes plugins install file://<repo>`; if refused, copy the repo into `$HERMES_HOME/plugins/hermes-duplex/` and run `hermes plugins enable hermes-duplex`); start `hermes gateway run` as a subprocess; wait until `GET /p/general/v1/models` answers 200; on teardown stop the gateway (SIGTERM, then SIGKILL after 10 s) and remove the temp home.
-- [ ] **2.5.4** — `tests/e2e/test_real_hermes.py`: connect to the in-gateway web transport with rob's token and stream voiced PCM at real-time pace while the fake script delegates "how is my portfolio doing" then "and what about Tesla". Assert:
-    - [ ] **2.5.4a** — Both runs were created on `/p/stock-picker/...` (read run ids from `$HERMES_HOME/duplex/tasks.jsonl`) and both use `session_id` `duplex-rob-stock-picker`; the decision log (or tasks JSONL) shows the second route with `sticky=true`.
-    - [ ] **2.5.4b** — `GET /p/stock-picker/v1/runs/{id}` reports `status: completed` and `runtime.requested` equal to the model table's provider and model for the routed effort. For effort: assert it from the run status if any field carries it; otherwise assert `reasoning_effort` in the fake LLM's recorded request when present, and report in the Final Report which boundary carried it.
-    - [ ] **2.5.4c** — The fake LLM received the table's model name.
-    - [ ] **2.5.4d** — The fake provider's `record_path` contains a `deliver_result` whose text holds the report template and the fake LLM's text.
-    - [ ] **2.5.4e** — With alex's token, the portfolio delegation produces a `say` refusal and no new run (no new task with a run id in `tasks.jsonl`, no new stock-picker request at the fake LLM).
-- [ ] **2.5.5** — Fill the `e2e` CI job: Python 3.14, `uv sync --frozen`, install hermes-agent at the pinned SHA into the same environment, `uv run pytest -m e2e`. If Hermes cannot install on Python 3.14 in GitHub Actions, keep the job but mark it `continue-on-error: true`, record the failure output in the Final Report, and Task 7.2 records "local only" in the README (plan Risk).
+- [x] **2.5.1** — `tests/fakes/fake_llm.py`: an aiohttp OpenAI-compatible stub with `GET /v1/models` and `POST /v1/chat/completions` (non-streaming JSON and `stream: true` SSE chunks ending with `data: [DONE]`). It returns deterministic text per model name (for example `stock-picker says: portfolio up 2%`), answers tool-call-free, and records every request body (model, `reasoning_effort` if present) for assertions. Runnable as a module with `--port`.
+- [x] **2.5.2** — `tests/fixtures/hermes_home/`: templates for the default profile `.env` (API server on), profile `general` and `stock-picker` (`config.yaml` with the `fake` provider; `.env` with per-profile keys), and a `duplex.yaml` that uses provider `fake` with `script` and `record_path`, router `knn` with the Task 2.4 phrases, profile keys env names, rob (all profiles) and alex (general only), web transport on a free port, and a stock-picker model table cell for `high` and `medium`.
+- [x] **2.5.3** — `tests/e2e/conftest.py`: mark `e2e`; skip with a clear reason when the `hermes` command is not on PATH or `import hermes_cli` fails. Fixture: create a temp `HERMES_HOME` from the templates; start `fake_llm`; run `hermes plugins validate <repo>` and assert exit 0; install the plugin from the repo path (try `hermes plugins install file://<repo>`; if refused, copy the repo into `$HERMES_HOME/plugins/hermes-duplex/` and run `hermes plugins enable hermes-duplex`); start `hermes gateway run` as a subprocess; wait until `GET /p/general/v1/models` answers 200; on teardown stop the gateway (SIGTERM, then SIGKILL after 10 s) and remove the temp home.
+- [x] **2.5.4** — `tests/e2e/test_real_hermes.py`: connect to the in-gateway web transport with rob's token and stream voiced PCM at real-time pace while the fake script delegates "how is my portfolio doing" then "and what about Tesla". Assert:
+    - [x] **2.5.4a** — Both runs were created on `/p/stock-picker/...` (read run ids from `$HERMES_HOME/duplex/tasks.jsonl`) and both use `session_id` `duplex-rob-stock-picker`; the decision log (or tasks JSONL) shows the second route with `sticky=true`.
+    - [x] **2.5.4b** — `GET /p/stock-picker/v1/runs/{id}` reports `status: completed` and `runtime.requested` equal to the model table's provider and model for the routed effort. For effort: assert it from the run status if any field carries it; otherwise assert `reasoning_effort` in the fake LLM's recorded request when present, and report in the Final Report which boundary carried it.
+    - [x] **2.5.4c** — The fake LLM received the table's model name.
+    - [x] **2.5.4d** — The fake provider's `record_path` contains a `deliver_result` whose text holds the report template and the fake LLM's text.
+    - [x] **2.5.4e** — With alex's token, the portfolio delegation produces a `say` refusal and no new run (no new task with a run id in `tasks.jsonl`, no new stock-picker request at the fake LLM).
+- [x] **2.5.5** — Fill the `e2e` CI job: Python 3.14, `uv sync --frozen`, install hermes-agent at the pinned SHA into the same environment, `uv run pytest -m e2e`. If Hermes cannot install on Python 3.14 in GitHub Actions, keep the job but mark it `continue-on-error: true`, record the failure output in the Final Report, and Task 7.2 records "local only" in the README (plan Risk).
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest -m e2e` passes locally where Hermes installs (or skips with the stated reason where it does not); `uv run pytest -m "not live and not e2e"` still passes.
-- [ ] **Requirements:**
-    - [ ] "`plugin.yaml` validates under hermes-agent @6112c2a's loader (`hermes plugins validate <path>` exits 0 in the real-Hermes e2e job)."
-    - [ ] "Installs hermes-agent at pinned SHA 6112c2a into the test env (CI job; locally skipped with reason if `hermes` not importable/installed)."
-    - [ ] "Creates temp HERMES_HOME with profiles `general` and `stock-picker`, each configured with an OpenAI-compatible custom provider pointing at `tests/fakes/fake_llm.py` …; enables API server with per-profile keys; installs this plugin from the repo path; starts `hermes gateway`."
-    - [ ] "Asserts: run created on `/p/stock-picker/...`, second task reuses session id (sticky), … requested model, provider and reasoning effort …, result announced through provider …, unauthorized person gets refusal and no run."
-    - [ ] "Gateway shut down and temp home removed after test."
-    - [ ] "the CI e2e exercises in-gateway".
-- [ ] **Verify:** After a local e2e run, confirm no `hermes gateway` process remains (`pgrep -f "hermes gateway"` prints nothing) and the temp home is gone.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest -m e2e` passes locally where Hermes installs (or skips with the stated reason where it does not); `uv run pytest -m "not live and not e2e"` still passes.
+- [x] **Requirements:**
+    - [x] "`plugin.yaml` validates under hermes-agent @6112c2a's loader (`hermes plugins validate <path>` exits 0 in the real-Hermes e2e job)."
+    - [x] "Installs hermes-agent at pinned SHA 6112c2a into the test env (CI job; locally skipped with reason if `hermes` not importable/installed)."
+    - [x] "Creates temp HERMES_HOME with profiles `general` and `stock-picker`, each configured with an OpenAI-compatible custom provider pointing at `tests/fakes/fake_llm.py` …; enables API server with per-profile keys; installs this plugin from the repo path; starts `hermes gateway`."
+    - [x] "Asserts: run created on `/p/stock-picker/...`, second task reuses session id (sticky), … requested model, provider and reasoning effort …, result announced through provider …, unauthorized person gets refusal and no run."
+    - [x] "Gateway shut down and temp home removed after test."
+    - [x] "the CI e2e exercises in-gateway".
+- [x] **Verify:** After a local e2e run, confirm no `hermes gateway` process remains (`pgrep -f "hermes gateway"` prints nothing) and the temp home is gone.
 
 ---
 
