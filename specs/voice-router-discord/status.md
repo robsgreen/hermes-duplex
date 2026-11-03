@@ -105,3 +105,5 @@ PR: (none)
 - 2026-11-03 07:27 - Post-mortem written (drift 2/11/1, 7 action items); dispatching doc-keeper for retro
 - 2026-11-03 07:30 - Retro: docs/specs/202611/voice-router-discord.md; living docs changed: README.md, AGENTS.md, docs/system/architecture.md, docs/live-checklist.md; committed
 - 2026-11-03 07:30 - Phase → PR (hard gate: awaiting user)
+- 2026-11-03 13:16 - User asked to rework voice prompts per vendor guides; research-prompting.md saved
+- 2026-11-03 13:27 - User approved per-provider prompt strategy + assistant config (scope addition at PR gate); master plan amended; change-prompts.md written; coder dispatched

@@ -618,6 +618,10 @@ transports:
 - `CompositeRouter.route(text, speaker, *, history, hint)` owns per-speaker active profile; `RouterBackend.close()` added; backends built by `router/factory.build_backends`.
 - Gateway seam: `ctx.register_platform("duplex")` (register() runs on a loop-less loader thread).
 
+#### Scope addition (user-directed at PR gate, 2026-11-03)
+
+- Voice prompts move to a strategy per provider family (`hermes_duplex/prompts/`: GPT-Live template with `<|SpawnThinking|>`; OpenAI Realtime 2.x labeled sections; xAI Grok `##` sections in xAI's order), each owning instructions, result formatting and re-seed text, bound via the provider/dialect; shared rule blocks and spoken notices stay common. New optional `assistant:` config (name, persona, backchannel). Golden-file tests per prompter. Brief: change-prompts.md; research: research-prompting.md.
+
 ### Error Handling & Edge Cases
 
 | Scenario | Expected Behavior | Recovery |
