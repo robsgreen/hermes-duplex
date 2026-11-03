@@ -39,3 +39,4 @@ PR: (none)
 - 2026-11-03 03:57 - Planner handoff: accepted admission_queued-without-run_id handling (queued→unknown on timeout) and effort assertion fallback (status field else fake-LLM payload)
 - 2026-11-03 03:57 - Phase → Implementation; skill: sdlc-implementation
 - 2026-11-03 03:57 - Worktree created at /home/user/hermes-duplex-worktrees/voice-router-discord (no install yet: no pyproject until Task 1.1)
+- 2026-11-03 03:57 - Dispatched sdlc-coder: Task 1.1

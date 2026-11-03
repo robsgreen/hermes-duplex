@@ -5,15 +5,15 @@
   "harnessVersion": "0.1.0",
   "rubricVersion": "1.0",
   "specName": "voice-router-discord",
-  "generatedAt": "2026-11-03T03:41:59Z",
-  "specStatus": "planning",
+  "generatedAt": "2026-11-03T03:57:07Z",
+  "specStatus": "in-progress",
   "velocity": {
-    "wallClockMinutes": 168,
+    "wallClockMinutes": 184,
     "timeToPrMinutes": null,
     "sessionCount": 1,
     "phaseDurationsMinutes": {
       "planning": 168,
-      "taskGeneration": 0,
+      "taskGeneration": 16,
       "implementation": 0,
       "testing": 0,
       "review": 0,
@@ -22,19 +22,19 @@
     }
   },
   "lifecycle": {
-    "furthestPhase": "Planning",
+    "furthestPhase": "Task Generation",
     "stalled": false
   },
   "throughput": {
-    "subTasksTotal": 0,
+    "subTasksTotal": 161,
     "subTasksCompleted": 0,
-    "completionRatio": 0
+    "completionRatio": 0.0000
   },
   "autonomy": {
     "hardGateInterventions": 0,
     "resumeCount": 0,
     "reviewFixCycles": 0,
-    "subAgentDispatches": 6,
+    "subAgentDispatches": 7,
     "postMortemActionItems": 0,
     "autonomousCompletion": false,
     "postPrRevisionCycles": 0
@@ -77,13 +77,13 @@
     "prUrls": []
   },
   "parseHealth": {
-    "eventsValid": 9,
+    "eventsValid": 11,
     "eventsMalformed": 0,
     "eventsUnknownType": 0,
     "eventsReviewRounds": 0,
     "eventsJsonl": true,
     "statusMd": true,
-    "taskSpec": false,
+    "taskSpec": true,
     "reviewMd": false,
     "driftSummaryBlock": false,
     "masterPlanMd": true,
