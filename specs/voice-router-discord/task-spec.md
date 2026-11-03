@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 142 / 161 sub-tasks complete (4.3.6 MAY deferred)
+> **Progress:** 146 / 161 sub-tasks complete (4.3.6 MAY deferred)
 
 **Read before every task:**
 
@@ -726,19 +726,19 @@ tests/unit/test_session_reconnect.py      (create)
 
 **Sub-tasks:**
 
-- [ ] **4.4.1** — On `Closed` (any reason except a close the session asked for) or a socket error: reconnect with backoff, at most 3 times. Re-seed with the instructions plus a summary of the last 10 transcript lines and the running tasks (`history_summary` argument of `connect`). After 3 failures, end the conversation with a spoken message through the transport if possible, then `Conversation.close(reason)`.
-- [ ] **4.4.2** — On every (re)connect, reset `t_ms` to 0 and clear the `AttributionRing`.
-- [ ] **4.4.3** — Running Hermes tasks continue across the reconnect; their progress and results go to the new provider session. A delegation ref from the old session cannot be answered there: deliver the result through `say` (live style, `delegation_id: null`) or the announcement path (tool style).
-- [ ] **4.4.4** — Unit tests with the fake provider: "Provider reconnect" (fake closes the socket mid-task → reconnect, re-seed text contains the last transcript lines and the running task, result announced on the new session); "Attribution across reconnect" (delegation offset after reconnect credited using new-session `t_ms`; ring buffer reset); 3 failures → end message and close.
+- [x] **4.4.1** — On `Closed` (any reason except a close the session asked for) or a socket error: reconnect with backoff, at most 3 times. Re-seed with the instructions plus a summary of the last 10 transcript lines and the running tasks (`history_summary` argument of `connect`). After 3 failures, end the conversation with a spoken message through the transport if possible, then `Conversation.close(reason)`.
+- [x] **4.4.2** — On every (re)connect, reset `t_ms` to 0 and clear the `AttributionRing`.
+- [x] **4.4.3** — Running Hermes tasks continue across the reconnect; their progress and results go to the new provider session. A delegation ref from the old session cannot be answered there: deliver the result through `say` (live style, `delegation_id: null`) or the announcement path (tool style).
+- [x] **4.4.4** — Unit tests with the fake provider: "Provider reconnect" (fake closes the socket mid-task → reconnect, re-seed text contains the last transcript lines and the running task, result announced on the new session); "Attribution across reconnect" (delegation offset after reconnect credited using new-session `t_ms`; ring buffer reset); 3 failures → end message and close.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_session_reconnect.py` passes.
-- [ ] **Requirements:**
-    - [ ] "On provider Closed/expired: reconnect with backoff (max 3), re-seed instructions plus a summary of the last 10 transcript lines and running tasks; running Hermes tasks continue and announce on the new session."
-    - [ ] "Time base: `InputFrame.t_ms` … reset to 0 on provider (re)connect; GPT-Live `offset_ms` is on the same timeline. The attribution ring buffer is cleared on reconnect." and "Unit test crossing a reconnect."
-- [ ] **Verify:** Read the fake provider's recorded `connect` calls in the reconnect test: two calls, the second with a non-empty `history_summary`.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_session_reconnect.py` passes.
+- [x] **Requirements:**
+    - [x] "On provider Closed/expired: reconnect with backoff (max 3), re-seed instructions plus a summary of the last 10 transcript lines and running tasks; running Hermes tasks continue and announce on the new session."
+    - [x] "Time base: `InputFrame.t_ms` … reset to 0 on provider (re)connect; GPT-Live `offset_ms` is on the same timeline. The attribution ring buffer is cleared on reconnect." and "Unit test crossing a reconnect."
+- [x] **Verify:** Read the fake provider's recorded `connect` calls in the reconnect test: two calls, the second with a non-empty `history_summary`.
 
 ---
 
