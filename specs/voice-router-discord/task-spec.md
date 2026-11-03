@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 28 / 161 sub-tasks complete (Tasks 1.1, 1.3, 1.6 done)
+> **Progress:** 45 / 161 sub-tasks complete (Tasks 1.1, 1.2, 1.3, 1.5, 1.6 done)
 
 **Read before every task:**
 
@@ -88,23 +88,23 @@ tests/fixtures/config/*.yaml          (create)
 
 **Sub-tasks:**
 
-- [ ] **1.2.1** — Define frozen dataclasses for every section in the plan's `duplex.example.yaml (shape)`: `hermes` (api_base, profile_keys_env), `provider` (name, model, voice, api_key_env, turn_detection, plus fake-only keys `script` and `record_path`), `router` (backend, fast_path, deadline_ms=300, default_profile="general", sticky_idle_s=600, control_examples), `profiles.<p>` (description, examples, models per effort as `ModelChoice(provider, model)`, default_model), `people.<name>` (discord_id, web_token_env, profiles list with `"*"` meaning all), `transports` (discord: enabled, bot_token_env; web: enabled, host=127.0.0.1, port=8765), and `audio` (pacer lead_ms=200, gate threshold, playback queue seconds=5). Define `ModelChoice` in `providers/base.py`'s interface shape; if Task 1.3 has not landed, put it in `config.py` and re-export later.
-- [ ] **1.2.2** — Resolve the config path in this order: explicit `--config` argument, env `HERMES_DUPLEX_CONFIG`, then `$HERMES_HOME/duplex.yaml` (HERMES_HOME defaults to `~/.hermes`).
-- [ ] **1.2.3** — Validate and fail closed with a `ConfigError` whose message names the offending key: unknown provider name (allowed: `gpt-live`, `openai-realtime`, `xai-realtime`, `fake`); unknown router backend (allowed: `decisions`, `jev`, `knn`); a person referencing an undefined profile; a missing env var named by any `*_env` key; xai provider with turn_detection other than `server_vad`; `ModelChoice` missing `provider` or `model`. Never infer a provider from which keys are present.
-- [ ] **1.2.4** — Secrets come only from env vars named in config. Reject a literal secret-looking value: any key named `api_key`, `token`, `bot_token`, `key`, `web_token`, or `secret` (without `_env`), and any `*_env` value that does not look like an env-var name (`^[A-Z][A-Z0-9_]*$`). Resolve secrets at load time into a separate `Secrets` object that never appears in `repr()` or logs.
-- [ ] **1.2.5** — In `people.py`, write `Person` and `PermissionChecker`: lookup by Discord id, lookup by web token (constant-time compare; one token maps to exactly one person; duplicate tokens are a `ConfigError`), `allowed(person, profile)`, and the set of allowlisted Discord ids.
-- [ ] **1.2.6** — Write `duplex.example.yaml` with every key documented in comments, the profile-by-effort table with `<fill>` placeholders and a comment that the user fills in their own models (plan Open Question), and `general` as the default profile.
-- [ ] **1.2.7** — Unit tests: one test per fail-closed case in 1.2.3 and 1.2.4 asserting the error names the key; a valid config round trip; path resolution order; `"*"` profile wildcard; token-to-person mapping; secrets absent from `repr`.
+- [x] **1.2.1** — Define frozen dataclasses for every section in the plan's `duplex.example.yaml (shape)`: `hermes` (api_base, profile_keys_env), `provider` (name, model, voice, api_key_env, turn_detection, plus fake-only keys `script` and `record_path`), `router` (backend, fast_path, deadline_ms=300, default_profile="general", sticky_idle_s=600, control_examples), `profiles.<p>` (description, examples, models per effort as `ModelChoice(provider, model)`, default_model), `people.<name>` (discord_id, web_token_env, profiles list with `"*"` meaning all), `transports` (discord: enabled, bot_token_env; web: enabled, host=127.0.0.1, port=8765), and `audio` (pacer lead_ms=200, gate threshold, playback queue seconds=5). Define `ModelChoice` in `providers/base.py`'s interface shape; if Task 1.3 has not landed, put it in `config.py` and re-export later.
+- [x] **1.2.2** — Resolve the config path in this order: explicit `--config` argument, env `HERMES_DUPLEX_CONFIG`, then `$HERMES_HOME/duplex.yaml` (HERMES_HOME defaults to `~/.hermes`).
+- [x] **1.2.3** — Validate and fail closed with a `ConfigError` whose message names the offending key: unknown provider name (allowed: `gpt-live`, `openai-realtime`, `xai-realtime`, `fake`); unknown router backend (allowed: `decisions`, `jev`, `knn`); a person referencing an undefined profile; a missing env var named by any `*_env` key; xai provider with turn_detection other than `server_vad`; `ModelChoice` missing `provider` or `model`. Never infer a provider from which keys are present.
+- [x] **1.2.4** — Secrets come only from env vars named in config. Reject a literal secret-looking value: any key named `api_key`, `token`, `bot_token`, `key`, `web_token`, or `secret` (without `_env`), and any `*_env` value that does not look like an env-var name (`^[A-Z][A-Z0-9_]*$`). Resolve secrets at load time into a separate `Secrets` object that never appears in `repr()` or logs.
+- [x] **1.2.5** — In `people.py`, write `Person` and `PermissionChecker`: lookup by Discord id, lookup by web token (constant-time compare; one token maps to exactly one person; duplicate tokens are a `ConfigError`), `allowed(person, profile)`, and the set of allowlisted Discord ids.
+- [x] **1.2.6** — Write `duplex.example.yaml` with every key documented in comments, the profile-by-effort table with `<fill>` placeholders and a comment that the user fills in their own models (plan Open Question), and `general` as the default profile.
+- [x] **1.2.7** — Unit tests: one test per fail-closed case in 1.2.3 and 1.2.4 asserting the error names the key; a valid config round trip; path resolution order; `"*"` profile wildcard; token-to-person mapping; secrets absent from `repr`.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_config.py tests/unit/test_people.py` passes, covering every fail-closed case, wildcard permissions, token mapping, and path order.
-- [ ] **Requirements:**
-    - [ ] "Unknown provider, unknown router backend, profile referenced by a person but not defined, or missing secret env var → startup error naming the key; unit tests per case."
-    - [ ] "Secrets (bot token, provider keys, per-profile API_SERVER_KEY, web tokens) come only from env vars named in config, never literal values; a literal secret-looking value is rejected."
-    - [ ] "A `people` table maps each person to a Discord user id and a web token. Each profile lists the people allowed to use it." (ATL; implemented as the per-person `profiles` list in the plan's YAML shape)
-- [ ] **Verify:** `uv run python -c "from hermes_duplex.config import load_config; load_config('duplex.example.yaml')"` with the example's env vars unset prints a `ConfigError` naming the first missing env var.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_config.py tests/unit/test_people.py` passes, covering every fail-closed case, wildcard permissions, token mapping, and path order.
+- [x] **Requirements:**
+    - [x] "Unknown provider, unknown router backend, profile referenced by a person but not defined, or missing secret env var → startup error naming the key; unit tests per case."
+    - [x] "Secrets (bot token, provider keys, per-profile API_SERVER_KEY, web tokens) come only from env vars named in config, never literal values; a literal secret-looking value is rejected."
+    - [x] "A `people` table maps each person to a Discord user id and a web token. Each profile lists the people allowed to use it." (ATL; implemented as the per-person `profiles` list in the plan's YAML shape)
+- [x] **Verify:** `uv run python -c "from hermes_duplex.config import load_config; load_config('duplex.example.yaml')"` with the example's env vars unset prints a `ConfigError` naming the first missing env var.
 
 ---
 
@@ -211,29 +211,29 @@ tests/contract/test_hermes_api_client.py      (create)
 
 **Sub-tasks:**
 
-- [ ] **1.5.1** — Implement `start_run`, `events`, `stop` with the plan's signatures and the `RunEvent` dataclass. One `aiohttp.ClientSession` per client. Omit `model`/`provider` when `ModelChoice` is `None`. A missing per-profile key env var fails the task at once with reason "not configured" (no HTTP call).
-- [ ] **1.5.2** — Map SSE events to `RunEvent.kind`: `run.queued` → queued; `run.started` → started; `tool.started`/`tool.completed`/`tool.progress` → progress (text = tool name plus preview); `message.interim` → message; `run.completed` → completed (text = `output`); `run.failed` and `run.interrupted` → failed (text = `error` or "interrupted"); `run.cancelled` → cancelled. Ignore unknown events.
-- [ ] **1.5.3** — Retry and error policy keyed on `error.code`; `session_id` is never changed on any retry:
-    - [ ] **1.5.3a** — `session_busy` (409): retry the same body and same `Idempotency-Key` after 1 s, at most 5 times; then fail with a short spoken reason.
-    - [ ] **1.5.3b** — `runtime_draining` / `storage_unavailable` (503): retry the same request and key, honoring `Retry-After`, at most 3 times; then fail.
-    - [ ] **1.5.3c** — `admission_queued` (503): accepted; never resend. Return a result that tells the caller the task is `queued`. If the body carries a `run_id`, poll `GET .../v1/runs/{id}` until it is running and then stream events. If it carries none (the @6112c2a behavior), report the task as queued with no run id; the tracker resolves it per Task 1.6.
-    - [ ] **1.5.3d** — `idempotency_key_conflict` (409): fail the task and log at error level as a bug. Any other 4xx code: fail with a short spoken reason that names the code. Connection refused: fail with reason "Hermes is unreachable".
-- [ ] **1.5.4** — Event stream resilience: when the SSE stream drops before a terminal event, re-subscribe once with `Last-Event-ID`; if that fails, poll `GET .../v1/runs/{id}` every 5 s until terminal; after 3 failed polls emit a terminal `unknown` outcome.
-- [ ] **1.5.5** — `tests/fakes/fake_hermes_api.py`: an aiohttp fake of `/p/{profile}/v1/runs`, `/v1/runs/{id}`, `/v1/runs/{id}/events`, `/v1/runs/{id}/stop`, `/p/{profile}/v1/models`, with per-profile keys and scriptable responses (busy N times, draining with Retry-After, admission_queued with or without `run_id`, conflict, 4xx, mid-stream drop). It records every request (path, headers, body). Task 2.4 reuses it.
-- [ ] **1.5.6** — Contract tests: request path/headers/body (incl. `model_options.reasoning.effort`, omitted model when `None`); `session_busy` then 202 → same `session_id` and `Idempotency-Key` resent, task runs; `admission_queued` → no resend, queued → running via poll (body with `run_id`) and queued with no run id (body without); draining honors `Retry-After`; conflict and other 4xx fail; connection refused; SSE mapping for every event name; stream drop → resubscribe → poll → `unknown` after 3 failed polls; `stop` path.
+- [x] **1.5.1** — Implement `start_run`, `events`, `stop` with the plan's signatures and the `RunEvent` dataclass. One `aiohttp.ClientSession` per client. Omit `model`/`provider` when `ModelChoice` is `None`. A missing per-profile key env var fails the task at once with reason "not configured" (no HTTP call).
+- [x] **1.5.2** — Map SSE events to `RunEvent.kind`: `run.queued` → queued; `run.started` → started; `tool.started`/`tool.completed`/`tool.progress` → progress (text = tool name plus preview); `message.interim` → message; `run.completed` → completed (text = `output`); `run.failed` and `run.interrupted` → failed (text = `error` or "interrupted"); `run.cancelled` → cancelled. Ignore unknown events.
+- [x] **1.5.3** — Retry and error policy keyed on `error.code`; `session_id` is never changed on any retry:
+    - [x] **1.5.3a** — `session_busy` (409): retry the same body and same `Idempotency-Key` after 1 s, at most 5 times; then fail with a short spoken reason.
+    - [x] **1.5.3b** — `runtime_draining` / `storage_unavailable` (503): retry the same request and key, honoring `Retry-After`, at most 3 times; then fail.
+    - [x] **1.5.3c** — `admission_queued` (503): accepted; never resend. Return a result that tells the caller the task is `queued`. If the body carries a `run_id`, poll `GET .../v1/runs/{id}` until it is running and then stream events. If it carries none (the @6112c2a behavior), report the task as queued with no run id; the tracker resolves it per Task 1.6.
+    - [x] **1.5.3d** — `idempotency_key_conflict` (409): fail the task and log at error level as a bug. Any other 4xx code: fail with a short spoken reason that names the code. Connection refused: fail with reason "Hermes is unreachable".
+- [x] **1.5.4** — Event stream resilience: when the SSE stream drops before a terminal event, re-subscribe once with `Last-Event-ID`; if that fails, poll `GET .../v1/runs/{id}` every 5 s until terminal; after 3 failed polls emit a terminal `unknown` outcome.
+- [x] **1.5.5** — `tests/fakes/fake_hermes_api.py`: an aiohttp fake of `/p/{profile}/v1/runs`, `/v1/runs/{id}`, `/v1/runs/{id}/events`, `/v1/runs/{id}/stop`, `/p/{profile}/v1/models`, with per-profile keys and scriptable responses (busy N times, draining with Retry-After, admission_queued with or without `run_id`, conflict, 4xx, mid-stream drop). It records every request (path, headers, body). Task 2.4 reuses it.
+- [x] **1.5.6** — Contract tests: request path/headers/body (incl. `model_options.reasoning.effort`, omitted model when `None`); `session_busy` then 202 → same `session_id` and `Idempotency-Key` resent, task runs; `admission_queued` → no resend, queued → running via poll (body with `run_id`) and queued with no run id (body without); draining honors `Retry-After`; conflict and other 4xx fail; connection refused; SSE mapping for every event name; stream drop → resubscribe → poll → `unknown` after 3 failed polls; `stop` path.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/contract/test_hermes_api_client.py` passes with every case in 1.5.6.
-- [ ] **Requirements:**
-    - [ ] "`POST {base}/p/{profile}/v1/runs` with `{input, session_id, model?, provider?, model_options: {reasoning: {effort}}}`, bearer key for that profile, `Idempotency-Key` = task uuid."
-    - [ ] "`session_id` = `duplex-{person}-{profile}` (stable → follow-up context)."
-    - [ ] "Stream `GET .../v1/runs/{id}/events`; map tool.started/completed and message.interim to progress, run.completed/failed/cancelled to terminal states; `POST .../stop` on cancel."
-    - [ ] Error mapping for `session_busy`, `admission_queued`, `runtime_draining`/`storage_unavailable`, `idempotency_key_conflict`, other 4xx, connection refused; "session_id is NEVER changed on retry."
-    - [ ] "Contract test with the fake API returning session_busy then success, and admission_queued."
-    - [ ] Edge case "SSE stream drops mid-run → Re-subscribe events once; else poll GET run status every 5 s until terminal → Mark `unknown` after 3 failed polls".
-- [ ] **Verify:** Read the recorded requests in the `session_busy` test and confirm all attempts carry the same `session_id` and `Idempotency-Key`.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/contract/test_hermes_api_client.py` passes with every case in 1.5.6.
+- [x] **Requirements:**
+    - [x] "`POST {base}/p/{profile}/v1/runs` with `{input, session_id, model?, provider?, model_options: {reasoning: {effort}}}`, bearer key for that profile, `Idempotency-Key` = task uuid."
+    - [x] "`session_id` = `duplex-{person}-{profile}` (stable → follow-up context)."
+    - [x] "Stream `GET .../v1/runs/{id}/events`; map tool.started/completed and message.interim to progress, run.completed/failed/cancelled to terminal states; `POST .../stop` on cancel."
+    - [x] Error mapping for `session_busy`, `admission_queued`, `runtime_draining`/`storage_unavailable`, `idempotency_key_conflict`, other 4xx, connection refused; "session_id is NEVER changed on retry."
+    - [x] "Contract test with the fake API returning session_busy then success, and admission_queued."
+    - [x] Edge case "SSE stream drops mid-run → Re-subscribe events once; else poll GET run status every 5 s until terminal → Mark `unknown` after 3 failed polls".
+- [x] **Verify:** Read the recorded requests in the `session_busy` test and confirm all attempts carry the same `session_id` and `Idempotency-Key`.
 
 ---
 
