@@ -26,3 +26,4 @@ PR: (none)
 - 2026-11-03 00:59 - Hermes research returned (research-hermes.md)
 - 2026-11-03 01:02 - Voice API research returned (research-voice-apis.md); all research in
 - 2026-11-03 01:13 - User chose own Discord bot; multi-transport (Discord, web, smart speaker) required
+- 2026-11-03 01:15 - User chose v1 scope: Discord + web page
