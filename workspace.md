@@ -40,3 +40,13 @@ NOT ESTABLISHED — no source code.
 
 ### Metrics
 NOT ESTABLISHED — no source code.
+
+## Commands (established by spec voice-router-discord, Task 1.1, 2026-11-03)
+
+- Install: `uv sync --frozen` (Python 3.14 via `uv python install 3.14`)
+- Lint/format: `uv run ruff check .` ; `uv run ruff format --check .`
+- Type-check: `uv run pyright`
+- Unit/contract tests: `uv run pytest -m "not live and not e2e"`
+- Real-Hermes e2e: `uv run pytest -m e2e` (needs hermes-agent installed)
+- Live (opt-in): `HERMES_DUPLEX_LIVE=1 uv run pytest -m live`
+- Note: repo root is the plugin dir with an `__init__.py`; `tests/conftest.py` makes pytest collect it as a plain directory. Keep it.

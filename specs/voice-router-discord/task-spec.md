@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 0 / 161 sub-tasks complete
+> **Progress:** 15 / 161 sub-tasks complete (Task 1.1 done)
 
 **Read before every task:**
 
@@ -42,32 +42,32 @@ tests/unit/test_no_hermes_internals.py (create)
 
 **Sub-tasks:**
 
-- [ ] **1.1.1** — Confirm wheel availability before you pin anything. Run `uv pip compile` (or `uv add --dry-run`) on Python 3.14 for `soxr>=0.5,<1` and `model2vec>=0.6,<1`. Record the result in the Final Report: a `cp314` (or `abi3`) wheel exists for linux x86_64 and macOS arm64, and the transitive dependencies of `model2vec` do not conflict with the Hermes pins below. If `soxr` has no wheel, stop and report: the plan's fallback is `numpy`-based polyphase resampling, and Task 5.1 changes.
-- [ ] **1.1.2** — Write `pyproject.toml`: project `hermes-duplex`, version `0.1.0`, `requires-python = ">=3.14,<3.15"`, license MIT. Dependencies, each with an upper bound and each range containing the Hermes core pin from hermes-agent @6112c2a `pyproject.toml`:
-    - [ ] **1.1.2a** — `discord.py[voice]==2.7.1` (brings `davey`), `aiohttp>=3.14.5,<4`, `websockets>=15.0.1,<16`, `numpy>=2.5,<3`, `pyyaml>=6,<7`, `soxr>=0.5,<1`, `model2vec>=0.6,<1`. No `openai` dependency (Hermes pins `openai==2.54.0`; GPT-Live needs ≥3.42).
-    - [ ] **1.1.2b** — Copy Hermes's `[tool.uv] override-dependencies` entry `"pynacl>=1.6,<1.7"`: discord.py 2.7.1 pins `pynacl<1.6`, and Hermes overrides it. Without the override, the lock does not match the gateway's environment.
-    - [ ] **1.1.2c** — Dev dependency group: `pytest` (Hermes uses 9.1.1), `pytest-asyncio`, `ruff`, `pyright`. `[project.scripts] hermes-duplex = "hermes_duplex.cli:main"` (the module arrives in Task 2.4; add a stub `main()` that prints usage and exits 2 so the entry point resolves now).
-    - [ ] **1.1.2d** — Tool config: pytest `testpaths = ["tests"]`, `addopts = "--import-mode=importlib"`, `asyncio_mode = "auto"`, markers `e2e` and `live`; ruff (target py314, line length 110); pyright `include = ["hermes_duplex", "tests"]`, `pythonVersion = "3.14"`, standard mode.
-- [ ] **1.1.3** — Run `uv lock` and commit `uv.lock`.
-- [ ] **1.1.4** — Write `plugin.yaml` (Hermes manifest v2). Use only fields Hermes @6112c2a knows (`hermes_cli/plugins_manifest.py` `_KNOWN_MANIFEST_FIELDS`); unknown fields log a warning under v2. Content: `name: hermes-duplex`, `version: 0.1.0`, `manifest_version: 2`, `api_version: 1` (Hermes accepts any integer ≥ 1; `None` means current), `kind: standalone`, `description`, `author`, `license: MIT`, `provides_tools: []`, `provides_hooks: []`, `requires_env: []`. `hermes plugins validate` fails when `register()` registers a hook or tool that is not declared in `provides_hooks`/`provides_tools`, so keep the declared lists equal to what `register()` registers. Slash and CLI commands have no manifest field; do not add `provides_commands`.
-- [ ] **1.1.5** — Write root `__init__.py` with only `from .hermes_duplex.plugin import register`, and `hermes_duplex/plugin.py` with a `register(ctx)` that does nothing yet. `register()` must not raise under Hermes's validation probe, which passes a recording context whose unknown attributes raise `AttributeError`.
-- [ ] **1.1.6** — Write `tests/unit/test_no_hermes_internals.py`: a grep-based test that fails when any file under `hermes_duplex/` imports `gateway`, `hermes_cli`, `hermes_constants`, `agent`, `tools`, `plugins`, or `run_agent` (plan Requirement "register(ctx) only uses documented ctx methods"). Write `tests/unit/test_packaging.py`: assert `plugin.yaml` parses, holds the fields above, its `version` equals `pyproject.toml`'s version, and `openai` is absent from `pyproject.toml` dependencies and from `uv.lock` packages.
-- [ ] **1.1.7** — Write `.github/workflows/ci.yml` with these jobs on `ubuntu-latest`, using `astral-sh/setup-uv` and Python 3.14:
-    - [ ] **1.1.7a** — `check`: `uv sync --frozen`; `uv run ruff check .`; `uv run ruff format --check .`; `uv run pyright`; `uv run pytest -m "not live and not e2e"`.
-    - [ ] **1.1.7b** — `deps-compat`: download hermes-agent `pyproject.toml` at `6112c2adb9e11f69734a29be9d2696f345ffa06a`, turn its exact `==` pins (base dependencies plus the `messaging` extra) into a constraints file, and run `uv pip compile pyproject.toml -c <constraints> --override <file with pynacl>=1.6,<1.7> --python-version 3.14`. The job fails on any conflict, and fails when `openai` appears in the resolved output.
-    - [ ] **1.1.7c** — Leave a commented placeholder for the `e2e` job; Task 2.5 fills it.
-- [ ] **1.1.8** — Write `LICENSE` (MIT, copyright holder from the repo owner `robsgreen`, 2026) and `.gitignore` (`.venv/`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`, `dist/`).
+- [x] **1.1.1** — Confirm wheel availability before you pin anything. Run `uv pip compile` (or `uv add --dry-run`) on Python 3.14 for `soxr>=0.5,<1` and `model2vec>=0.6,<1`. Record the result in the Final Report: a `cp314` (or `abi3`) wheel exists for linux x86_64 and macOS arm64, and the transitive dependencies of `model2vec` do not conflict with the Hermes pins below. If `soxr` has no wheel, stop and report: the plan's fallback is `numpy`-based polyphase resampling, and Task 5.1 changes.
+- [x] **1.1.2** — Write `pyproject.toml`: project `hermes-duplex`, version `0.1.0`, `requires-python = ">=3.14,<3.15"`, license MIT. Dependencies, each with an upper bound and each range containing the Hermes core pin from hermes-agent @6112c2a `pyproject.toml`:
+    - [x] **1.1.2a** — `discord.py[voice]==2.7.1` (brings `davey`), `aiohttp>=3.14.5,<4`, `websockets>=15.0.1,<16`, `numpy>=2.5,<3`, `pyyaml>=6,<7`, `soxr>=0.5,<1`, `model2vec>=0.6,<1`. No `openai` dependency (Hermes pins `openai==2.54.0`; GPT-Live needs ≥3.42).
+    - [x] **1.1.2b** — Copy Hermes's `[tool.uv] override-dependencies` entry `"pynacl>=1.6,<1.7"`: discord.py 2.7.1 pins `pynacl<1.6`, and Hermes overrides it. Without the override, the lock does not match the gateway's environment.
+    - [x] **1.1.2c** — Dev dependency group: `pytest` (Hermes uses 9.1.1), `pytest-asyncio`, `ruff`, `pyright`. `[project.scripts] hermes-duplex = "hermes_duplex.cli:main"` (the module arrives in Task 2.4; add a stub `main()` that prints usage and exits 2 so the entry point resolves now).
+    - [x] **1.1.2d** — Tool config: pytest `testpaths = ["tests"]`, `addopts = "--import-mode=importlib"`, `asyncio_mode = "auto"`, markers `e2e` and `live`; ruff (target py314, line length 110); pyright `include = ["hermes_duplex", "tests"]`, `pythonVersion = "3.14"`, standard mode.
+- [x] **1.1.3** — Run `uv lock` and commit `uv.lock`.
+- [x] **1.1.4** — Write `plugin.yaml` (Hermes manifest v2). Use only fields Hermes @6112c2a knows (`hermes_cli/plugins_manifest.py` `_KNOWN_MANIFEST_FIELDS`); unknown fields log a warning under v2. Content: `name: hermes-duplex`, `version: 0.1.0`, `manifest_version: 2`, `api_version: 1` (Hermes accepts any integer ≥ 1; `None` means current), `kind: standalone`, `description`, `author`, `license: MIT`, `provides_tools: []`, `provides_hooks: []`, `requires_env: []`. `hermes plugins validate` fails when `register()` registers a hook or tool that is not declared in `provides_hooks`/`provides_tools`, so keep the declared lists equal to what `register()` registers. Slash and CLI commands have no manifest field; do not add `provides_commands`.
+- [x] **1.1.5** — Write root `__init__.py` with only `from .hermes_duplex.plugin import register`, and `hermes_duplex/plugin.py` with a `register(ctx)` that does nothing yet. `register()` must not raise under Hermes's validation probe, which passes a recording context whose unknown attributes raise `AttributeError`.
+- [x] **1.1.6** — Write `tests/unit/test_no_hermes_internals.py`: a grep-based test that fails when any file under `hermes_duplex/` imports `gateway`, `hermes_cli`, `hermes_constants`, `agent`, `tools`, `plugins`, or `run_agent` (plan Requirement "register(ctx) only uses documented ctx methods"). Write `tests/unit/test_packaging.py`: assert `plugin.yaml` parses, holds the fields above, its `version` equals `pyproject.toml`'s version, and `openai` is absent from `pyproject.toml` dependencies and from `uv.lock` packages.
+- [x] **1.1.7** — Write `.github/workflows/ci.yml` with these jobs on `ubuntu-latest`, using `astral-sh/setup-uv` and Python 3.14:
+    - [x] **1.1.7a** — `check`: `uv sync --frozen`; `uv run ruff check .`; `uv run ruff format --check .`; `uv run pyright`; `uv run pytest -m "not live and not e2e"`.
+    - [x] **1.1.7b** — `deps-compat`: download hermes-agent `pyproject.toml` at `6112c2adb9e11f69734a29be9d2696f345ffa06a`, turn its exact `==` pins (base dependencies plus the `messaging` extra) into a constraints file, and run `uv pip compile pyproject.toml -c <constraints> --override <file with pynacl>=1.6,<1.7> --python-version 3.14`. The job fails on any conflict, and fails when `openai` appears in the resolved output.
+    - [x] **1.1.7c** — Leave a commented placeholder for the `e2e` job; Task 2.5 fills it.
+- [x] **1.1.8** — Write `LICENSE` (MIT, copyright holder from the repo owner `robsgreen`, 2026) and `.gitignore` (`.venv/`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`, `dist/`).
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest -m "not live and not e2e"` passes; new tests cover manifest fields, version match, `openai` absence, and the internal-import grep (prove the grep fails on a temporary file that contains `import gateway`, then delete it).
-- [ ] **Requirements:**
-    - [ ] "A CI job resolves the package's dependencies with hermes-agent @6112c2a's pins as constraints and fails on conflict; `openai` is absent from the dependency tree."
-    - [ ] "a test asserts no `import gateway`/`hermes_cli` internals in the package (grep-based)."
-    - [ ] "`uv sync --frozen`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run pyright`, `uv run pytest -m "not live"` all pass locally and in `.github/workflows/ci.yml`."
-    - [ ] Dependency ranges contain Hermes core's exact pins; `soxr`/`model2vec` cp314 wheel check recorded.
-- [ ] **Verify:** `grep -n openai uv.lock` prints nothing; run the `deps-compat` job's commands locally and confirm exit 0.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest -m "not live and not e2e"` passes; new tests cover manifest fields, version match, `openai` absence, and the internal-import grep (prove the grep fails on a temporary file that contains `import gateway`, then delete it).
+- [x] **Requirements:**
+    - [x] "A CI job resolves the package's dependencies with hermes-agent @6112c2a's pins as constraints and fails on conflict; `openai` is absent from the dependency tree."
+    - [x] "a test asserts no `import gateway`/`hermes_cli` internals in the package (grep-based)."
+    - [x] "`uv sync --frozen`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run pyright`, `uv run pytest -m "not live"` all pass locally and in `.github/workflows/ci.yml`."
+    - [x] Dependency ranges contain Hermes core's exact pins; `soxr`/`model2vec` cp314 wheel check recorded.
+- [x] **Verify:** `grep -n openai uv.lock` prints nothing; run the `deps-compat` job's commands locally and confirm exit 0.
 
 ---
 
