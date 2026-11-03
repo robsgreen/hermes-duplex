@@ -10,7 +10,7 @@ PR: (none)
 - [x] **Planning**
 - [x] **Task Generation**
 - [x] **Implementation**
-- [ ] **Testing**
+- [x] **Testing**
 - [ ] **Documentation**
 - [ ] **Review**
 - [ ] **Wrap-up**
@@ -89,3 +89,5 @@ PR: (none)
 - 2026-11-03 06:11 - Task 6.2 verified (full gate green, 633 default tests, 2 real-Hermes e2e) and committed. Implementation complete: all tasks done except 4.3.6 (MAY, deferred) and 7.1.1 (spoken WAVs pending user OPENAI_API_KEY). Master plan amended with interface changes.
 - 2026-11-03 06:11 - Phase → Testing
 - 2026-11-03 06:11 - Skill: sdlc-testing; dispatched sdlc-tester
+- 2026-11-03 06:30 - Testing verified independently: gate green, 646 default tests, 4 real-Hermes e2e, live skipped (no key); test-spec.md fully checked; committed. REVIEW NOTES: (1) plan MUST 'Service stop cancels all tasks' vs code leaves Hermes runs running on stop; (2) unused prompts HERMES_UNREACHABLE/not_configured; (3) dispatch/hermes_api.py absolute imports vs relative-import rule; (4) workspace.md capabilities table stale
+- 2026-11-03 06:30 - Phase → Documentation
