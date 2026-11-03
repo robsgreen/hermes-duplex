@@ -88,3 +88,4 @@ PR: (none)
 - 2026-11-03 06:05 - Task 7.1 partial committed: live tier written, skips without keys/fixtures; 7.1.1 spoken WAVs pending user OPENAI_API_KEY. No live run passed (none faked). Docs follow-up: mention make_audio_fixtures + HERMES_DUPLEX_LIVE_* vars (Documentation phase)
 - 2026-11-03 06:11 - Task 6.2 verified (full gate green, 633 default tests, 2 real-Hermes e2e) and committed. Implementation complete: all tasks done except 4.3.6 (MAY, deferred) and 7.1.1 (spoken WAVs pending user OPENAI_API_KEY). Master plan amended with interface changes.
 - 2026-11-03 06:11 - Phase → Testing
+- 2026-11-03 06:11 - Skill: sdlc-testing; dispatched sdlc-tester
