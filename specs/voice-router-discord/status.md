@@ -70,3 +70,7 @@ PR: (none)
 - 2026-11-03 05:00 - Dispatched sdlc-coder: Task 2.5
 - 2026-11-03 05:00 - Task 5.3 verified and committed. Handoff 5.4: DuplexAudioSource(audio.playback_queue_s); flush_playback = source.flush() + pacer.drop(), return source ms
 - 2026-11-03 05:00 - Dispatched sdlc-coder: Task 5.4 (2.5 dispatch logged earlier; sent now)
+- 2026-11-03 05:02 - Task 3.3 verified and committed. Known limitation for docs: Cloudflare Workers AI Clef needs path override + envelope unwrap; jev base_url works only for hosts serving plain /v1/systemone. Follow-up: dedupe HTTP plumbing decisions/jev (optional)
+- 2026-11-03 05:02 - Dispatched sdlc-coder: Task 3.4 (+ router backend factory with close(); service.py wiring deferred until 5.4 lands)
+- 2026-11-03 05:02 - Task 6.1 verified (3 stable runs) and committed. Handoffs 6.2: add send_function_output to RealtimeProvider Protocol (no-op GPT-Live, recorded in Fake); receipt without number or reserve tracker entry; answer each call once. 6.3: XAI Dialect, check metadata echo. Suggest provider.transcription_model key
+- 2026-11-03 05:02 - Dispatched sdlc-coder: Task 6.3

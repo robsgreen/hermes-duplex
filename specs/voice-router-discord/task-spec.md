@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 104 / 161 sub-tasks complete
+> **Progress:** 113 / 161 sub-tasks complete
 
 **Read before every task:**
 
@@ -556,18 +556,18 @@ tests/contract/test_router_jev.py         (create)
 
 **Sub-tasks:**
 
-- [ ] **3.3.1** — Confirm the System One wire shape from the official docs and record the doc URL and the shape in the module docstring. Keep the wire mapping in two small functions (build request, parse response) so a shape change touches one place.
-- [ ] **3.3.2** — Ask the same three questions as Task 3.2 (profile choice incl. `_control`, effort choice, follow-up predicate) and map the answers to `BackendResult`. `base_url`, model, and key env var come from config. No `typesafe-sdk` dependency.
-- [ ] **3.3.3** — Contract tests against an aiohttp fake that serves the documented shape: request shape; mapping; non-default `base_url`; 5xx; deadline.
+- [x] **3.3.1** — Confirm the System One wire shape from the official docs and record the doc URL and the shape in the module docstring. Keep the wire mapping in two small functions (build request, parse response) so a shape change touches one place.
+- [x] **3.3.2** — Ask the same three questions as Task 3.2 (profile choice incl. `_control`, effort choice, follow-up predicate) and map the answers to `BackendResult`. `base_url`, model, and key env var come from config. No `typesafe-sdk` dependency.
+- [x] **3.3.3** — Contract tests against an aiohttp fake that serves the documented shape: request shape; mapping; non-default `base_url`; 5xx; deadline.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/contract/test_router_jev.py` passes with every case in 3.3.3.
-- [ ] **Requirements:**
-    - [ ] "Backends: knn (local), decisions (OpenAI), jev (TypeSafe; base_url configurable). Selected by config; `knn` always runs as fast path when enabled."
-    - [ ] "Jev backend uses aiohttp directly (no typesafe-sdk)."
-- [ ] **Verify:** The module docstring names the docs URL used and the request/response shape; `grep -n typesafe pyproject.toml` prints nothing.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/contract/test_router_jev.py` passes with every case in 3.3.3.
+- [x] **Requirements:**
+    - [x] "Backends: knn (local), decisions (OpenAI), jev (TypeSafe; base_url configurable). Selected by config; `knn` always runs as fast path when enabled."
+    - [x] "Jev backend uses aiohttp directly (no typesafe-sdk)."
+- [x] **Verify:** The module docstring names the docs URL used and the request/response shape; `grep -n typesafe pyproject.toml` prints nothing.
 
 ---
 
@@ -901,23 +901,23 @@ tests/contract/test_realtime_adapter.py               (create)
 
 **Sub-tasks:**
 
-- [ ] **6.1.1** — Capabilities (openai dialect): 24 kHz in/out, supports_truncate true, supports_out_of_band_response true, emits_speech_events true, delegation_style `"tool"`, max_session_s 3600. `connect()` sends `session.update` with turn detection from config (`server_vad` or `semantic_vad`), `interrupt_response: true`, and the three tools: `delegate(task: string, profile_hint?: string)`, `task_status(task_id?: integer)`, `cancel_task(task_id?: integer)`.
-- [ ] **6.1.2** — Map events: speech started/stopped → `SpeechStarted`/`SpeechStopped`; output audio delta → `OutputAudio(pcm, item_id)`; `response.done` → `OutputDone`; transcripts → `InputTranscript`/`OutputTranscript`; `delegate` call → `DelegationRequested(id=call_id, offset_ms=<t_ms at arrival>, target="tool", tool_args)`; `task_status`/`cancel_task` calls → `DelegationRequested` with the tool name in `tool_args` so the session handles them locally; `error` → `ProviderError`; close → `Closed`.
-- [ ] **6.1.3** — The `delegate` receipt: the adapter exposes `send_function_output(call_id, payload)`; the session sends `{"status":"started","task_id":N}` within 50 ms of receiving the call, before routing completes.
-- [ ] **6.1.4** — `truncate(item_id, audio_end_ms)` sends `conversation.item.truncate`. `deliver_result` and `say` send an out-of-band `response.create` (conversation none, tools []) when supported, else the system-item fallback with `tool_choice: "none"` and the later `conversation.item.delete`.
-- [ ] **6.1.5** — Register `openai-realtime`.
-- [ ] **6.1.6** — Contract tests over `fake_ws_server`: `session.update` payload (pcm 24 kHz, turn detection, interrupt_response, three tools); event mapping; "Realtime delegate tool" (function output with task_id < 50 ms after the call); truncate payload; announcement in both modes (out-of-band and fallback incl. delete).
+- [x] **6.1.1** — Capabilities (openai dialect): 24 kHz in/out, supports_truncate true, supports_out_of_band_response true, emits_speech_events true, delegation_style `"tool"`, max_session_s 3600. `connect()` sends `session.update` with turn detection from config (`server_vad` or `semantic_vad`), `interrupt_response: true`, and the three tools: `delegate(task: string, profile_hint?: string)`, `task_status(task_id?: integer)`, `cancel_task(task_id?: integer)`.
+- [x] **6.1.2** — Map events: speech started/stopped → `SpeechStarted`/`SpeechStopped`; output audio delta → `OutputAudio(pcm, item_id)`; `response.done` → `OutputDone`; transcripts → `InputTranscript`/`OutputTranscript`; `delegate` call → `DelegationRequested(id=call_id, offset_ms=<t_ms at arrival>, target="tool", tool_args)`; `task_status`/`cancel_task` calls → `DelegationRequested` with the tool name in `tool_args` so the session handles them locally; `error` → `ProviderError`; close → `Closed`.
+- [x] **6.1.3** — The `delegate` receipt: the adapter exposes `send_function_output(call_id, payload)`; the session sends `{"status":"started","task_id":N}` within 50 ms of receiving the call, before routing completes.
+- [x] **6.1.4** — `truncate(item_id, audio_end_ms)` sends `conversation.item.truncate`. `deliver_result` and `say` send an out-of-band `response.create` (conversation none, tools []) when supported, else the system-item fallback with `tool_choice: "none"` and the later `conversation.item.delete`.
+- [x] **6.1.5** — Register `openai-realtime`.
+- [x] **6.1.6** — Contract tests over `fake_ws_server`: `session.update` payload (pcm 24 kHz, turn detection, interrupt_response, three tools); event mapping; "Realtime delegate tool" (function output with task_id < 50 ms after the call); truncate payload; announcement in both modes (out-of-band and fallback incl. delete).
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/contract/test_realtime_adapter.py` passes.
-- [ ] **Requirements:**
-    - [ ] "session.update: pcm 24 kHz, turn_detection from config (openai: server_vad|semantic_vad; …), interrupt_response true, tools [delegate, task_status, cancel_task]."
-    - [ ] "`delegate(task, profile_hint?)` returns `{"status":"started","task_id":N}` within 50 ms of receiving the call (before routing completes)."
-    - [ ] "Announcements: out-of-band `response.create` with `conversation:"none"`, tools [] when supported; else system item framed as data + response.create(tool_choice none) + conversation.item.delete. Contract test for both."
-    - [ ] "Realtime family sets emits_speech_events=true."
-- [ ] **Verify:** Print the measured receipt latency in the delegate test; it is under 50 ms.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/contract/test_realtime_adapter.py` passes.
+- [x] **Requirements:**
+    - [x] "session.update: pcm 24 kHz, turn_detection from config (openai: server_vad|semantic_vad; …), interrupt_response true, tools [delegate, task_status, cancel_task]."
+    - [x] "`delegate(task, profile_hint?)` returns `{"status":"started","task_id":N}` within 50 ms of receiving the call (before routing completes)."
+    - [x] "Announcements: out-of-band `response.create` with `conversation:"none"`, tools [] when supported; else system item framed as data + response.create(tool_choice none) + conversation.item.delete. Contract test for both."
+    - [x] "Realtime family sets emits_speech_events=true."
+- [x] **Verify:** Print the measured receipt latency in the delegate test; it is under 50 ms.
 
 ---
 
