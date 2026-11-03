@@ -82,3 +82,5 @@ PR: (none)
 - 2026-11-03 05:23 - Task 3.4 (+factory scope) verified and committed; Phase 3 complete. knn alone 0.825, composite 0.913 accuracy on 103 phrases (real potion-base-8M). Dispatching: Task 6.4 (doctor) + wiring follow-up (service.py build_backends, close in stop, gate_threshold_dbfs)
 - 2026-11-03 05:28 - Task 4.4 verified and committed; Phase 4 complete (4.3.6 deferred). Handoffs folded into 6.2: announcement queue covers say path; cap consecutive short-lived provider sessions; fix InputFrame.t_ms docstring in transports/base.py
 - 2026-11-03 05:28 - Dispatched sdlc-coder: Task 6.2 (+ folded handoffs)
+- 2026-11-03 05:34 - Task 6.4 + service wiring verified and committed (decisions/jev selectable; backends closed on stop; gate threshold passed). e2e 2 passed per coder
+- 2026-11-03 05:34 - Dispatched sdlc-coder: Tasks 7.1, 7.2

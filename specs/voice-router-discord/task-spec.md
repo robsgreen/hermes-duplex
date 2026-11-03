@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 146 / 161 sub-tasks complete (4.3.6 MAY deferred)
+> **Progress:** 149 / 161 sub-tasks complete (4.3.6 MAY deferred)
 
 **Read before every task:**
 
@@ -1004,18 +1004,18 @@ tests/unit/test_doctor.py             (create)
 
 **Sub-tasks:**
 
-- [ ] **6.4.1** — `hermes-duplex doctor [--config PATH]` and `hermes duplex doctor`: check config validity; every named env var present; each profile's API server reachable with its key (`GET {api_base}/p/<p>/v1/models` → 200); provider key auth with a cheap call (OpenAI: `GET https://api.openai.com/v1/models`; xAI: `GET https://api.x.ai/v1/models`); Discord token login (`discord.Client.login` then close) when Discord is enabled.
-- [ ] **6.4.2** — Print a pass/fail table; exit 0 when all pass, 1 otherwise. Never print secret values.
-- [ ] **6.4.3** — Unit tests with the fake Hermes API and stubbed HTTP/Discord: all pass; missing env var; wrong profile key (401); unreachable Hermes; secrets absent from output.
+- [x] **6.4.1** — `hermes-duplex doctor [--config PATH]` and `hermes duplex doctor`: check config validity; every named env var present; each profile's API server reachable with its key (`GET {api_base}/p/<p>/v1/models` → 200); provider key auth with a cheap call (OpenAI: `GET https://api.openai.com/v1/models`; xAI: `GET https://api.x.ai/v1/models`); Discord token login (`discord.Client.login` then close) when Discord is enabled.
+- [x] **6.4.2** — Print a pass/fail table; exit 0 when all pass, 1 otherwise. Never print secret values.
+- [x] **6.4.3** — Unit tests with the fake Hermes API and stubbed HTTP/Discord: all pass; missing env var; wrong profile key (401); unreachable Hermes; secrets absent from output.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_doctor.py` passes.
-- [ ] **Requirements:**
-    - [ ] SHOULD "Checks config validity, env vars present, API server reachable per profile (GET /p/<p>/v1/models), provider key auth (cheap call), Discord token login, prints pass/fail table."
-    - [ ] Edge case "Profile key env missing at runtime → `doctor` reports it".
-- [ ] **Verify:** Run `uv run hermes-duplex doctor --config duplex.example.yaml` with no env vars set; it prints failed rows and exits 1.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_doctor.py` passes.
+- [x] **Requirements:**
+    - [x] SHOULD "Checks config validity, env vars present, API server reachable per profile (GET /p/<p>/v1/models), provider key auth (cheap call), Discord token login, prints pass/fail table."
+    - [x] Edge case "Profile key env missing at runtime → `doctor` reports it".
+- [x] **Verify:** Run `uv run hermes-duplex doctor --config duplex.example.yaml` with no env vars set; it prints failed rows and exits 1.
 
 ---
 
