@@ -83,3 +83,5 @@
 {"event":"gate_prompted","ts":"2026-11-03 17:51","gate":"pr"}
 {"event":"gate_confirmed","ts":"2026-11-03 17:51","gate":"pr"}
 {"event":"pr_created","ts":"2026-11-03 17:53","prId":"#1","prUrl":"https://github.com/robsgreen/hermes-duplex/pull/1"}
+{"event":"user_intervention","ts":"2026-11-03 23:59","reason":"topic-names-instead-of-numbers"}
+{"event":"dispatch","ts":"2026-11-03 23:59","agent":"sdlc-coder"}
