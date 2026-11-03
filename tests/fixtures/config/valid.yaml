@@ -1,0 +1,56 @@
+# Every section and key, with values that differ from the defaults.
+hermes:
+  api_base: http://127.0.0.1:8642/
+  profile_keys_env: {general: HERMES_KEY_GENERAL, stock-picker: HERMES_KEY_STOCKS}
+provider:
+  name: openai-realtime
+  model: gpt-realtime
+  voice: marin
+  api_key_env: OPENAI_API_KEY
+  turn_detection: {type: semantic_vad, eagerness: auto}
+router:
+  backend: knn
+  fast_path: knn
+  deadline_ms: 250
+  default_profile: general
+  sticky_idle_s: 300
+  control_examples:
+    status: ["where are we"]
+    cancel: ["forget it"]
+  decisions:
+    api_key_env: OPENAI_API_KEY
+    model: gpt-6-luna-preview
+    base_url: https://decisions.example/v1/
+  jev:
+    api_key_env: OPENAI_API_KEY
+    model: jev-preview
+    base_url: https://jev.example/
+profiles:
+  stock-picker:
+    description: Portfolio, holdings, stock research, trades
+    examples: ["how's my portfolio", "should I buy NVDA"]
+    models:
+      medium: {provider: openai, model: gpt-x-mini}
+      high: {provider: anthropic, model: claude-x}
+    default_model: {provider: openai, model: gpt-x}
+  general:
+    description: Anything else
+    examples: ["what's the weather"]
+people:
+  rob: {discord_id: "123", web_token_env: DUPLEX_TOKEN_ROB, profiles: ["*"]}
+  alex: {discord_id: 456, web_token_env: DUPLEX_TOKEN_ALEX, profiles: [general]}
+transports:
+  discord: {enabled: true, bot_token_env: DUPLEX_DISCORD_TOKEN}
+  web: {enabled: true, host: 0.0.0.0, port: 9000}
+audio:
+  pacer_lead_ms: 120
+  gate_threshold_dbfs: -40
+  playback_queue_s: 2.5
+tasks:
+  restore_max_age_h: 6.5
+assistant:
+  name: Iris
+  persona: |
+    Be dry-witted, like a concierge for the household.
+    Keep it brisk.
+  backchannel: frequent

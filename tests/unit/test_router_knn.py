@@ -1,0 +1,110 @@
+"""KnnBackend: phrase matching over injected embeddings, ``_control`` intents, and off-loop embedding."""
+
+import threading
+from collections.abc import Sequence
+
+import numpy as np
+import numpy.typing as npt
+import pytest
+
+from hermes_duplex.config import CONTROL_PROFILE, ControlExamples
+from hermes_duplex.router.base import ProfileSpec, RouteRequest, control_spec
+from hermes_duplex.router.knn import KnnBackend
+from tests.fakes.fake_embedder import fake_embed
+
+PROFILES = (
+    ProfileSpec(
+        name="stock-picker",
+        description="Portfolio, holdings, stock research, trades",
+        examples=("how's my portfolio", "should I buy NVDA", "what did TSLA do today"),
+    ),
+    ProfileSpec(
+        name="general", description="Anything else", examples=("what's the weather", "set a reminder")
+    ),
+)
+
+
+def _request(text: str) -> RouteRequest:
+    return RouteRequest(text=text, speaker="rob", history=(), active_profile=None, hint=None)
+
+
+async def _configured(extra: ControlExamples | None = None) -> KnnBackend:
+    backend = KnnBackend(fake_embed)
+    await backend.configure([*PROFILES, control_spec(extra or ControlExamples())])
+    return backend
+
+
+async def test_routes_a_portfolio_phrase_to_stock_picker() -> None:
+    backend = await _configured()
+
+    result = await backend.classify(_request("how is my portfolio doing"), deadline_ms=300)
+
+    assert max(result.profile_probs, key=lambda name: result.profile_probs[name]) == "stock-picker"
+    assert result.profile_probs["stock-picker"] > 0.9
+    assert set(result.profile_probs) == {"stock-picker", "general", CONTROL_PROFILE}
+    assert sum(result.profile_probs.values()) == pytest.approx(1.0)
+    assert result.effort_probs is None
+    assert result.followup_prob is None
+    assert result.backend == "knn"
+    assert result.latency_ms >= 0
+
+
+async def test_matches_the_description_as_well_as_the_examples() -> None:
+    backend = await _configured()
+
+    result = await backend.classify(_request("research on my holdings"), deadline_ms=300)
+
+    assert result.profile_probs["stock-picker"] > 0.9
+
+
+@pytest.mark.parametrize(
+    ("text", "intent"),
+    [("any updates on that", "status"), ("what are you working on", "status"), ("cancel that", "cancel")],
+)
+async def test_control_phrases_route_to_control_with_their_intent(text: str, intent: str) -> None:
+    backend = await _configured()
+
+    result = await backend.classify(_request(text), deadline_ms=300)
+
+    assert result.profile_probs[CONTROL_PROFILE] > 0.9
+    assert result.control_intent == intent
+
+
+async def test_config_control_examples_extend_the_builtin_ones() -> None:
+    backend = await _configured(ControlExamples(cancel=("abort the job",)))
+
+    result = await backend.classify(_request("abort the job"), deadline_ms=300)
+
+    assert result.profile_probs[CONTROL_PROFILE] > 0.9
+    assert result.control_intent == "cancel"
+
+
+async def test_a_request_with_no_known_words_is_not_confident() -> None:
+    backend = await _configured()
+
+    result = await backend.classify(_request("zxq"), deadline_ms=300)
+
+    assert max(result.profile_probs.values()) == pytest.approx(1 / 3)
+
+
+async def test_classify_before_configure_raises() -> None:
+    with pytest.raises(RuntimeError, match="before configure"):
+        await KnnBackend(fake_embed).classify(_request("hi"), deadline_ms=300)
+
+
+async def test_embeds_off_the_event_loop_thread_and_only_once_per_phrase_set() -> None:
+    loop_thread = threading.get_ident()
+    calls: list[tuple[int, int]] = []
+
+    def embed(texts: Sequence[str]) -> npt.NDArray[np.float64]:
+        calls.append((threading.get_ident(), len(texts)))
+        return fake_embed(texts)
+
+    backend = KnnBackend(embed)
+    await backend.configure(PROFILES)
+    await backend.classify(_request("set a reminder"), deadline_ms=300)
+    await backend.classify(_request("what's the weather"), deadline_ms=300)
+
+    # One call embeds every description and example; each classify embeds just the request.
+    assert [count for _, count in calls] == [7, 1, 1]
+    assert all(thread != loop_thread for thread, _ in calls)

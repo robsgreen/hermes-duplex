@@ -1,0 +1,79 @@
+[project]
+name = "hermes-duplex"
+version = "0.1.0"
+description = "Full-duplex voice front end for Hermes Agent over Discord and the web, with per-profile routing"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "robsgreen" }]
+# Each range must contain hermes-agent's exact core pin, because the plugin runs inside the
+# Hermes gateway's environment and may not move those pins. The CI `deps-compat` job checks this.
+# Never add `openai`: Hermes pins openai==2.54.0, and the GPT-Live and Realtime protocols are
+# implemented directly over `websockets`.
+dependencies = [
+  "discord.py[voice]==2.7.1",
+  "aiohttp>=3.14.5,<4",
+  "websockets>=15.0.1,<16",
+  "numpy>=2.5,<3",
+  "pyyaml>=6,<7",
+  "soxr>=0.5,<1",
+  "model2vec>=0.6,<1",
+]
+
+[project.scripts]
+hermes-duplex = "hermes_duplex.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=9.1.1,<10",
+  "pytest-asyncio>=1.4,<2",
+  "ruff>=0.17.3,<0.18",
+  "pyright>=1.1.414,<1.2",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# The repo root is also the Hermes plugin directory; only the subpackage ships in the wheel.
+packages = ["hermes_duplex"]
+
+[tool.uv]
+override-dependencies = [
+  # Copied from hermes-agent: discord.py 2.7.1 pins pynacl<1.6, and Hermes overrides it to 1.6.
+  # Without the same override our lock would not match the gateway's environment.
+  "pynacl>=1.6,<1.7",
+]
+# `hermes plugins install` locks this pyproject as a member of a uv workspace rooted at hermes-agent,
+# and uv locks every member's dependency groups together. Hermes's own `dev` group pins
+# ruff==0.15.22, which ours cannot share; declaring the two groups as conflicting lets uv lock them
+# apart. Neither group is ever installed into the gateway.
+conflicts = [[{ package = "hermes-agent", group = "dev" }, { package = "hermes-duplex", group = "dev" }]]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# importlib mode keeps the root plugin __init__.py from turning the repo into a package for tests;
+# tests/conftest.py also stops pytest from importing that file as a test package.
+addopts = "--import-mode=importlib"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "e2e: needs a real Hermes gateway (hermes-agent installed)",
+  "live: calls real provider APIs with real keys (opt-in, spends money)",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 110
+
+[tool.ruff.lint.per-file-ignores]
+# The repo root is the Hermes plugin directory: Hermes loads it by path, so its directory name (the
+# checkout's name) never has to be a valid module name.
+"__init__.py" = ["N999"]
+
+[tool.pyright]
+include = ["hermes_duplex", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"

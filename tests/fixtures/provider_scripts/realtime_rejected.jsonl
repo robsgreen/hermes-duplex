@@ -1,0 +1,4 @@
+{"type": "session.created", "event_id": "event_1", "session": {"id": "sess_2", "type": "realtime", "model": "gpt-realtime-2.1"}}
+{"wait_for": "session.update"}
+{"type": "error", "event_id": "event_2", "error": {"type": "invalid_request_error", "code": "invalid_value", "message": "Invalid value: 'nobody'. Supported values are: 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', and 'cedar'.", "param": "session.audio.output.voice"}}
+{"close": {"code": 1000}}

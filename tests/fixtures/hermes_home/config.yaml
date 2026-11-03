@@ -1,0 +1,15 @@
+# The default profile. `hermes plugins install` adds the `plugins` section.
+model:
+  provider: fake
+  default: default-model
+providers:
+  fake:
+    api: ${llm_url}
+    transport: chat_completions
+gateway:
+  # Serve the named profiles too, so /p/general/ and /p/stock-picker/ answer on this API server.
+  multiplex_profiles: true
+platforms:
+  # The hermes-duplex voice service runs as this gateway platform.
+  duplex:
+    enabled: true

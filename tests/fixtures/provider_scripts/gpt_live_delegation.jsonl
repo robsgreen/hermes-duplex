@@ -1,0 +1,18 @@
+{"wait_for": "session.start"}
+{"type": "session.started", "event_id": "event_1", "session": {"id": "sess_1", "model": "gpt-live-1"}}
+{"wait_for": "session.input_audio.append"}
+{"type": "ping"}
+{"type": "info", "event_id": "event_2", "info": {"code": "session_ready", "message": "Audio received."}}
+{"type": "session.input_transcript.delta", "event_id": "event_3", "delta": "how is my ", "start_ms": 0, "end_ms": 600}
+{"type": "session.input_transcript.delta", "event_id": "event_4", "delta": "portfolio doing", "start_ms": 600, "end_ms": 1400}
+{"type": "session.delegation.created", "event_id": "event_5", "delegation": {"id": "del_1", "target": "client", "type": "delegation"}, "offset_ms": 1450}
+{"type": "session.output_transcript.delta", "event_id": "event_6", "delta": "Let me check.", "start_ms": 1500, "end_ms": 2300}
+{"type": "session.output_audio.delta", "event_id": "event_7", "delta": "AAABAP//"}
+{"wait_for": "session.thinking.append"}
+{"type": "session.thinking.appended", "event_id": "event_8", "delegation_id": "del_1"}
+{"wait_for": "session.commentary.append"}
+{"type": "session.commentary.appended", "event_id": "event_9", "delegation_id": "del_1"}
+{"wait_for": "session.commentary.append"}
+{"type": "session.commentary.appended", "event_id": "event_10", "delegation_id": null}
+{"type": "error", "event_id": "event_11", "error": {"code": "rate_limit_exceeded", "message": "Too many appends.", "type": "rate_limit_error"}}
+{"type": "session.closed", "event_id": "event_12", "reason": "expired", "session": {"id": "sess_1"}, "usage": {}}

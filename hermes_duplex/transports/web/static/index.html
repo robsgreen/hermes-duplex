@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hermes Duplex</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 40rem; padding: 1rem; }
+      form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+      input { flex: 1; min-width: 10rem; }
+      #transcript { max-height: 50vh; overflow-y: auto; padding-left: 1.5rem; }
+      .speaker { font-weight: bold; margin-right: 0.5rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Hermes Duplex</h1>
+
+      <form id="sign-in">
+        <label for="token">Token</label>
+        <input id="token" name="token" type="password" autocomplete="current-password" required>
+        <button id="connect" type="submit">Connect</button>
+        <button id="disconnect" type="button" disabled>Disconnect</button>
+      </form>
+      <p id="status" role="status">Not connected.</p>
+
+      <section aria-labelledby="transcript-heading">
+        <h2 id="transcript-heading">Transcript</h2>
+        <ol id="transcript"></ol>
+      </section>
+
+      <section aria-labelledby="tasks-heading">
+        <h2 id="tasks-heading">Tasks</h2>
+        <ul id="tasks"></ul>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

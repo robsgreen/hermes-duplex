@@ -1,0 +1,4 @@
+{"at_input_ms": 1200, "event": {"type": "input_transcript", "delta": "how is my portfolio doing", "final": true}}
+{"at_input_ms": 1500, "event": {"type": "delegation", "id": "d1", "tool_args": {"task": "how is my portfolio doing"}}}
+{"at_input_ms": 4200, "event": {"type": "input_transcript", "delta": "and what about Tesla", "final": true}}
+{"at_input_ms": 4500, "event": {"type": "delegation", "id": "d2", "tool_args": {"task": "and what about Tesla"}}}

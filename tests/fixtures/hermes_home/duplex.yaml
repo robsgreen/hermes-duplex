@@ -1,0 +1,22 @@
+# hermes-duplex in the e2e gateway. The test adds each profile's description and examples from
+# tests/fixtures/router_eval/phrases.yaml, and sets every *_env variable in the gateway's environment.
+hermes:
+  api_base: ${api_base}
+  profile_keys_env: {general: DUPLEX_E2E_KEY_GENERAL, stock-picker: DUPLEX_E2E_KEY_STOCKS}
+provider:
+  name: fake
+  script: ${provider_script}
+  record_path: provider-calls.jsonl
+router:
+  backend: knn
+profiles:
+  general: {}
+  stock-picker:
+    models:
+      medium: {provider: fake, model: stock-picker-medium}
+      high: {provider: fake, model: stock-picker-high}
+people:
+  rob: {web_token_env: DUPLEX_E2E_TOKEN_ROB, profiles: ["*"]}
+  alex: {web_token_env: DUPLEX_E2E_TOKEN_ALEX, profiles: [general]}
+transports:
+  web: {enabled: true, host: 127.0.0.1, port: ${web_port}}

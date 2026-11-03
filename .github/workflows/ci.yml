@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.14"
+  # hermes-agent commit whose pins the plugin must fit inside (the gateway's environment).
+  HERMES_AGENT_SHA: 6112c2adb9e11f69734a29be9d2696f345ffa06a
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # libopus lets the receiver test decode real Opus instead of skipping.
+      - run: sudo apt-get update && sudo apt-get install -y libopus0
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: uv run pytest -m "not live and not e2e"
+
+  deps-compat:
+    # Resolve our dependencies with hermes-agent's exact pins (core plus the `messaging` extra, which
+    # the Discord gateway installs) as constraints. Fails on any conflict, and if `openai` resolves.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build constraints from hermes-agent pyproject.toml
+        run: |
+          curl -fsSL -o hermes-pyproject.toml \
+            "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_AGENT_SHA}/pyproject.toml"
+          python3 - <<'EOF'
+          import tomllib
+
+          with open("hermes-pyproject.toml", "rb") as file:
+              project = tomllib.load(file)["project"]
+          requirements = [*project["dependencies"], *project["optional-dependencies"]["messaging"]]
+          # Exact pins only; direct URL requirements (`name @ git+...`) are not constraints.
+          pins = [req for req in requirements if "==" in req and " @ " not in req]
+          with open("hermes-constraints.txt", "w", encoding="utf-8") as file:
+              file.write("\n".join(pins) + "\n")
+          print(f"{len(pins)} hermes-agent pins")
+          EOF
+          echo "pynacl>=1.6,<1.7" > hermes-overrides.txt
+      - name: Resolve with hermes-agent pins
+        run: |
+          uv pip compile pyproject.toml \
+            -c hermes-constraints.txt \
+            --override hermes-overrides.txt \
+            --python-version "${PYTHON_VERSION}" \
+            -o resolved.txt
+      - name: Fail if openai resolves
+        run: |
+          if grep -Ein '^openai([=[ ]|$)' resolved.txt; then
+            echo "::error::openai is in the dependency tree"
+            exit 1
+          fi
+
+  e2e:
+    # A real Hermes gateway with the plugin installed from this checkout (`pytest -m e2e`).
+    # Hermes goes into its own venv, as a gateway install has it, with our runtime dependencies
+    # (`hermes plugins validate` imports the plugin). Its setup.py refuses to build a wheel, so it is
+    # installed editable from a clone, with the overrides from its own [tool.uv] section.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen
+      - name: Install hermes-agent
+        run: |
+          hermes_src="${RUNNER_TEMP}/hermes-agent"
+          hermes_venv="${RUNNER_TEMP}/hermes-venv"
+          git init -q "${hermes_src}"
+          git -C "${hermes_src}" fetch -q --depth 1 https://github.com/NousResearch/hermes-agent "${HERMES_AGENT_SHA}"
+          git -C "${hermes_src}" checkout -q FETCH_HEAD
+          printf '%s\n' "pynacl>=1.6,<1.7" "cryptography==50.0.2" "Pillow==13.0.0" > "${RUNNER_TEMP}/hermes-overrides.txt"
+          uv venv --python "${PYTHON_VERSION}" "${hermes_venv}"
+          uv pip install --python "${hermes_venv}/bin/python" --override "${RUNNER_TEMP}/hermes-overrides.txt" \
+            -e "${hermes_src}[messaging]" -r pyproject.toml
+          echo "${hermes_venv}/bin" >> "${GITHUB_PATH}"
+      - name: Download the router's embedding model
+        run: uv run python -c "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-8M')"
+      - run: hermes --version  # fails here rather than letting the e2e tests skip
+      - run: uv run pytest -m e2e -rs

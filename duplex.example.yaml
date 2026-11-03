@@ -1,0 +1,118 @@
+# hermes-duplex configuration. Copy to $HERMES_HOME/duplex.yaml (default ~/.hermes/duplex.yaml),
+# or point to it with --config PATH or the HERMES_DUPLEX_CONFIG env var.
+#
+# Secrets never go in this file. Every key ending in `_env` names the environment variable that
+# holds the secret; startup fails if that variable is unset or empty. A literal `api_key`, `token`,
+# `bot_token`, `key`, `web_token`, or `secret` key is rejected, and so is any unknown key.
+
+hermes:
+  # Base URL of the Hermes API server (API_SERVER_ENABLED=true in the gateway's .env).
+  api_base: http://127.0.0.1:8642
+  # Profile -> env var holding that profile's API_SERVER_KEY (from the profile's own .env).
+  # A profile missing here cannot run tasks; the voice says it is not configured.
+  profile_keys_env:
+    general: HERMES_KEY_GENERAL
+    stock-picker: HERMES_KEY_STOCKS
+
+provider:
+  # Required, never inferred: gpt-live | openai-realtime | xai-realtime | fake
+  name: gpt-live
+  # Provider model id; omit for the adapter's default.
+  model: gpt-live-1
+  # Voice name; omit for the provider's default. For xai-realtime use the plain name (ara).
+  voice: marin
+  # Env var holding the provider API key (not needed for `fake`).
+  api_key_env: OPENAI_API_KEY
+  # Realtime family only (GPT-Live ignores it): server_vad | semantic_vad. xai-realtime allows
+  # only server_vad. Other fields pass through to the provider unchanged.
+  turn_detection: {type: semantic_vad, eagerness: auto}
+  # `fake` only (tests): JSONL script to replay, and where to record what the session sent.
+  # Relative paths resolve against this file's directory.
+  # script: tests/fixtures/provider_scripts/delegate_portfolio.jsonl
+  # record_path: fake-provider.jsonl
+  # `fake` only: override its capabilities (defaults: tool-style delegation, 24 kHz in and out,
+  # speech events, truncate and out-of-band responses on), e.g. to act like GPT-Live:
+  # capabilities: {delegation_style: live, emits_speech_events: false, supports_truncate: false}
+
+router:
+  # Main-path backend: decisions | jev | knn
+  backend: decisions
+  # Optional fast path run alongside the main path: knn (omit for none).
+  fast_path: knn
+  # How long the main path may take before falling back, in ms.
+  deadline_ms: 300
+  # Profile used when nothing else decides; must be defined under `profiles`.
+  default_profile: general
+  # Seconds of idle after which a speaker's active profile expires.
+  sticky_idle_s: 600
+  # Extra phrases for status and cancel requests, added to the built-in ones.
+  control_examples:
+    status: ["where are we with that"]
+    cancel: ["forget it"]
+  # The `decisions` backend (OpenAI Decisions API); required when `backend` is decisions.
+  # `model` (default gpt-6-luna) and `base_url` (default https://api.openai.com/v1) are optional.
+  decisions:
+    api_key_env: OPENAI_API_KEY
+  # The `jev` backend (TypeSafe System One API); required when `backend` is jev. `model` (default
+  # jev-latest) and `base_url` (default https://api.typesafe.ai, without /v1) are optional; point
+  # `base_url` at another service that speaks the same API to use it instead.
+  # jev:
+  #   api_key_env: TYPESAFE_API_KEY
+
+# Hermes profiles the router chooses between. `description` and `examples` steer routing.
+# `models` is the profile-by-effort table (low | medium | high); each cell needs both `provider`
+# and `model`. Fill in your own models: the <fill> values below are placeholders. An effort missing
+# from `models` uses `default_model`; with neither, Hermes uses the profile's own default model.
+profiles:
+  stock-picker:
+    description: Portfolio, holdings, stock research, trades
+    examples: ["how's my portfolio", "should I buy NVDA", "what did TSLA do today"]
+    models:
+      low:    {provider: openai, model: <fill>}
+      medium: {provider: openai, model: <fill>}
+      high:   {provider: anthropic, model: <fill>}
+    default_model: {provider: openai, model: <fill>}
+  general:
+    description: Anything else
+    examples: ["what's the weather", "set a reminder"]
+
+# Who may talk to the service. `discord_id` is the Discord user id (quote it); `web_token_env`
+# names the env var holding the person's web sign-in token (each token must be unique). `profiles`
+# lists the profiles the person may use; "*" means all. Everyone else is ignored. Either way of
+# connecting is optional per person.
+people:
+  rob:  {discord_id: "123", web_token_env: DUPLEX_TOKEN_ROB, profiles: ["*"]}
+  alex: {discord_id: "456", web_token_env: DUPLEX_TOKEN_ALEX, profiles: [general]}
+
+transports:
+  # The bot is its own Discord application, not Hermes's bot. Off unless enabled.
+  discord: {enabled: true, bot_token_env: DUPLEX_DISCORD_TOKEN}
+  # The web page and /ws socket. Off unless enabled; port 0 picks a free port.
+  web: {enabled: true, host: 127.0.0.1, port: 8765}
+
+audio:
+  # Most unplayed output audio sent ahead to a transport, in ms; bounds what a barge-in discards.
+  pacer_lead_ms: 200
+  # Input loudness, in dBFS, above which GPT-Live barge-in detection treats a speaker as talking.
+  gate_threshold_dbfs: -35.0
+  # Most audio a playback queue holds before dropping the oldest, in seconds.
+  playback_queue_s: 5
+
+tasks:
+  # Tasks outlive their conversation and a restart. After a restart, an open task created more than
+  # this many hours ago is not followed again; it is marked unknown without telling anyone.
+  restore_max_age_h: 24
+
+# Optional: who the voice assistant is. Every provider's prompt is written from this, the profiles'
+# descriptions above, and the same rules; see README "The assistant and its prompts".
+assistant:
+  # The name the assistant goes by (default Hermes).
+  name: Hermes
+  # Text that replaces the prompt's own style and tone lines; omit it to keep the built-in ones.
+  # Every prompt still says "You are <name>" from `name` above.
+  # persona: |
+  #   Be dry-witted, like a concierge for the household.
+  #   Keep answers brisk and friendly.
+  # How often to make brief listening sounds while someone speaks: none | moderate | frequent
+  # (default moderate). Only GPT-Live uses it.
+  backchannel: moderate
