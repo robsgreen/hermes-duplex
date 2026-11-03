@@ -77,3 +77,4 @@ PR: (none)
 - 2026-11-03 05:03 - Task 4.3 verified and committed; 4.3.6 (MAY pre-warm) deferred with reason. Handoffs: service.py pass gate_threshold_dbfs (after 5.4); 4.4 clear _input_transcript/_output_transcript/_live_offsets on reconnect; live-style history lines empty (re-seed needs lines)
 - 2026-11-03 05:03 - Dispatched sdlc-coder: Task 4.4
 - 2026-11-03 05:08 - Task 6.3 verified and committed. Live-checklist items for Grok: xai_ voice prefix vs plain, flat shape acceptance, tool_choice on response.create, barge-in auto-cancel w/o interrupt_response, item.delete. Follow-up: map Grok cumulative input_audio_transcription.updated
+- 2026-11-03 05:15 - Task 5.4 verified and committed; Phase 5 complete. README (7.2): enable message content intent in Discord developer portal; live checklist: bot login + /duplex registration

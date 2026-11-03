@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 122 / 161 sub-tasks complete (4.3.6 MAY deferred)
+> **Progress:** 128 / 161 sub-tasks complete (4.3.6 MAY deferred)
 
 **Read before every task:**
 
@@ -854,23 +854,23 @@ tests/unit/test_discord_bot.py                    (create)
 
 **Sub-tasks:**
 
-- [ ] **5.4.1** — `bot.py`: `discord.Client` with intents for guilds, voice states, and message content; token from the env var named in config (never Hermes's bot token). App commands `/duplex join` (joins the invoker's current voice channel) and `/duplex leave`, plus a plain text message "join". Only people on the allowlist can invoke; others get an ephemeral refusal.
-- [ ] **5.4.2** — `DiscordConversation`: start the receiver from Task 5.2; every 20 ms tick, mix allowlisted frames (Task 5.1), resample to the provider input rate, and yield `InputFrame`s with `voiced_speakers` and `t_ms`. When no packets arrive, feed paced silence frames at real-time pace so the provider's server VAD still sees silence (reference: hermes-talk `talk_discord.py:1197-1250` @e5ecfa9).
-- [ ] **5.4.3** — Output: provider audio → `OutputPacer` (lead ≤ 200 ms by default, for every provider) → resample to 48 kHz stereo → `DuplexAudioSource.feed`. `flush_playback()` flushes the source and drops the pacer backlog and returns ms played. `notify()` is a no-op.
-- [ ] **5.4.4** — Rejoin: on voice disconnect or channel move, try to rejoin up to 3 times with backoff while keeping the provider session; after 3 failures, speak an end message if possible and close the conversation.
-- [ ] **5.4.5** — Service wiring: when `transports.discord.enabled`, `build_service` starts the bot as a `Transport`; `stop()` disconnects it within the 5 s budget.
-- [ ] **5.4.6** — Unit tests with fakes for the voice client and receiver: allowlist check on join/leave; tick produces `InputFrame`s at 20 ms with correct `t_ms`; paced silence when idle; pacer lead bound on output; flush drops backlog; rejoin up to 3 times then end message; `stop()` disconnects.
+- [x] **5.4.1** — `bot.py`: `discord.Client` with intents for guilds, voice states, and message content; token from the env var named in config (never Hermes's bot token). App commands `/duplex join` (joins the invoker's current voice channel) and `/duplex leave`, plus a plain text message "join". Only people on the allowlist can invoke; others get an ephemeral refusal.
+- [x] **5.4.2** — `DiscordConversation`: start the receiver from Task 5.2; every 20 ms tick, mix allowlisted frames (Task 5.1), resample to the provider input rate, and yield `InputFrame`s with `voiced_speakers` and `t_ms`. When no packets arrive, feed paced silence frames at real-time pace so the provider's server VAD still sees silence (reference: hermes-talk `talk_discord.py:1197-1250` @e5ecfa9).
+- [x] **5.4.3** — Output: provider audio → `OutputPacer` (lead ≤ 200 ms by default, for every provider) → resample to 48 kHz stereo → `DuplexAudioSource.feed`. `flush_playback()` flushes the source and drops the pacer backlog and returns ms played. `notify()` is a no-op.
+- [x] **5.4.4** — Rejoin: on voice disconnect or channel move, try to rejoin up to 3 times with backoff while keeping the provider session; after 3 failures, speak an end message if possible and close the conversation.
+- [x] **5.4.5** — Service wiring: when `transports.discord.enabled`, `build_service` starts the bot as a `Transport`; `stop()` disconnects it within the 5 s budget.
+- [x] **5.4.6** — Unit tests with fakes for the voice client and receiver: allowlist check on join/leave; tick produces `InputFrame`s at 20 ms with correct `t_ms`; paced silence when idle; pacer lead bound on output; flush drops backlog; rejoin up to 3 times then end message; `stop()` disconnects.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_discord_conversation.py tests/unit/test_discord_bot.py` passes; full default tier still passes.
-- [ ] **Requirements:**
-    - [ ] "Bot token from env; `/duplex join` (or text "join") joins the invoker's voice channel; `/duplex leave`; only people on the allowlist can invoke."
-    - [ ] "20 ms mix tick; paced silence frames when no packets; resample to provider input rate with soxr streaming".
-    - [ ] "Output audio passes through audio/pacer.py (lead ≤ 200 ms by default) for every provider, so a flush discards at most the lead plus held backlog."
-    - [ ] "Reconnect: on voice disconnect/move, attempt rejoin up to 3 times with backoff, keeping the provider session; then end with a spoken message."
-- [ ] **Verify:** Manual (optional, needs a bot token): `uv run hermes-duplex serve` with Discord enabled logs a successful login and registers `/duplex`. The full manual check is in Task 7.2's live checklist.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_discord_conversation.py tests/unit/test_discord_bot.py` passes; full default tier still passes.
+- [x] **Requirements:**
+    - [x] "Bot token from env; `/duplex join` (or text "join") joins the invoker's voice channel; `/duplex leave`; only people on the allowlist can invoke."
+    - [x] "20 ms mix tick; paced silence frames when no packets; resample to provider input rate with soxr streaming".
+    - [x] "Output audio passes through audio/pacer.py (lead ≤ 200 ms by default) for every provider, so a flush discards at most the lead plus held backlog."
+    - [x] "Reconnect: on voice disconnect/move, attempt rejoin up to 3 times with backoff, keeping the provider session; then end with a spoken message."
+- [x] **Verify:** Manual (optional, needs a bot token): `uv run hermes-duplex serve` with Discord enabled logs a successful login and registers `/duplex`. The full manual check is in Task 7.2's live checklist.
 
 ---
 
