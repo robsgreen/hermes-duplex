@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 78 / 161 sub-tasks complete
+> **Progress:** 83 / 161 sub-tasks complete
 
 **Read before every task:**
 
@@ -793,21 +793,21 @@ tests/unit/test_discord_internals_guard.py        (create)
 
 **Sub-tasks:**
 
-- [ ] **5.2.1** — Copy the class into `receiver.py` with an attribution header naming the source URL, commit, line range, and MIT © 2025 Nous Research. Write `NOTICE` with the same attribution.
-- [ ] **5.2.2** — Replace utterance buffering (`SILENCE_THRESHOLD`, `check_silence`) with streaming: each decoded 20 ms PCM frame (48 kHz stereo) goes to a callback `on_frame(person_id, pcm)` on the event loop thread (use `loop.call_soon_threadsafe`). Remove the pause-while-playing flag (the providers handle turn-taking).
-- [ ] **5.2.3** — Keep: NaCl + DAVE decrypt, per-SSRC Opus decoders, SSRC→user from SPEAKING, sole-allowed-member inference for an unmapped SSRC (else drop), drop of frames under a stale key generation and of unmapped DAVE frames, rekey streak. Map Discord user ids to person ids through `PermissionChecker`; unknown users are dropped here too.
-- [ ] **5.2.4** — `test_discord_internals_guard.py`: on the pinned discord.py, assert that `discord.voice_state.VoiceConnectionState` (or the class `VoiceClient._connection` resolves to) has `add_socket_listener`, `remove_socket_listener`, `hook`, `secret_key`, `dave_session`, `dave_protocol_version`, `ssrc`, `ws`; that the voice websocket class has `_hook`; that `davey.MediaType.audio` and `discord.opus.Decoder` exist. Use `inspect`/class attributes, not a live connection.
-- [ ] **5.2.5** — Unit tests with synthetic packets (NaCl-encrypted test RTP built with `nacl.secret.Aead` and a test key; DAVE path with a stub session object): mapped SSRC → callback; unmapped SSRC with one allowlisted member → inferred; with two → dropped; stale generation → dropped; non-allowlisted user → dropped.
+- [x] **5.2.1** — Copy the class into `receiver.py` with an attribution header naming the source URL, commit, line range, and MIT © 2025 Nous Research. Write `NOTICE` with the same attribution.
+- [x] **5.2.2** — Replace utterance buffering (`SILENCE_THRESHOLD`, `check_silence`) with streaming: each decoded 20 ms PCM frame (48 kHz stereo) goes to a callback `on_frame(person_id, pcm)` on the event loop thread (use `loop.call_soon_threadsafe`). Remove the pause-while-playing flag (the providers handle turn-taking).
+- [x] **5.2.3** — Keep: NaCl + DAVE decrypt, per-SSRC Opus decoders, SSRC→user from SPEAKING, sole-allowed-member inference for an unmapped SSRC (else drop), drop of frames under a stale key generation and of unmapped DAVE frames, rekey streak. Map Discord user ids to person ids through `PermissionChecker`; unknown users are dropped here too.
+- [x] **5.2.4** — `test_discord_internals_guard.py`: on the pinned discord.py, assert that `discord.voice_state.VoiceConnectionState` (or the class `VoiceClient._connection` resolves to) has `add_socket_listener`, `remove_socket_listener`, `hook`, `secret_key`, `dave_session`, `dave_protocol_version`, `ssrc`, `ws`; that the voice websocket class has `_hook`; that `davey.MediaType.audio` and `discord.opus.Decoder` exist. Use `inspect`/class attributes, not a live connection.
+- [x] **5.2.5** — Unit tests with synthetic packets (NaCl-encrypted test RTP built with `nacl.secret.Aead` and a test key; DAVE path with a stub session object): mapped SSRC → callback; unmapped SSRC with one allowlisted member → inferred; with two → dropped; stale generation → dropped; non-allowlisted user → dropped.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_receiver.py tests/unit/test_discord_internals_guard.py` passes.
-- [ ] **Requirements:**
-    - [ ] "Receiver adapted from Hermes VoiceReceiver: NaCl + DAVE decrypt via davey, per-SSRC Opus decode at 48 kHz stereo, SSRC→user from SPEAKING events; unmapped SSRC → keep Hermes's sole-allowed-member inference …, else drop; stale key-generation frames dropped; streaming frames (no silence segmentation)."
-    - [ ] "Unit test asserts the discord.py private attributes the receiver hooks exist on the pinned version."
-    - [ ] "LICENSE (MIT), NOTICE — attribution for adapted Hermes VoiceReceiver (MIT © 2025 Nous Research)".
-- [ ] **Verify:** `head -20 hermes_duplex/transports/discord/receiver.py` shows the attribution header; `grep -n check_silence hermes_duplex/transports/discord/receiver.py` prints nothing.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_receiver.py tests/unit/test_discord_internals_guard.py` passes.
+- [x] **Requirements:**
+    - [x] "Receiver adapted from Hermes VoiceReceiver: NaCl + DAVE decrypt via davey, per-SSRC Opus decode at 48 kHz stereo, SSRC→user from SPEAKING events; unmapped SSRC → keep Hermes's sole-allowed-member inference …, else drop; stale key-generation frames dropped; streaming frames (no silence segmentation)."
+    - [x] "Unit test asserts the discord.py private attributes the receiver hooks exist on the pinned version."
+    - [x] "LICENSE (MIT), NOTICE — attribution for adapted Hermes VoiceReceiver (MIT © 2025 Nous Research)".
+- [x] **Verify:** `head -20 hermes_duplex/transports/discord/receiver.py` shows the attribution header; `grep -n check_silence hermes_duplex/transports/discord/receiver.py` prints nothing.
 
 ---
 

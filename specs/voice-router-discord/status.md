@@ -60,3 +60,5 @@ PR: (none)
 - 2026-11-03 04:43 - Dispatched sdlc-coder: Tasks 4.2, 3.1
 - 2026-11-03 04:43 - Task 3.2 verified and committed. OPEN WIRING ITEM: nothing builds decisions/jev backends from config yet; service must call DecisionsBackend.from_config(config.router.decisions, config.secrets) and close() on shutdown — assign to Task 3.4 or a follow-up after 2.4/3.1 land
 - 2026-11-03 04:43 - Dispatched sdlc-coder: Task 3.3
+- 2026-11-03 04:46 - Task 5.2 verified and committed. Follow-ups: add NOTICE to pyproject license-files + libopus0 in CI (assign to 7.2); 5.4 must start() receiver on loop thread, refresh_credentials on membership change
+- 2026-11-03 04:46 - Dispatched sdlc-coder: Task 5.3
