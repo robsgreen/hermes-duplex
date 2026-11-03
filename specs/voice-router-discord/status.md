@@ -62,3 +62,5 @@ PR: (none)
 - 2026-11-03 04:43 - Dispatched sdlc-coder: Task 3.3
 - 2026-11-03 04:46 - Task 5.2 verified and committed. Follow-ups: add NOTICE to pyproject license-files + libopus0 in CI (assign to 7.2); 5.4 must start() receiver on loop thread, refresh_credentials on membership change
 - 2026-11-03 04:46 - Dispatched sdlc-coder: Task 5.3
+- 2026-11-03 04:53 - Task 4.2 verified and committed. Handoffs: 4.3 transcript windows must use start_ms/end_ms (GPT-Live never final); 4.4 adapter raises RuntimeError after failed reconnect until connect() succeeds; FakeWsServer __aexit__ hangs with pending wait_for (test-infra follow-up)
+- 2026-11-03 04:53 - Dispatched sdlc-coder: Task 4.3

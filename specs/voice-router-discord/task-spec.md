@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 83 / 161 sub-tasks complete
+> **Progress:** 89 / 161 sub-tasks complete
 
 **Read before every task:**
 
@@ -656,23 +656,23 @@ tests/contract/test_gpt_live_adapter.py               (create)
 
 **Sub-tasks:**
 
-- [ ] **4.2.1** — Capabilities: input_rate 24000, output_rate 24000, supports_truncate false, supports_out_of_band_response false, emits_speech_events false, delegation_style `"live"`, max_session_s None.
-- [ ] **4.2.2** — `connect()` sends `session.start` and waits for `session.started` → `SessionReady`; `send_audio` base64-encodes into `session.input_audio.append`.
-- [ ] **4.2.3** — Map server events: output audio delta → `OutputAudio(pcm, item_id=None)`; input/output transcript deltas → `InputTranscript`/`OutputTranscript` (keep `start_ms`/`end_ms` available to the session); `session.delegation.created` → `DelegationRequested(id, offset_ms, target, tool_args=None)` and log `target` (expect `client`; warn otherwise); `session.closed` → `Closed(reason)`; `error` → `ProviderError`; ignore others.
-- [ ] **4.2.4** — `report_progress` → `session.thinking.append` with `delegation_id`; `deliver_result` → `session.commentary.append` with `delegation_id`; `say` → `session.commentary.append` with `delegation_id: null`; `truncate` → no-op. Trim content to the 500-token cap.
-- [ ] **4.2.5** — Register `gpt-live` in the registry.
-- [ ] **4.2.6** — Contract tests over `fake_ws_server` with recorded scripts: start handshake and payload; audio append encoding; event mapping including the `target` log; thinking/commentary payloads with `delegation_id`; `say` with `null`; closed and error mapping.
+- [x] **4.2.1** — Capabilities: input_rate 24000, output_rate 24000, supports_truncate false, supports_out_of_band_response false, emits_speech_events false, delegation_style `"live"`, max_session_s None.
+- [x] **4.2.2** — `connect()` sends `session.start` and waits for `session.started` → `SessionReady`; `send_audio` base64-encodes into `session.input_audio.append`.
+- [x] **4.2.3** — Map server events: output audio delta → `OutputAudio(pcm, item_id=None)`; input/output transcript deltas → `InputTranscript`/`OutputTranscript` (keep `start_ms`/`end_ms` available to the session); `session.delegation.created` → `DelegationRequested(id, offset_ms, target, tool_args=None)` and log `target` (expect `client`; warn otherwise); `session.closed` → `Closed(reason)`; `error` → `ProviderError`; ignore others.
+- [x] **4.2.4** — `report_progress` → `session.thinking.append` with `delegation_id`; `deliver_result` → `session.commentary.append` with `delegation_id`; `say` → `session.commentary.append` with `delegation_id: null`; `truncate` → no-op. Trim content to the 500-token cap.
+- [x] **4.2.5** — Register `gpt-live` in the registry.
+- [x] **4.2.6** — Contract tests over `fake_ws_server` with recorded scripts: start handshake and payload; audio append encoding; event mapping including the `target` log; thinking/commentary payloads with `delegation_id`; `say` with `null`; closed and error mapping.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/contract/test_gpt_live_adapter.py` passes.
-- [ ] **Requirements:**
-    - [ ] "session.start sends instructions from prompts.py, voice from config, `delegation: {type: "client"}`."
-    - [ ] "GPT-Live emits no SpeechStarted/SpeechStopped/OutputDone and no item ids …; its capabilities set emits_speech_events=false, supports_truncate=false."
-    - [ ] "Log `session.delegation.created.target` (Literal client|responses|decisions; expect "client")."
-    - [ ] "Progress → `session.thinking.append` …; final result → `session.commentary.append` with delegation_id; failures → commentary with a short apology and reason."
-- [ ] **Verify:** Read one recorded client-event log from the tests and confirm the first event is `session.start` with `delegation.type == "client"`.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/contract/test_gpt_live_adapter.py` passes.
+- [x] **Requirements:**
+    - [x] "session.start sends instructions from prompts.py, voice from config, `delegation: {type: "client"}`."
+    - [x] "GPT-Live emits no SpeechStarted/SpeechStopped/OutputDone and no item ids …; its capabilities set emits_speech_events=false, supports_truncate=false."
+    - [x] "Log `session.delegation.created.target` (Literal client|responses|decisions; expect "client")."
+    - [x] "Progress → `session.thinking.append` …; final result → `session.commentary.append` with delegation_id; failures → commentary with a short apology and reason."
+- [x] **Verify:** Read one recorded client-event log from the tests and confirm the first event is `session.start` with `delegation.type == "client"`.
 
 ---
 
