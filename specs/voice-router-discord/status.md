@@ -91,3 +91,4 @@ PR: (none)
 - 2026-11-03 06:11 - Skill: sdlc-testing; dispatched sdlc-tester
 - 2026-11-03 06:30 - Testing verified independently: gate green, 646 default tests, 4 real-Hermes e2e, live skipped (no key); test-spec.md fully checked; committed. REVIEW NOTES: (1) plan MUST 'Service stop cancels all tasks' vs code leaves Hermes runs running on stop; (2) unused prompts HERMES_UNREACHABLE/not_configured; (3) dispatch/hermes_api.py absolute imports vs relative-import rule; (4) workspace.md capabilities table stale
 - 2026-11-03 06:30 - Phase → Documentation
+- 2026-11-03 06:30 - Skill: sdlc-documentation; dispatched sdlc-doc-keeper
