@@ -63,3 +63,5 @@
 {"event":"user_intervention","ts":"2026-11-03 13:27","reason":"prompt-strategy-scope-addition"}
 {"event":"dispatch","ts":"2026-11-03 13:27","agent":"sdlc-coder"}
 {"event":"dispatch","ts":"2026-11-03 13:51","agent":"sdlc-coder"}
+{"event":"dispatch","ts":"2026-11-03 14:01","agent":"sdlc-reviewer"}
+{"event":"dispatch","ts":"2026-11-03 14:01","agent":"sdlc-reviewer"}

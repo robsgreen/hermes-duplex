@@ -109,3 +109,4 @@ PR: (none)
 - 2026-11-03 13:27 - User approved per-provider prompt strategy + assistant config (scope addition at PR gate); master plan amended; change-prompts.md written; coder dispatched
 - 2026-11-03 13:43 - User approved queued provider folder move (change-provider-layout.md) after prompt work
 - 2026-11-03 13:51 - Prompt strategy verified (gate green, 719 default, 4 e2e; no provider names in session) and committed; dispatching layout move
+- 2026-11-03 14:01 - Provider layout move verified (gate green, 719 default, 4 e2e, goldens byte-identical) and committed; scoped review of 309819d+move dispatched
