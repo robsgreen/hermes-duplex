@@ -39,3 +39,12 @@
 - PB2 medium logic Red flag — Information Leakage: delegate receipt {"status":"started"} written in session.py:582, realtime adapter.py:70, openai/prompt.py:64 — make DELEGATE_RECEIPT constant.
 - PB3 low logic: prompts/base.py:133-136 json_report shrink loop over-truncates escape-heavy text (measured).
 - PB4 low mechanical: session.py:5 and AGENTS.md:46 say session adapts only via ProviderCapabilities (also prompter now).
+
+## Final fixes review (92c9d65..791dccd) — Seat A
+- R1 medium logic: session.py:431-433 — adoption only on first hearing; tasks left unattended by an older lingering session (web no heartbeat, Discord+web) are never adopted by an already-running session; status falsely promises "I'll tell you".
+- R2 medium logic: session.py:951-961 _task_number — any bare number in the request wins ("top 5 stocks" → 5); status now narrowed ("top 10 list" → 10); fallback reads stale "Task 3 … running" sentence → cancels task 3 at once (ran). Fix: only "task N" forms; context only from cancel/status sentences; ask when several and no explicit number.
+- R3 medium logic: tasks.py restore — invalid UTF-8 (torn write) or naive timestamp raise and block service start (ran).
+- R4 low mechanical: notices.task_summary first-person promise leaks into reseed context.
+- R5 low mechanical: tasks.py _unattended comment wrong (holds ended tasks).
+- R6 low logic: session._follow_adopted — unreadable status falls to live wording, not "while you were away".
+- Needs user decision: (U1) privacy — adopted results announced in whatever conversation hears the person first (e.g. private web task spoken in shared Discord channel); (U2) restore has no age cutoff (stale/pre-upgrade tasks).

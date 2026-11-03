@@ -119,3 +119,4 @@ PR: (none)
 - 2026-11-03 15:38 - User decision P7: A (split long results across appends)
 - 2026-11-03 15:39 - Decision 5: A (squash, push, draft PR after green). change-final-fixes.md written; coder dispatched
 - 2026-11-03 16:07 - Final fixes verified (gate green, 760 default x2, 4 e2e) and committed; review dispatched
+- 2026-11-03 16:14 - Round 5 review: 0 crit/high, 3 medium, 5 low, 2 user decisions (privacy, restore age). Push held; asking user one by one

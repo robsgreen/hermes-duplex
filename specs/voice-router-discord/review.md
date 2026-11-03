@@ -133,3 +133,18 @@ Surfaced at two-round cap (observations, reason: surfaced at two-round cap):
 - Check: uv sync --frozen → pass; ruff check → pass; ruff format --check → pass; pyright → pass
 - Check: pytest -m "not live and not e2e" → pass (732, 2 runs); pytest -m e2e (real Hermes) → pass (4)
 Final checks: pass
+
+## Review round 5 — final fixes (92c9d65..791dccd)
+Panel A/B opus. Contract tier 3; gate none. Mechanical (791dccd): gate pass; 760 default ×2; e2e 4.
+Items 1–7 implemented per brief (both seats). Findings:
+- S1 medium logic (both) — session.py:706-711,951-961 _task_number: any bare number wins ("top 5 stocks"→5, "30 day report"→30); context fallback reads stale/ended "task N" → wrong task cancelled at once (ran). Fix: only "task N" forms; context only from cancel/status sentences or active tasks; else None.
+- S2 medium logic (A; B low) — session.py:431-433 adoption only on first hearing: tasks left by a lingering/parallel session never adopted by an already-open session; false "I'll tell you" promise.
+- S3 medium logic (A) — tasks.py restore: torn UTF-8 line or naive timestamp raises and blocks service start (ran).
+- S4 low logic (B) — completed result queued but unspoken at session end is lost (not unattended/announced).
+- S5 low mechanical (A) — task_summary first-person promise inside reseed context.
+- S6 low mechanical (A) — _unattended comment wrong.
+- S7 low logic (A) — unreadable status of adopted run → live wording instead of "while you were away".
+- S8 low logic Red flag — Repetition (B) — gist re-implements fit_text; two _SENTENCE_END regexes.
+Needs user decision:
+- U1 (both) privacy — adopted results announced in whatever conversation first hears the person (private web task spoken in a shared Discord channel; non-allowlisted members hear it).
+- U2 (A) restore has no age cutoff (stale/pre-upgrade tasks; Hermes forgets run status after 1 h → "lost track").
