@@ -1,9 +1,9 @@
 # Status: voice-router-discord
 
-Last Updated: 2026-11-03 03:41
+Last Updated: 2026-11-03 17:53
 Branch: sdlc/voice-router-discord
 Worktree: /home/user/hermes-duplex-worktrees/voice-router-discord
-PR: (none)
+PR: https://github.com/robsgreen/hermes-duplex/pull/1
 
 ## Checklist
 
@@ -14,7 +14,7 @@ PR: (none)
 - [x] **Documentation**
 - [x] **Review**
 - [x] **Wrap-up**
-- [ ] **PR**
+- [x] **PR**
 - [ ] **Archive**
 
 ## Session Log
@@ -124,3 +124,5 @@ PR: (none)
 - 2026-11-03 17:20 - User decision U2: A (24 h restore cutoff, configurable)
 - 2026-11-03 17:24 - Decision 3: A; change-round5-fixes.md written; coder dispatched
 - 2026-11-03 17:46 - Round-5 fixes verified (gate green, 785 default x2, 4 e2e; only reseed goldens changed) and committed; last review dispatched
+- 2026-11-03 17:51 - Round 6 review: no crit/high; K1,K2 medium + K3,K4 low as PR known issues. PR gate confirmed by user decision 5 (A) + round-5 decision 3 (A). Squashing and pushing.
+- 2026-11-03 17:53 - Squashed to 9cf9bc3 (tree identical; backup branch backup/pre-squash-voice-router-discord local), pushed to origin/claude/upbeat-clarke-1vcz7v, draft PR robsgreen/hermes-duplex#1 created. Next: Archive gate after merge.

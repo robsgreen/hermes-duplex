@@ -148,3 +148,13 @@ Items 1–7 implemented per brief (both seats). Findings:
 Needs user decision:
 - U1 (both) privacy — adopted results announced in whatever conversation first hears the person (private web task spoken in a shared Discord channel; non-allowlisted members hear it).
 - U2 (A) restore has no age cutoff (stale/pre-upgrade tasks; Hermes forgets run status after 1 h → "lost track").
+
+## Review round 6 — round-5 fixes (791dccd..fea792e), last review before push
+Both seats: items 1–10 resolved, preserves kept; no critical/high. Per user decision (round-5 decision 3 = A) remaining items go to the PR as known issues; no further fix round.
+Known issues carried to the PR:
+- K1 medium (Seat B) — session.py:470-476 _pump_adoptions: re-adopts for anyone ever heard in a session; a Discord session the person has left can adopt and speak their result, which then is not repeated in their next conversation. Fix idea: last-heard window or Discord channel membership.
+- K2 medium (Seat B, pre-existing from S1) — session.py:300-303 _CANCEL_OR_STATUS_SENTENCE: a question context ("Should I cancel task 3 or task 4?") yields 3 → cancels task 3 at once (GPT-Live). Fix: anchor progressive form, require exactly one number.
+- K3 low (both seats) — config.py _tasks / tasks.py restore: huge/inf/nan restore_max_age_h passes validation and fails start (OverflowError); unguarded stale-marking append.
+- K4 low (Seat B) — session.py:883-884 _end: result lost if the session ends during the transition awaits (ms window).
+- Earlier accepted lows recorded above (P10, P17, P18, P20, P21, P22) and the README known limitations.
+Final checks (fea792e): uv sync, ruff check, ruff format --check, pyright pass; pytest -m "not live and not e2e" 785 passed ×2; real-Hermes e2e 4 passed. Final checks: pass

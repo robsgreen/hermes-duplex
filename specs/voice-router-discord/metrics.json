@@ -5,10 +5,10 @@
   "harnessVersion": "0.1.0",
   "rubricVersion": "1.0",
   "specName": "voice-router-discord",
-  "generatedAt": "2026-11-03T07:30:46Z",
+  "generatedAt": "2026-11-03T17:53:19Z",
   "specStatus": "in-progress",
   "velocity": {
-    "wallClockMinutes": 397,
+    "wallClockMinutes": 1020,
     "timeToPrMinutes": 397,
     "sessionCount": 1,
     "phaseDurationsMinutes": {
@@ -22,7 +22,7 @@
     }
   },
   "lifecycle": {
-    "furthestPhase": "Wrap-up",
+    "furthestPhase": "PR",
     "stalled": false
   },
   "throughput": {
@@ -31,10 +31,10 @@
     "completionRatio": 0.9875
   },
   "autonomy": {
-    "hardGateInterventions": 0,
+    "hardGateInterventions": 2,
     "resumeCount": 0,
-    "reviewFixCycles": 1,
-    "subAgentDispatches": 50,
+    "reviewFixCycles": 3,
+    "subAgentDispatches": 63,
     "postMortemActionItems": 7,
     "autonomousCompletion": false,
     "postPrRevisionCycles": 0
@@ -43,10 +43,10 @@
     "reviewFindings": {
       "critical": 0,
       "high": 2,
-      "medium": 10,
-      "low": 15
+      "medium": 22,
+      "low": 27
     },
-    "crossLensConvergence": 2,
+    "crossLensConvergence": 1,
     "significantSpecDeviations": 13,
     "planDrift": {
       "high": 2,
@@ -61,26 +61,30 @@
     }
   },
   "cost": {
-    "filesCreated": 135,
+    "filesCreated": 158,
     "filesModified": 1,
     "filesDeleted": 0,
-    "linesAdded": 24750,
+    "linesAdded": 27454,
     "linesRemoved": 1
   },
   "scopeDelta": {
     "plannedFiles": 52,
-    "actualFiles": 136,
-    "deltaFiles": 84
+    "actualFiles": 159,
+    "deltaFiles": 107
   },
   "pr": {
-    "prIds": [],
-    "prUrls": []
+    "prIds": [
+      "#1"
+    ],
+    "prUrls": [
+      "https://github.com/robsgreen/hermes-duplex/pull/1"
+    ]
   },
   "parseHealth": {
-    "eventsValid": 62,
+    "eventsValid": 85,
     "eventsMalformed": 0,
     "eventsUnknownType": 0,
-    "eventsReviewRounds": 2,
+    "eventsReviewRounds": 6,
     "eventsJsonl": true,
     "statusMd": true,
     "taskSpec": true,
