@@ -5,3 +5,8 @@
 - 2026-11-03: Speakers = owner + a few trusted people (allowlist of identities; per-profile access limits).
 - 2026-11-03: Success criteria accepted (7 items: Discord duplex+barge-in, async routed delegation w/ progress, <~300ms routing w/ effort+model+logged rationale, sticky follow-ups, allowlist+per-profile perms, web page parity, provider swap to Grok via config).
 - 2026-11-03: Design checkpoint approved; add real e2e against running Hermes (CI tier w/ fake provider+fake LLM; opt-in live tier).
+- 2026-11-03: Decision 1 (P23/P30): B — tasks keep running when a call/service ends; next conversation for that person announces results finished meanwhile; status and cancel keep working for them.
+- 2026-11-03: Decision 2 (P24): A — user generates portfolio.wav/tesla.wav with their key and commits them (needs the user; not runnable here).
+- 2026-11-03: Decision 3: A — fix Q12, Q13, Q14, P25, P27, P7 and implement decision 1 (B) before pushing.
+- 2026-11-03: Decision 4 (P7): A — split long GPT-Live appends into consecutive parts at a safe 1 char/token (~500 chars each), same delegation id; no tokenizer dependency.
+- 2026-11-03: Decision 5: A — after fixes pass review and final checks, squash to one commit, push to claude/upbeat-clarke-1vcz7v, open a draft PR on robsgreen/hermes-duplex listing manual to-dos (user consent recorded; conditional on green checks).

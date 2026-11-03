@@ -113,3 +113,8 @@ PR: (none)
 - 2026-11-03 14:39 - Round 3 review consolidated (5 medium, 4 low); user chose cancel-confirm option A; fix dispatched
 - 2026-11-03 14:51 - Round 3 fix verified (gate green, 732 default, 4 e2e; only instructions goldens changed) and committed; scoped re-review dispatched
 - 2026-11-03 14:54 - Round 3 re-review: Q1-Q9,Q11 resolved; Q12,Q13 (medium), Q14 (low) surfaced at cap; final checks pass; back at PR gate
+- 2026-11-03 15:15 - User decision P23/P30: B (keep running, report later, still cancellable)
+- 2026-11-03 15:15 - User decision P24: A (user generates + commits WAVs)
+- 2026-11-03 15:16 - User decision 3: A (fix all six + decision-1 work before push)
+- 2026-11-03 15:38 - User decision P7: A (split long results across appends)
+- 2026-11-03 15:39 - Decision 5: A (squash, push, draft PR after green). change-final-fixes.md written; coder dispatched
