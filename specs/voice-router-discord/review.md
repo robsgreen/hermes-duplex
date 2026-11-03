@@ -61,3 +61,7 @@ Contract tier: 3 (all four dispatches; new repo, no external consumers). Contrac
 - Repro not confirmed: P12 composite.py:347 — Seat B — needs two-person harness.
 - Repro not confirmed: P19 session.py:743 — Seat B — needs fake ordering.
 - Repro not confirmed: P21, P22 — Seat A — timing windows.
+
+## Reproductions (cycle 1)
+- P1: reviewer-right — 2 new tests fail (response.create sent before the calling response's response.done; receipt 5.4-5.6 ms). Source: repro-P1.md.
+- P2: reviewer-right — stranger on unmapped SSRC delivered as 'rob' with DAVE off and on; preserve cases pass. Tester labelled it "reproduced-correct" but its evidence shows the bug; recorded as reviewer-right. Source: repro-P2.md.
