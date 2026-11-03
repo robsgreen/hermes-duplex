@@ -51,3 +51,5 @@ PR: (none)
 - 2026-11-03 04:28 - Dispatched sdlc-coder: Task 2.3 (parallel with 1.4)
 - 2026-11-03 04:30 - Task 1.4 verified (scoped gate clean, 237 unit tests) and committed; Phase 1 complete
 - 2026-11-03 04:30 - Dispatched sdlc-coder: Task 2.2 (parallel with 2.3)
+- 2026-11-03 04:36 - Task 2.3 verified (scoped gate clean, 26 tests) and committed. Handoff for 2.2/2.4: notify() shapes {transcript:{speaker,text}}, {tasks:[{number,profile,state,text}]}, {message}; t_ms resets per socket (rebase on provider reconnect belongs in session, Task 4.4); WebTransport.port for port 0
+- 2026-11-03 04:37 - Dispatched sdlc-coder: Tasks 3.2, 4.1, 5.1, 5.2 (parallel with 2.2; disjoint files)

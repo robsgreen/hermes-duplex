@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 57 / 161 sub-tasks complete (Phase 1 + Task 2.1 done)
+> **Progress:** 62 / 161 sub-tasks complete (Phase 1, Tasks 2.1, 2.3 done)
 
 **Read before every task:**
 
@@ -363,21 +363,21 @@ tests/unit/test_web_transport.py              (create)
 
 **Sub-tasks:**
 
-- [ ] **2.3.1** — aiohttp app on configurable host/port (default `127.0.0.1:8765`): `GET /` serves `index.html`; static routes serve `app.js` and `worklet.js`; `GET /ws` upgrades.
-- [ ] **2.3.2** — Auth before upgrade: token from query param `token` or from `Sec-WebSocket-Protocol` (`bearer, <token>`; echo the `bearer` subprotocol on success). Invalid or missing token → HTTP 401 before upgrade. A token maps to exactly one person.
-- [ ] **2.3.3** — `WebConversation`: binary frames in are PCM16 24 kHz mono; re-chunk to 20 ms `InputFrame`s with `t_ms` from the session's counter and `voiced_speakers = {person}` when the frame's RMS is above the configured voiced threshold. `play()` sends binary PCM16 24 kHz mono frames. `flush_playback()` sends `{"type":"interrupt"}` and returns ms actually played (from the pacer's released-ms count). `notify()` sends `{"type":"status", ...}` frames for transcript lines and the task list.
-- [ ] **2.3.4** — Browser page: token entry stored in `sessionStorage`; connect/disconnect buttons; AudioWorklet mic capture resampled to 24 kHz PCM16 mono in 20 ms chunks; playback queue; flush the playback queue on `{"type":"interrupt"}`; live transcript; task list. No external scripts or CDNs.
-- [ ] **2.3.5** — Unit tests with aiohttp's test client: 401 on missing/invalid token (both auth forms); successful upgrade with each form; binary in → `InputFrame`s with correct `t_ms` and voiced flag; `play()` → binary out; `flush_playback()` → interrupt frame; static files served.
+- [x] **2.3.1** — aiohttp app on configurable host/port (default `127.0.0.1:8765`): `GET /` serves `index.html`; static routes serve `app.js` and `worklet.js`; `GET /ws` upgrades.
+- [x] **2.3.2** — Auth before upgrade: token from query param `token` or from `Sec-WebSocket-Protocol` (`bearer, <token>`; echo the `bearer` subprotocol on success). Invalid or missing token → HTTP 401 before upgrade. A token maps to exactly one person.
+- [x] **2.3.3** — `WebConversation`: binary frames in are PCM16 24 kHz mono; re-chunk to 20 ms `InputFrame`s with `t_ms` from the session's counter and `voiced_speakers = {person}` when the frame's RMS is above the configured voiced threshold. `play()` sends binary PCM16 24 kHz mono frames. `flush_playback()` sends `{"type":"interrupt"}` and returns ms actually played (from the pacer's released-ms count). `notify()` sends `{"type":"status", ...}` frames for transcript lines and the task list.
+- [x] **2.3.4** — Browser page: token entry stored in `sessionStorage`; connect/disconnect buttons; AudioWorklet mic capture resampled to 24 kHz PCM16 mono in 20 ms chunks; playback queue; flush the playback queue on `{"type":"interrupt"}`; live transcript; task list. No external scripts or CDNs.
+- [x] **2.3.5** — Unit tests with aiohttp's test client: 401 on missing/invalid token (both auth forms); successful upgrade with each form; binary in → `InputFrame`s with correct `t_ms` and voiced flag; `play()` → binary out; `flush_playback()` → interrupt frame; static files served.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_web_transport.py` passes with every case in 2.3.5.
-- [ ] **Requirements:**
-    - [ ] "aiohttp server on configurable host/port (default 127.0.0.1:8765); serves static page; `/ws` binary frames PCM16 24 kHz mono in and out; JSON control frames: `{"type":"interrupt"}`, `{"type":"status",...}`."
-    - [ ] "Page: token entry (stored in sessionStorage), connect/disconnect, live transcript, task list; playback flush on interrupt."
-    - [ ] "Web `/ws` upgrade without a valid token (query param `token` or `Sec-WebSocket-Protocol` bearer) → HTTP 401 before upgrade; token maps to exactly one person."
-- [ ] **Verify:** `curl -i http://127.0.0.1:8765/ws` against a running server returns `401`; open `/` in a browser (manual, optional) and confirm the token field and connect button render.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_web_transport.py` passes with every case in 2.3.5.
+- [x] **Requirements:**
+    - [x] "aiohttp server on configurable host/port (default 127.0.0.1:8765); serves static page; `/ws` binary frames PCM16 24 kHz mono in and out; JSON control frames: `{"type":"interrupt"}`, `{"type":"status",...}`."
+    - [x] "Page: token entry (stored in sessionStorage), connect/disconnect, live transcript, task list; playback flush on interrupt."
+    - [x] "Web `/ws` upgrade without a valid token (query param `token` or `Sec-WebSocket-Protocol` bearer) → HTTP 401 before upgrade; token maps to exactly one person."
+- [x] **Verify:** `curl -i http://127.0.0.1:8765/ws` against a running server returns `401`; open `/` in a browser (manual, optional) and confirm the token field and connect button render.
 
 ---
 
