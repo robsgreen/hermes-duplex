@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 119 / 161 sub-tasks complete (4.3.6 MAY deferred)
+> **Progress:** 122 / 161 sub-tasks complete (4.3.6 MAY deferred)
 
 **Read before every task:**
 
@@ -974,19 +974,19 @@ tests/contract/test_realtime_adapter.py       (modify)
 
 **Sub-tasks:**
 
-- [ ] **6.3.1** — Dialect switch in `realtime.py`: base URL `https://api.x.ai/v1` (as `wss://api.x.ai/v1/realtime`), flat session fields, `xai_` voice prefix, ignore ping and unknown events, `supports_truncate` false. Validate `server_vad` only (config already rejects others; keep a guard).
-- [ ] **6.3.2** — Register `xai-realtime` (dialect `xai`, key env from config).
-- [ ] **6.3.3** — Contract tests: "Grok dialect" (flat `session.update` shape, voice `xai_` prefix, no truncate sent on `SpeechStarted`, ping ignored, `"unimplemented"` status details tolerated).
+- [x] **6.3.1** — Dialect switch in `realtime.py`: base URL `https://api.x.ai/v1` (as `wss://api.x.ai/v1/realtime`), flat session fields, `xai_` voice prefix, ignore ping and unknown events, `supports_truncate` false. Validate `server_vad` only (config already rejects others; keep a guard).
+- [x] **6.3.2** — Register `xai-realtime` (dialect `xai`, key env from config).
+- [x] **6.3.3** — Contract tests: "Grok dialect" (flat `session.update` shape, voice `xai_` prefix, no truncate sent on `SpeechStarted`, ping ignored, `"unimplemented"` status details tolerated).
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/contract/test_realtime_adapter.py` passes, including the Grok cases.
-- [ ] **Requirements:**
-    - [ ] "xai dialect: base_url https://api.x.ai/v1, flat session fields, `xai_` voice prefix, ignore ping/unknown events, truncate capability false."
-    - [ ] Edge case "Grok truncate unsupported → Capability false → cancel-only".
-    - [ ] Success criterion "provider swap to Grok via config" (research-decisions.md).
-- [ ] **Verify:** Change only `provider.name` to `xai-realtime` in a test config and confirm `build_service` constructs the xai dialect without other changes.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/contract/test_realtime_adapter.py` passes, including the Grok cases.
+- [x] **Requirements:**
+    - [x] "xai dialect: base_url https://api.x.ai/v1, flat session fields, `xai_` voice prefix, ignore ping/unknown events, truncate capability false."
+    - [x] Edge case "Grok truncate unsupported → Capability false → cancel-only".
+    - [x] Success criterion "provider swap to Grok via config" (research-decisions.md).
+- [x] **Verify:** Change only `provider.name` to `xai-realtime` in a test config and confirm `build_service` constructs the xai dialect without other changes.
 
 ---
 
