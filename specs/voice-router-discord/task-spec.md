@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 138 / 161 sub-tasks complete (4.3.6 MAY deferred)
+> **Progress:** 142 / 161 sub-tasks complete (4.3.6 MAY deferred)
 
 **Read before every task:**
 
@@ -587,18 +587,18 @@ tests/unit/test_router_eval.py            (create)
 
 **Sub-tasks:**
 
-- [ ] **3.4.1** — Extend `phrases.yaml` toward 30–50 labelled utterances per profile, including ASR-style noise, follow-ups (with the preceding phrase), out-of-scope phrases, and `_control` phrases, each with expected profile and effort.
-- [ ] **3.4.2** — `eval.py`: run each backend alone and the composite over the file; compute accuracy, macro-F1, confusion matrix, effort exact and off-by-one rate, latency p50/p95/p99, and deadline-miss rate.
-- [ ] **3.4.3** — CLI: `hermes-duplex eval-router <phrases.yaml> [--backend knn|decisions|jev|composite] [--json] [--config PATH]` and the same under `hermes duplex eval-router`. Human table by default, JSON with `--json`; exit 0 when the run completes.
-- [ ] **3.4.4** — Unit test with a stub backend on a small fixture: exact metric values, confusion matrix, off-by-one, percentiles, miss rate, JSON output schema, exit code 0.
+- [x] **3.4.1** — Extend `phrases.yaml` toward 30–50 labelled utterances per profile, including ASR-style noise, follow-ups (with the preceding phrase), out-of-scope phrases, and `_control` phrases, each with expected profile and effort.
+- [x] **3.4.2** — `eval.py`: run each backend alone and the composite over the file; compute accuracy, macro-F1, confusion matrix, effort exact and off-by-one rate, latency p50/p95/p99, and deadline-miss rate.
+- [x] **3.4.3** — CLI: `hermes-duplex eval-router <phrases.yaml> [--backend knn|decisions|jev|composite] [--json] [--config PATH]` and the same under `hermes duplex eval-router`. Human table by default, JSON with `--json`; exit 0 when the run completes.
+- [x] **3.4.4** — Unit test with a stub backend on a small fixture: exact metric values, confusion matrix, off-by-one, percentiles, miss rate, JSON output schema, exit code 0.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_router_eval.py` passes.
-- [ ] **Requirements:**
-    - [ ] "Prints accuracy, macro-F1, confusion matrix, effort exact + off-by-one rate, latency p50/p95/p99, deadline-miss rate, per backend and composite; exit 0; `--json` output option. Unit test on a fixture with a stub backend."
-- [ ] **Verify:** `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` prints the table and exits 0 (needs the model2vec model download once).
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_router_eval.py` passes.
+- [x] **Requirements:**
+    - [x] "Prints accuracy, macro-F1, confusion matrix, effort exact + off-by-one rate, latency p50/p95/p99, deadline-miss rate, per backend and composite; exit 0; `--json` output option. Unit test on a fixture with a stub backend."
+- [x] **Verify:** `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` prints the table and exits 0 (needs the model2vec model download once).
 
 ---
 
