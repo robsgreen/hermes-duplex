@@ -102,3 +102,4 @@ PR: (none)
 - 2026-11-03 07:16 - Fix Once verified and committed; scoped re-review dispatched (both seats)
 - 2026-11-03 07:23 - Review complete: round 2 surfaced P25,P27 (medium), P26,P28,P29 (low); P7 unresolved; final checks pass. Observations + P23/P24/P30 go to PR gate
 - 2026-11-03 07:23 - Phase → Wrap-up
+- 2026-11-03 07:27 - Post-mortem written (drift 2/11/1, 7 action items); dispatching doc-keeper for retro
