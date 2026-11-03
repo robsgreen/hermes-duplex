@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 62 / 161 sub-tasks complete (Phase 1, Tasks 2.1, 2.3 done)
+> **Progress:** 65 / 161 sub-tasks complete (Phase 1, Tasks 2.1, 2.3, 5.1 done)
 
 **Read before every task:**
 
@@ -759,19 +759,19 @@ tests/unit/test_mixer.py              (create)
 
 **Sub-tasks:**
 
-- [ ] **5.1.1** — `resample.py`: `soxr.ResampleStream`-based streaming resamplers that keep state across chunks: 48 kHz stereo → provider input rate mono (24 kHz or 16 kHz; downmix by averaging channels), and provider output rate mono → 48 kHz stereo (duplicate channels). If Task 1.1.1 found no `soxr` wheel, implement the same API with `numpy` polyphase resampling instead.
-- [ ] **5.1.2** — Mixer: per 20 ms tick, take each speaker's 48 kHz stereo frame, drop frames from people not on the allowlist before mixing, sum the rest with int32 accumulation and clip to int16, and return the mixed frame plus the set of person ids whose frames were voiced (RMS above the voiced threshold).
-- [ ] **5.1.3** — Unit tests: "Resample continuity" (1 s sine split in odd chunks matches a one-shot resample within tolerance, no discontinuity at chunk joins); stereo/mono conversion; "Unknown Discord user" (frames from a non-allowlisted speaker absent from the mix); clipping; voiced set.
+- [x] **5.1.1** — `resample.py`: `soxr.ResampleStream`-based streaming resamplers that keep state across chunks: 48 kHz stereo → provider input rate mono (24 kHz or 16 kHz; downmix by averaging channels), and provider output rate mono → 48 kHz stereo (duplicate channels). If Task 1.1.1 found no `soxr` wheel, implement the same API with `numpy` polyphase resampling instead.
+- [x] **5.1.2** — Mixer: per 20 ms tick, take each speaker's 48 kHz stereo frame, drop frames from people not on the allowlist before mixing, sum the rest with int32 accumulation and clip to int16, and return the mixed frame plus the set of person ids whose frames were voiced (RMS above the voiced threshold).
+- [x] **5.1.3** — Unit tests: "Resample continuity" (1 s sine split in odd chunks matches a one-shot resample within tolerance, no discontinuity at chunk joins); stereo/mono conversion; "Unknown Discord user" (frames from a non-allowlisted speaker absent from the mix); clipping; voiced set.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_resample.py tests/unit/test_mixer.py` passes.
-- [ ] **Requirements:**
-    - [ ] "resample to provider input rate with soxr streaming (carry state, no clicks)."
-    - [ ] "Audio from unknown Discord users is dropped before mixing (unit test with mixed SSRCs)."
-    - [ ] "hermes_duplex/audio/mixer.py — per-tick mix of allowed speakers (sum + clip), per-tick voiced-speaker attribution ring buffer".
-- [ ] **Verify:** Print the maximum sample difference at chunk joins in the continuity test; it is within the stated tolerance.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_resample.py tests/unit/test_mixer.py` passes.
+- [x] **Requirements:**
+    - [x] "resample to provider input rate with soxr streaming (carry state, no clicks)."
+    - [x] "Audio from unknown Discord users is dropped before mixing (unit test with mixed SSRCs)."
+    - [x] "hermes_duplex/audio/mixer.py — per-tick mix of allowed speakers (sum + clip), per-tick voiced-speaker attribution ring buffer".
+- [x] **Verify:** Print the maximum sample difference at chunk joins in the continuity test; it is within the stated tolerance.
 
 ---
 
