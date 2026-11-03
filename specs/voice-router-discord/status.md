@@ -24,3 +24,4 @@ PR: (none)
 - 2026-11-03 00:57 - Router research returned (research-router.md)
 - 2026-11-03 00:58 - Prior-art research returned (research-prior-art.md)
 - 2026-11-03 00:59 - Hermes research returned (research-hermes.md)
+- 2026-11-03 01:02 - Voice API research returned (research-voice-apis.md); all research in
