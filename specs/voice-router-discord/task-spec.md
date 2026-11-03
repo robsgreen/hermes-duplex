@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 45 / 161 sub-tasks complete (Tasks 1.1, 1.2, 1.3, 1.5, 1.6 done)
+> **Progress:** 52 / 161 sub-tasks complete (Tasks 1.1-1.3, 1.5, 1.6, 2.1 done)
 
 **Read before every task:**
 
@@ -288,26 +288,26 @@ tests/unit/test_router_composite.py   (create)
 
 **Sub-tasks:**
 
-- [ ] **2.1.1** — `router/base.py`: `Effort`, `ProfileSpec`, `RouteRequest`, `RouteDecision`, `BackendResult`, `RouterBackend` exactly as in the plan's Interfaces.
-- [ ] **2.1.2** — `router/knn.py`: model2vec static embeddings (default model `minishlab/potion-base-8M`; configurable) over each profile's description plus examples, and `_control`'s examples. `configure()` embeds once; `classify()` returns softmax-normalized cosine scores as `profile_probs`, `effort_probs=None`, `followup_prob=None`. Run the embedding in a thread so the event loop is not blocked. Tests must not download a model: inject an embedding function, and use a tiny deterministic fake embedder in unit tests.
-- [ ] **2.1.3** — `_control`: built-in examples (status: "what are you working on", "any updates", "how's that task going"; cancel: "cancel that", "stop that task", "never mind") merged with optional config examples. Choices always include the default profile and `_control`. A `_control` decision carries which intent (status or cancel) and never dispatches to Hermes.
-- [ ] **2.1.4** — `CompositeRouter` (fast path only for now): accept the knn result; apply the sticky rule per speaker (active profile expires after `sticky_idle_s`, default 600; leave the active profile only if follow-up prob < 0.5 and the winner beats active by ≥ 0.2; when `followup_prob` is None, leave only if the winner beats active by ≥ 0.3); if knn top < 0.5, fall back to active profile, else the default profile; effort default `medium` when no effort probabilities exist.
-- [ ] **2.1.5** — Model lookup: `profiles.<p>.models.<effort>`; a missing cell uses `default_model`; else `model=None` (Hermes profile default). Leave room for the main path with a backend list and a `deadline_ms` parameter that Task 3.1 uses.
-- [ ] **2.1.6** — Decision log: one structured `logging` line per decision with speaker, profile, effort, model, confidence, top-3 probabilities, source backend, latency_ms, sticky flag.
-- [ ] **2.1.7** — Unit tests (stub backends and the fake embedder): route portfolio phrase → stock-picker; sticky follow-up "and what about Tesla" stays on stock-picker with `sticky=True`; topic switch "what's the weather tomorrow" → general; sticky expiry after idle; both sticky thresholds; `_control` status and cancel; model table cell, `default_model` fallback, `None`; one log line with all fields.
+- [x] **2.1.1** — `router/base.py`: `Effort`, `ProfileSpec`, `RouteRequest`, `RouteDecision`, `BackendResult`, `RouterBackend` exactly as in the plan's Interfaces.
+- [x] **2.1.2** — `router/knn.py`: model2vec static embeddings (default model `minishlab/potion-base-8M`; configurable) over each profile's description plus examples, and `_control`'s examples. `configure()` embeds once; `classify()` returns softmax-normalized cosine scores as `profile_probs`, `effort_probs=None`, `followup_prob=None`. Run the embedding in a thread so the event loop is not blocked. Tests must not download a model: inject an embedding function, and use a tiny deterministic fake embedder in unit tests.
+- [x] **2.1.3** — `_control`: built-in examples (status: "what are you working on", "any updates", "how's that task going"; cancel: "cancel that", "stop that task", "never mind") merged with optional config examples. Choices always include the default profile and `_control`. A `_control` decision carries which intent (status or cancel) and never dispatches to Hermes.
+- [x] **2.1.4** — `CompositeRouter` (fast path only for now): accept the knn result; apply the sticky rule per speaker (active profile expires after `sticky_idle_s`, default 600; leave the active profile only if follow-up prob < 0.5 and the winner beats active by ≥ 0.2; when `followup_prob` is None, leave only if the winner beats active by ≥ 0.3); if knn top < 0.5, fall back to active profile, else the default profile; effort default `medium` when no effort probabilities exist.
+- [x] **2.1.5** — Model lookup: `profiles.<p>.models.<effort>`; a missing cell uses `default_model`; else `model=None` (Hermes profile default). Leave room for the main path with a backend list and a `deadline_ms` parameter that Task 3.1 uses.
+- [x] **2.1.6** — Decision log: one structured `logging` line per decision with speaker, profile, effort, model, confidence, top-3 probabilities, source backend, latency_ms, sticky flag.
+- [x] **2.1.7** — Unit tests (stub backends and the fake embedder): route portfolio phrase → stock-picker; sticky follow-up "and what about Tesla" stays on stock-picker with `sticky=True`; topic switch "what's the weather tomorrow" → general; sticky expiry after idle; both sticky thresholds; `_control` status and cancel; model table cell, `default_model` fallback, `None`; one log line with all fields.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** Router unit tests pass with every case in 2.1.7, without network access.
-- [ ] **Requirements:**
-    - [ ] "Choices always include the default profile and `_control`; `_control` decisions never dispatch to Hermes."
-    - [ ] Sticky rule thresholds and 10 min idle expiry, including the `followup_prob is None` rule.
-    - [ ] "`_control` uses built-in examples (…) merged with optional config examples".
-    - [ ] "Model = `profiles.<p>.models.<effort>` (ModelChoice: provider + model, both required); missing cell falls back to profile `default_model`, else Hermes profile default (omit model in request)."
-    - [ ] "Every decision logs one structured line: speaker, profile, effort, model, confidence, top-3 probabilities, source backend, latency_ms, sticky flag."
-    - [ ] "Router sees all profiles; permission check happens after routing."
-- [ ] **Verify:** Run one real classification with the real model2vec model in a one-liner (network allowed) and confirm the latency in the log line is under 50 ms after warm-up.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** Router unit tests pass with every case in 2.1.7, without network access.
+- [x] **Requirements:**
+    - [x] "Choices always include the default profile and `_control`; `_control` decisions never dispatch to Hermes."
+    - [x] Sticky rule thresholds and 10 min idle expiry, including the `followup_prob is None` rule.
+    - [x] "`_control` uses built-in examples (…) merged with optional config examples".
+    - [x] "Model = `profiles.<p>.models.<effort>` (ModelChoice: provider + model, both required); missing cell falls back to profile `default_model`, else Hermes profile default (omit model in request)."
+    - [x] "Every decision logs one structured line: speaker, profile, effort, model, confidence, top-3 probabilities, source backend, latency_ms, sticky flag."
+    - [x] "Router sees all profiles; permission check happens after routing."
+- [x] **Verify:** Run one real classification with the real model2vec model in a one-liner (network allowed) and confirm the latency in the log line is under 50 ms after warm-up.
 
 ---
 

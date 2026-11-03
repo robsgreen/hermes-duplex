@@ -47,3 +47,5 @@ PR: (none)
 - 2026-11-03 04:18 - Dispatched sdlc-coder: Task 1.4 (parallel with 1.5)
 - 2026-11-03 04:19 - Tasks 1.2+1.5 verified (ruff/format/pyright clean, 98 tests) and committed. 1.5 handoffs for Task 2.2: start_run returns RunStart(run_id|None, queued); move tracker to running before terminal after queued; move Effort to router/base.py in 2.1; close client
 - 2026-11-03 04:19 - Dispatched sdlc-coder: Task 2.1 (parallel with 1.4)
+- 2026-11-03 04:28 - Task 2.1 verified (scoped gate clean, 62 tests) and committed. Handoffs: Task 2.2 must call router.route(text, speaker, history=, hint=) (router owns active_profile); Task 2.4 must await router.configure(); knn real model lazily fetched into HF cache (warm cache for e2e)
+- 2026-11-03 04:28 - Dispatched sdlc-coder: Task 2.3 (parallel with 1.4)
