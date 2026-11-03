@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 65 / 161 sub-tasks complete (Phase 1, Tasks 2.1, 2.3, 5.1 done)
+> **Progress:** 71 / 161 sub-tasks complete (Phase 1, Tasks 2.1-2.3, 5.1 done)
 
 **Read before every task:**
 
@@ -325,24 +325,24 @@ tests/unit/test_session_no_provider_names.py (create)
 
 **Sub-tasks:**
 
-- [ ] **2.2.1** — Audio pump in: read `Conversation.frames()`, record each frame's `voiced_speakers` in the `AttributionRing` at its `t_ms`, and send PCM to the provider. Audio pump out: `OutputAudio` → `OutputPacer` → `Conversation.play()`.
-- [ ] **2.2.2** — Delegation flow for `DelegationRequested` with `tool_args`: create a `routing` task; credit the speaker with the most voiced ticks in the 4 s of `t_ms` before the call arrived (ties → most recent voiced); no voiced ticks → no dispatch and `provider.say("who's asking?")`. Route with `RouteRequest(text, speaker, history, active_profile, hint)`.
-- [ ] **2.2.3** — After routing: `_control` status → spoken summary of that speaker's running tasks; `_control` cancel → `TaskTracker` cancel and spoken confirmation. Routed profile not allowed → no dispatch, spoken refusal naming the profile, logged.
-- [ ] **2.2.4** — Dispatch: `start_run(profile, text, "duplex-{person}-{profile}", model, effort, task uuid)`; persist and then announce "started" (or "queued behind task N" when another task for the same person and profile is still open); stream events; `progress` → `provider.report_progress` (throttled to at most 1 per 5 s per delegation); terminal → `provider.deliver_result` with `frame_result(...)` for success, or a short failure/cancel notice. Tasks on different profiles run concurrently.
-- [ ] **2.2.5** — Branch only on `capabilities`, never on provider name. Write `test_session_no_provider_names.py`: a lint-style test that fails when `session.py` compares any value to a provider name string (`"gpt-live"`, `"openai-realtime"`, `"xai-realtime"`, `"fake"`, `"openai"`, `"xai"`).
-- [ ] **2.2.6** — Unit tests with the fake provider, a stub router, the fake Hermes API, and an in-memory `Conversation`: portfolio delegation dispatches to stock-picker with the right body; refusal for a disallowed person (no run, `say` contains the profile name); "who's asking?" with no voiced ticks; `_control` status and cancel (cancel hits `/stop`); second task same person+profile announces "queued behind task 1"; progress throttle; result text framed as data; Hermes unreachable → spoken notice.
+- [x] **2.2.1** — Audio pump in: read `Conversation.frames()`, record each frame's `voiced_speakers` in the `AttributionRing` at its `t_ms`, and send PCM to the provider. Audio pump out: `OutputAudio` → `OutputPacer` → `Conversation.play()`.
+- [x] **2.2.2** — Delegation flow for `DelegationRequested` with `tool_args`: create a `routing` task; credit the speaker with the most voiced ticks in the 4 s of `t_ms` before the call arrived (ties → most recent voiced); no voiced ticks → no dispatch and `provider.say("who's asking?")`. Route with `RouteRequest(text, speaker, history, active_profile, hint)`.
+- [x] **2.2.3** — After routing: `_control` status → spoken summary of that speaker's running tasks; `_control` cancel → `TaskTracker` cancel and spoken confirmation. Routed profile not allowed → no dispatch, spoken refusal naming the profile, logged.
+- [x] **2.2.4** — Dispatch: `start_run(profile, text, "duplex-{person}-{profile}", model, effort, task uuid)`; persist and then announce "started" (or "queued behind task N" when another task for the same person and profile is still open); stream events; `progress` → `provider.report_progress` (throttled to at most 1 per 5 s per delegation); terminal → `provider.deliver_result` with `frame_result(...)` for success, or a short failure/cancel notice. Tasks on different profiles run concurrently.
+- [x] **2.2.5** — Branch only on `capabilities`, never on provider name. Write `test_session_no_provider_names.py`: a lint-style test that fails when `session.py` compares any value to a provider name string (`"gpt-live"`, `"openai-realtime"`, `"xai-realtime"`, `"fake"`, `"openai"`, `"xai"`).
+- [x] **2.2.6** — Unit tests with the fake provider, a stub router, the fake Hermes API, and an in-memory `Conversation`: portfolio delegation dispatches to stock-picker with the right body; refusal for a disallowed person (no run, `say` contains the profile name); "who's asking?" with no voiced ticks; `_control` status and cancel (cancel hits `/stop`); second task same person+profile announces "queued behind task 1"; progress throttle; result text framed as data; Hermes unreachable → spoken notice.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_session.py tests/unit/test_session_no_provider_names.py` passes with every case in 2.2.6.
-- [ ] **Requirements:**
-    - [ ] "Session code branches only on capabilities, never on provider name (lint-style unit test: no provider-name string comparisons in session.py)."
-    - [ ] "Task credited to the person with the most voiced 20 ms ticks in … the 4 s of t_ms before the function call arrived (Realtime); ties → most recent voiced; no voiced ticks → no dispatch, spoken "who's asking?""
-    - [ ] "Routed profile not allowed for that person → no dispatch, spoken refusal naming the profile, logged."
-    - [ ] "`_control` status → spoken summary of running tasks for that speaker; cancel → stops the most recent running task of that speaker (or named by number)."
-    - [ ] "Same (person, profile) runs serialize …; the voice model is told "queued behind task N"; different profiles run concurrently."
-- [ ] **Verify:** Run the refusal test with `-s --log-level=INFO` and confirm one decision log line and one refusal log line.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_session.py tests/unit/test_session_no_provider_names.py` passes with every case in 2.2.6.
+- [x] **Requirements:**
+    - [x] "Session code branches only on capabilities, never on provider name (lint-style unit test: no provider-name string comparisons in session.py)."
+    - [x] "Task credited to the person with the most voiced 20 ms ticks in … the 4 s of t_ms before the function call arrived (Realtime); ties → most recent voiced; no voiced ticks → no dispatch, spoken "who's asking?""
+    - [x] "Routed profile not allowed for that person → no dispatch, spoken refusal naming the profile, logged."
+    - [x] "`_control` status → spoken summary of running tasks for that speaker; cancel → stops the most recent running task of that speaker (or named by number)."
+    - [x] "Same (person, profile) runs serialize …; the voice model is told "queued behind task N"; different profiles run concurrently."
+- [x] **Verify:** Run the refusal test with `-s --log-level=INFO` and confirm one decision log line and one refusal log line.
 
 ---
 

@@ -54,3 +54,5 @@ PR: (none)
 - 2026-11-03 04:36 - Task 2.3 verified (scoped gate clean, 26 tests) and committed. Handoff for 2.2/2.4: notify() shapes {transcript:{speaker,text}}, {tasks:[{number,profile,state,text}]}, {message}; t_ms resets per socket (rebase on provider reconnect belongs in session, Task 4.4); WebTransport.port for port 0
 - 2026-11-03 04:37 - Dispatched sdlc-coder: Tasks 3.2, 4.1, 5.1, 5.2 (parallel with 2.2; disjoint files)
 - 2026-11-03 04:40 - Task 5.1 verified (scoped clean, tests pass) and committed. Handoff for 5.4: mix_allowed per tick -> StreamResampler(48000, provider_rate, in_channels=2); output StreamResampler(provider_rate, 48000, out_channels=2)
+- 2026-11-03 04:41 - Task 2.2 verified (scoped clean, tests pass) and committed. Deviation accepted: task created after routing+permission (no task numbers burned on refusals/_control). Handoffs: 6.1.3 receipt needs reserved task number (tasks numbered after routing); tool-style refusal/_control/who's-asking paths send no function output yet (Phase 6); unused prompts HERMES_UNREACHABLE/not_configured; 2.4 needs configured router
+- 2026-11-03 04:41 - Dispatched sdlc-coder: Task 2.4
