@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 113 / 161 sub-tasks complete
+> **Progress:** 119 / 161 sub-tasks complete (4.3.6 MAY deferred)
 
 **Read before every task:**
 
@@ -691,25 +691,25 @@ tests/contract/test_gpt_live_session.py   (create)
 
 **Sub-tasks:**
 
-- [ ] **4.3.1** — Transcript windows: keep input transcript deltas with their `start_ms`/`end_ms`. On `DelegationRequested` with `tool_args=None`, the task text is the input transcript from the previous delegation's offset (or the last 30 s) up to `offset_ms + 1500` ms grace, plus the last assistant output sentence as context. When two delegations arrive within 1 s, split the windows at the first delegation's offset so each gets its own text.
-- [ ] **4.3.2** — Attribution for live style: credit the person with the most voiced ticks in `[offset_ms − 4000, offset_ms + 500]` (same `t_ms` timeline); wait until `t_ms` passes `offset_ms + 500` before crediting.
-- [ ] **4.3.3** — `audio/gate.py`: RMS loudness gate per allowlisted speaker with a threshold (dBFS, from config) and a hangover; `trip()` reports a rising edge.
-- [ ] **4.3.4** — Barge-in when `emits_speech_events` is false: run the gate on allowlisted input while the pacer holds or plays output; on a trip, call `Conversation.flush_playback()` and `pacer.drop()` within one 20 ms tick; send no truncate; later output deltas play normally.
-- [ ] **4.3.5** — Thinking throttle: at most 1 `report_progress` per 5 s per delegation; failures go through `deliver_result` as a short apology with the reason.
-- [ ] **4.3.6** — MAY (config flag, default off): pre-warm routing from input transcript deltas before `session.delegation.created`; when the delegation arrives and the window text matches, reuse the pending decision.
-- [ ] **4.3.7** — Contract tests (GPT-Live adapter over `fake_ws_server` + real session + stub router + fake Hermes API): "GPT-Live delegation" (task text = utterance; thinking.append on progress; commentary.append on completion); back-to-back delegations and overlapping speech produce two tasks with split text; "GPT-Live barge-in" (output streaming, input RMS above gate → flush + pacer drop within 1 tick, no truncate sent). Unit tests for the gate threshold and hangover.
+- [x] **4.3.1** — Transcript windows: keep input transcript deltas with their `start_ms`/`end_ms`. On `DelegationRequested` with `tool_args=None`, the task text is the input transcript from the previous delegation's offset (or the last 30 s) up to `offset_ms + 1500` ms grace, plus the last assistant output sentence as context. When two delegations arrive within 1 s, split the windows at the first delegation's offset so each gets its own text.
+- [x] **4.3.2** — Attribution for live style: credit the person with the most voiced ticks in `[offset_ms − 4000, offset_ms + 500]` (same `t_ms` timeline); wait until `t_ms` passes `offset_ms + 500` before crediting.
+- [x] **4.3.3** — `audio/gate.py`: RMS loudness gate per allowlisted speaker with a threshold (dBFS, from config) and a hangover; `trip()` reports a rising edge.
+- [x] **4.3.4** — Barge-in when `emits_speech_events` is false: run the gate on allowlisted input while the pacer holds or plays output; on a trip, call `Conversation.flush_playback()` and `pacer.drop()` within one 20 ms tick; send no truncate; later output deltas play normally.
+- [x] **4.3.5** — Thinking throttle: at most 1 `report_progress` per 5 s per delegation; failures go through `deliver_result` as a short apology with the reason.
+- [ ] **4.3.6** (DEFERRED: MAY item, default off; needs side-effect-free router mode + config flag — follow-up) — MAY (config flag, default off): pre-warm routing from input transcript deltas before `session.delegation.created`; when the delegation arrives and the window text matches, reuse the pending decision.
+- [x] **4.3.7** — Contract tests (GPT-Live adapter over `fake_ws_server` + real session + stub router + fake Hermes API): "GPT-Live delegation" (task text = utterance; thinking.append on progress; commentary.append on completion); back-to-back delegations and overlapping speech produce two tasks with split text; "GPT-Live barge-in" (output streaming, input RMS above gate → flush + pacer drop within 1 tick, no truncate sent). Unit tests for the gate threshold and hangover.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/contract/test_gpt_live_session.py tests/unit/test_gate.py` passes.
-- [ ] **Requirements:**
-    - [ ] "On `session.delegation.created`, emit DelegationRequested; the session derives task text from input transcript since the previous delegation (or last 30 s) up to offset_ms + 1500 ms grace, plus the last assistant output sentence; contract test covers back-to-back and overlapping delegations."
-    - [ ] "Barge-in: when emits_speech_events=false, the session runs audio/gate.py on allowlisted input …; gate trip → transport.flush_playback() + pacer.drop() within one 20 ms tick; later output deltas play normally … Contract test: output streaming, input energy rises → flush within 1 tick, held backlog dropped."
-    - [ ] "Task credited to the person with the most voiced 20 ms ticks in [offset_ms − 4000, offset_ms + 500] (GPT-Live)".
-    - [ ] "Progress → `session.thinking.append` (≤500 tokens, throttled to ≤1 per 5 s per delegation)".
-    - [ ] MAY "Pre-warm routing from GPT-Live input transcript deltas … behind a config flag; default off."
-- [ ] **Verify:** In the barge-in test, assert and print the elapsed ticks between the gate trip and the flush (must be ≤ 1).
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/contract/test_gpt_live_session.py tests/unit/test_gate.py` passes.
+- [x] **Requirements:**
+    - [x] "On `session.delegation.created`, emit DelegationRequested; the session derives task text from input transcript since the previous delegation (or last 30 s) up to offset_ms + 1500 ms grace, plus the last assistant output sentence; contract test covers back-to-back and overlapping delegations."
+    - [x] "Barge-in: when emits_speech_events=false, the session runs audio/gate.py on allowlisted input …; gate trip → transport.flush_playback() + pacer.drop() within one 20 ms tick; later output deltas play normally … Contract test: output streaming, input energy rises → flush within 1 tick, held backlog dropped."
+    - [x] "Task credited to the person with the most voiced 20 ms ticks in [offset_ms − 4000, offset_ms + 500] (GPT-Live)".
+    - [x] "Progress → `session.thinking.append` (≤500 tokens, throttled to ≤1 per 5 s per delegation)".
+    - [x] MAY "Pre-warm routing from GPT-Live input transcript deltas … behind a config flag; default off."
+- [x] **Verify:** In the barge-in test, assert and print the elapsed ticks between the gate trip and the flush (must be ≤ 1).
 
 ---
 

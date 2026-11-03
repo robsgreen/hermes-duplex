@@ -74,3 +74,5 @@ PR: (none)
 - 2026-11-03 05:02 - Dispatched sdlc-coder: Task 3.4 (+ router backend factory with close(); service.py wiring deferred until 5.4 lands)
 - 2026-11-03 05:02 - Task 6.1 verified (3 stable runs) and committed. Handoffs 6.2: add send_function_output to RealtimeProvider Protocol (no-op GPT-Live, recorded in Fake); receipt without number or reserve tracker entry; answer each call once. 6.3: XAI Dialect, check metadata echo. Suggest provider.transcription_model key
 - 2026-11-03 05:02 - Dispatched sdlc-coder: Task 6.3
+- 2026-11-03 05:03 - Task 4.3 verified and committed; 4.3.6 (MAY pre-warm) deferred with reason. Handoffs: service.py pass gate_threshold_dbfs (after 5.4); 4.4 clear _input_transcript/_output_transcript/_live_offsets on reconnect; live-style history lines empty (re-seed needs lines)
+- 2026-11-03 05:03 - Dispatched sdlc-coder: Task 4.4
