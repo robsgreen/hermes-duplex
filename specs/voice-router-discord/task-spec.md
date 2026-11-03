@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 52 / 161 sub-tasks complete (Tasks 1.1-1.3, 1.5, 1.6, 2.1 done)
+> **Progress:** 57 / 161 sub-tasks complete (Phase 1 + Task 2.1 done)
 
 **Read before every task:**
 
@@ -169,20 +169,20 @@ tests/unit/test_registry.py                   (create)
 
 **Sub-tasks:**
 
-- [ ] **1.4.1** — Define the JSONL script format: one step per line, each with a trigger (`at_input_ms`: fire once the provider has received this many ms of input audio; or `after_ms`: wall-clock delay after the previous step; or `on_sent`: fire after the session sends a matching call such as `deliver_result`) and an `event` that maps to one normalized `ProviderEvent` (for example `{"type": "delegation", "id": "d1", "tool_args": {"task": "how is my portfolio doing"}}`, `{"type": "output_audio", "ms": 600}`, `{"type": "speech_started"}`, `{"type": "close"}`). Document the format in the module docstring.
-- [ ] **1.4.2** — `FakeProvider` implements `RealtimeProvider`. Capabilities come from config (default: tool-style, 24 kHz, emits_speech_events true, truncate true, out-of-band true) so tests can run the session as either family. It counts input ms from `send_audio`, fires script steps, and records every call the session makes (`connect` args, `truncate`, `report_progress`, `deliver_result`, `say`, `close`) in memory and, when `record_path` is set, appends them as JSONL to that file so an out-of-process test can read them.
-- [ ] **1.4.3** — `registry.py`: name → factory map (`gpt-live`, `openai-realtime`, `xai-realtime`, `fake`); unregistered real adapters raise `NotImplementedError` until their tasks land; an unknown name raises `ConfigError`. Never pick a provider from available keys.
-- [ ] **1.4.4** — Write `delegate_portfolio.jsonl` (used by Tasks 2.4 and 2.5): after ~1500 ms of input, delegate "how is my portfolio doing"; later, after more input, delegate "and what about Tesla".
-- [ ] **1.4.5** — Unit tests: script triggers fire in order and on the right input ms; recording to memory and to `record_path`; capability override; registry fail-closed on an unknown name.
+- [x] **1.4.1** — Define the JSONL script format: one step per line, each with a trigger (`at_input_ms`: fire once the provider has received this many ms of input audio; or `after_ms`: wall-clock delay after the previous step; or `on_sent`: fire after the session sends a matching call such as `deliver_result`) and an `event` that maps to one normalized `ProviderEvent` (for example `{"type": "delegation", "id": "d1", "tool_args": {"task": "how is my portfolio doing"}}`, `{"type": "output_audio", "ms": 600}`, `{"type": "speech_started"}`, `{"type": "close"}`). Document the format in the module docstring.
+- [x] **1.4.2** — `FakeProvider` implements `RealtimeProvider`. Capabilities come from config (default: tool-style, 24 kHz, emits_speech_events true, truncate true, out-of-band true) so tests can run the session as either family. It counts input ms from `send_audio`, fires script steps, and records every call the session makes (`connect` args, `truncate`, `report_progress`, `deliver_result`, `say`, `close`) in memory and, when `record_path` is set, appends them as JSONL to that file so an out-of-process test can read them.
+- [x] **1.4.3** — `registry.py`: name → factory map (`gpt-live`, `openai-realtime`, `xai-realtime`, `fake`); unregistered real adapters raise `NotImplementedError` until their tasks land; an unknown name raises `ConfigError`. Never pick a provider from available keys.
+- [x] **1.4.4** — Write `delegate_portfolio.jsonl` (used by Tasks 2.4 and 2.5): after ~1500 ms of input, delegate "how is my portfolio doing"; later, after more input, delegate "and what about Tesla".
+- [x] **1.4.5** — Unit tests: script triggers fire in order and on the right input ms; recording to memory and to `record_path`; capability override; registry fail-closed on an unknown name.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** Fake provider and registry unit tests pass, covering every trigger kind, recording, and the unknown-name error.
-- [ ] **Requirements:**
-    - [ ] "hermes_duplex/providers/fake.py — scriptable fake provider (replays JSONL scripts; records what the session sent)".
-    - [ ] "hermes_duplex/providers/registry.py — name → factory; fail closed on unknown provider (never infer from available keys)".
-- [ ] **Verify:** Run a short script through the fake in a Python one-liner and read the `record_path` JSONL it writes.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** Fake provider and registry unit tests pass, covering every trigger kind, recording, and the unknown-name error.
+- [x] **Requirements:**
+    - [x] "hermes_duplex/providers/fake.py — scriptable fake provider (replays JSONL scripts; records what the session sent)".
+    - [x] "hermes_duplex/providers/registry.py — name → factory; fail closed on unknown provider (never infer from available keys)".
+- [x] **Verify:** Run a short script through the fake in a Python one-liner and read the `record_path` JSONL it writes.
 
 ---
 
