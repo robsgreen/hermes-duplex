@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 155 / 161 sub-tasks complete (4.3.6 MAY deferred; 7.1.1 fixtures pending user key)
+> **Progress:** 159 / 161 sub-tasks complete (4.3.6 MAY deferred; 7.1.1 fixtures pending user key)
 
 **Read before every task:**
 
@@ -934,21 +934,21 @@ tests/contract/test_realtime_session.py   (create)
 
 **Sub-tasks:**
 
-- [ ] **6.2.1** — Announcement queue (one queue per session): a result announcement waits until the model is idle (`OutputDone` after the last response), playback has drained, and no `SpeechStarted` is open; wait at most 20 s, then speak anyway. Announcement turns have tools disabled. Reference: hermes-talk `talk_cli.py:742-815` (pump) and `:178-218` (data framing) @e5ecfa9.
-- [ ] **6.2.2** — On `SpeechStarted`: `flush_playback()` within one tick, drop the pacer backlog; if `supports_truncate`, send `truncate(item_id, audio_end_ms = ms actually played)`; otherwise cancel only. Suppress function calls that belong to the interrupted response (reference: hermes-live-voice `openai-realtime.adapter.ts:403-418` @f896178).
-- [ ] **6.2.3** — `delegate`: send the receipt at once (Task 6.1.3), then route with `hint = tool_args.profile_hint`. `task_status` and `cancel_task` calls answer from the `TaskTracker` as function outputs.
-- [ ] **6.2.4** — Contract tests (Realtime adapter over `fake_ws_server` + session): "Barge-in" (`SpeechStarted` after 800 ms played → flush; `truncate(item, 800±20)`); function call from the interrupted response is not executed; announcement waits for `SpeechStopped` + idle + drain; announcement after the 20 s cap (injected clock); "Control intent" through `cancel_task` and through `_control` routing ("cancel that" → `/stop` + spoken confirmation); profile hint reaches `RouteRequest.hint`.
+- [x] **6.2.1** — Announcement queue (one queue per session): a result announcement waits until the model is idle (`OutputDone` after the last response), playback has drained, and no `SpeechStarted` is open; wait at most 20 s, then speak anyway. Announcement turns have tools disabled. Reference: hermes-talk `talk_cli.py:742-815` (pump) and `:178-218` (data framing) @e5ecfa9.
+- [x] **6.2.2** — On `SpeechStarted`: `flush_playback()` within one tick, drop the pacer backlog; if `supports_truncate`, send `truncate(item_id, audio_end_ms = ms actually played)`; otherwise cancel only. Suppress function calls that belong to the interrupted response (reference: hermes-live-voice `openai-realtime.adapter.ts:403-418` @f896178).
+- [x] **6.2.3** — `delegate`: send the receipt at once (Task 6.1.3), then route with `hint = tool_args.profile_hint`. `task_status` and `cancel_task` calls answer from the `TaskTracker` as function outputs.
+- [x] **6.2.4** — Contract tests (Realtime adapter over `fake_ws_server` + session): "Barge-in" (`SpeechStarted` after 800 ms played → flush; `truncate(item, 800±20)`); function call from the interrupted response is not executed; announcement waits for `SpeechStopped` + idle + drain; announcement after the 20 s cap (injected clock); "Control intent" through `cancel_task` and through `_control` routing ("cancel that" → `/stop` + spoken confirmation); profile hint reaches `RouteRequest.hint`.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/contract/test_realtime_session.py` passes.
-- [ ] **Requirements:**
-    - [ ] "On SpeechStarted: transport flushes playback; if supports_truncate, send conversation.item.truncate with audio_end_ms = ms actually played; suppress function calls from the interrupted response."
-    - [ ] Edge case "Announcement while user speaking → Wait for SpeechStopped + model idle + playback drained, max 20 s, then speak anyway".
-    - [ ] SHOULD "Pass an optional `profile_hint` from the Realtime `delegate` tool into RouteRequest".
-    - [ ] "announcement turns have tools disabled. Unit test asserts template and tool-disable."
-- [ ] **Verify:** In the barge-in test, print the `audio_end_ms` sent; it is within 800 ± 20.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/contract/test_realtime_session.py` passes.
+- [x] **Requirements:**
+    - [x] "On SpeechStarted: transport flushes playback; if supports_truncate, send conversation.item.truncate with audio_end_ms = ms actually played; suppress function calls from the interrupted response."
+    - [x] Edge case "Announcement while user speaking → Wait for SpeechStopped + model idle + playback drained, max 20 s, then speak anyway".
+    - [x] SHOULD "Pass an optional `profile_hint` from the Realtime `delegate` tool into RouteRequest".
+    - [x] "announcement turns have tools disabled. Unit test asserts template and tool-disable."
+- [x] **Verify:** In the barge-in test, print the `audio_end_ms` sent; it is within 800 ± 20.
 
 ---
 

@@ -1,7 +1,7 @@
 # Master Plan: hermes-duplex (voice router over Discord and web)
 
 Created: 2026-11-03
-Status: confirmed
+Status: in-progress
 
 ---
 
@@ -608,6 +608,15 @@ transports:
   discord: {enabled: true, bot_token_env: DUPLEX_DISCORD_TOKEN}
   web: {enabled: true, host: 127.0.0.1, port: 8765}
 ```
+
+#### Interface amendments during implementation (2026-11-03)
+
+- `ResponseStarted` added to `ProviderEvent` (Realtime maps `response.created`); the session tracks the floor from it.
+- `RealtimeProvider.send_function_output(call_id, payload)` added (no-op for GPT-Live); every tool call gets exactly one output.
+- `delegate` receipt is `{"status":"started"}` (no task number: tasks are numbered after routing and permission); the number is spoken in the start / "queued behind task N" announcement.
+- `HermesApiClient.start_run` returns `RunStart(run_id | None, queued)`; failures raise `HermesApiError(reason, code)`.
+- `CompositeRouter.route(text, speaker, *, history, hint)` owns per-speaker active profile; `RouterBackend.close()` added; backends built by `router/factory.build_backends`.
+- Gateway seam: `ctx.register_platform("duplex")` (register() runs on a loop-less loader thread).
 
 ### Error Handling & Edge Cases
 
