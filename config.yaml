@@ -1,0 +1,18 @@
+# SDLC harness settings. Every key is optional; missing keys use these defaults.
+review:
+  panel: claude            # claude = two Claude reviewers; codex = one Claude reviewer + Codex CLI
+  claude_models: [opus, opus]    # seat A, seat B (seat B is used only when panel: claude); a different model in seat B adds diversity
+  codex_model: ""          # empty = Codex CLI default model
+  plan_reviewer: claude    # claude | codex
+  plan_reviewer_model: opus
+base:
+  branch: ""               # empty = origin/HEAD, else origin/main, else origin/master
+worktrees:
+  base: ""                 # empty = <REPO_ROOT>/../<repo-dir-name>-worktrees
+  branch_prefix: sdlc/
+state:
+  sync: auto               # auto = on only in Claude Code cloud sessions; on | off
+  branch: sdlc-state       # orphan branch that stores .sdlc/
+pr:
+  squash: true             # squash to one commit before the first push
+  trailer: true            # append Harness-* trailers to harness commits

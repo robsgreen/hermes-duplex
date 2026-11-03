@@ -20,3 +20,4 @@ PR: (none)
 ## Session Log
 
 - 2026-11-03 00:53 - Spec created
+- 2026-11-03 00:54 - Workspace setup complete (no commands established yet); permissions allowlist skipped (blocked by auto-mode classifier)
