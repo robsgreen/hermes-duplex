@@ -10,3 +10,6 @@
 - 2026-11-03: Decision 3: A — fix Q12, Q13, Q14, P25, P27, P7 and implement decision 1 (B) before pushing.
 - 2026-11-03: Decision 4 (P7): A — split long GPT-Live appends into consecutive parts at a safe 1 char/token (~500 chars each), same delegation id; no tokenizer dependency.
 - 2026-11-03: Decision 5: A — after fixes pass review and final checks, squash to one commit, push to claude/upbeat-clarke-1vcz7v, open a draft PR on robsgreen/hermes-duplex listing manual to-dos (user consent recorded; conditional on green checks).
+- 2026-11-03: Round-5 decision U1 (privacy): C — always read full adopted results wherever the person is next heard (current behavior; documented).
+- 2026-11-03: Round-5 decision U2: A — restore only tasks younger than 24 h (configurable); older ones marked unknown silently.
+- 2026-11-03: Round-5 decision 3: A — fix S1–S8 + U1 doc + U2 cutoff, one review; if no critical/high, push (squash, draft PR) with any remaining minor items listed as known issues; no further fix round.

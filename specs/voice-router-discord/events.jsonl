@@ -75,3 +75,7 @@
 {"event":"dispatch","ts":"2026-11-03 16:07","agent":"sdlc-reviewer"}
 {"event":"dispatch","ts":"2026-11-03 16:07","agent":"sdlc-reviewer"}
 {"ts":"2026-11-03 16:14","event":"review_round","round":5,"critical":0,"high":0,"medium":3,"low":5,"crossLens":2}
+{"event":"dispatch","ts":"2026-11-03 17:24","agent":"sdlc-coder"}
+{"event":"review_fix_cycle","ts":"2026-11-03 17:24"}
+{"event":"dispatch","ts":"2026-11-03 17:46","agent":"sdlc-reviewer"}
+{"event":"dispatch","ts":"2026-11-03 17:46","agent":"sdlc-reviewer"}

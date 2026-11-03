@@ -120,3 +120,7 @@ PR: (none)
 - 2026-11-03 15:39 - Decision 5: A (squash, push, draft PR after green). change-final-fixes.md written; coder dispatched
 - 2026-11-03 16:07 - Final fixes verified (gate green, 760 default x2, 4 e2e) and committed; review dispatched
 - 2026-11-03 16:14 - Round 5 review: 0 crit/high, 3 medium, 5 low, 2 user decisions (privacy, restore age). Push held; asking user one by one
+- 2026-11-03 17:20 - User decision U1: C (always read full result)
+- 2026-11-03 17:20 - User decision U2: A (24 h restore cutoff, configurable)
+- 2026-11-03 17:24 - Decision 3: A; change-round5-fixes.md written; coder dispatched
+- 2026-11-03 17:46 - Round-5 fixes verified (gate green, 785 default x2, 4 e2e; only reseed goldens changed) and committed; last review dispatched
