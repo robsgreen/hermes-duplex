@@ -32,7 +32,7 @@ A **realtime voice model** is a speech-to-speech model you stream microphone aud
 | Realtime | OpenAI Realtime (`gpt-realtime-2.1`), xAI Grok Voice | Function tools: the model calls a function and waits for its output |
 | Gemini Live | `gemini-3.8-live` | Non-blocking function tools with scheduling hints |
 
-OpenAI's audio guide recommends GPT-Live for new conversational apps. When you said "client dispatch mode", GPT-Live's client delegation is the feature that matches.
+OpenAI's audio documentation recommends GPT-Live for new conversational apps (sources in `research-voice-apis.md`). When you said "client dispatch mode", GPT-Live's client delegation is the feature that matches.
 
 ### The Problem
 
@@ -159,6 +159,30 @@ sequenceDiagram
   VS->>RT: out-of-band response with result, tools disabled
 ```
 
+#### Interruptions
+
+The providers decide when to stop talking. Our job is to keep stale audio out of your ears. Realtime providers send `speech_started`, so the session flushes playback and trims the interrupted reply to what you heard. GPT-Live sends no speech or timing events on its WebSocket, so the session handles it locally. It keeps the transport at most about 200 ms ahead of real time. A loudness gate on allowlisted audio flushes that backlog when someone starts talking over the model.
+
+```mermaid
+sequenceDiagram
+  participant You
+  participant T as Transport
+  participant VS as VoiceSession
+  participant P as Provider
+  P->>VS: output audio (bursty)
+  VS->>T: release paced, max ~200 ms ahead
+  You->>T: start talking
+  alt Realtime family
+    P->>VS: speech_started
+    VS->>T: flush playback
+    VS->>P: truncate at played ms
+  else GPT-Live
+    T->>VS: loudness gate trips
+    VS->>T: flush playback, drop held backlog
+  end
+  P->>VS: new output (if the model keeps talking)
+```
+
 #### Router
 
 The router answers three questions per task: which profile, which effort level, and whether the task follows up on the last one. Two backends run in parallel. A local phrase matcher (static embeddings over each profile's example phrases) answers in a few milliseconds. A decision model (OpenAI Decisions by default, or Jev) answers all three questions in one call. The router does not classify the model. It looks the model up in a profile-by-effort table from config, which keeps model choice deterministic and editable.
@@ -182,13 +206,15 @@ flowchart TD
 
 The **sticky rule** keeps a follow-up like "and what about Tesla?" on the profile you are already using. You leave that profile only when the follow-up probability drops below a threshold and another profile wins by a clear margin. Every decision lands in a log line with the probabilities, the backend that won, and the latency.
 
+Each person gets one Hermes session per profile, so follow-ups keep their context. Hermes runs turns in one session first-in first-out. A second task for the same person and profile therefore queues behind the first, and the voice model says so ("queued behind your portfolio check"). Tasks on different profiles run in parallel.
+
 Two control intents ("what are you working on?", "cancel that") route to a reserved `_control` choice and run locally against the TaskTracker. GPT-Live has no function tools, so the router is the only place those intents can land.
 
 #### Discord transport
 
 The plugin runs its own Discord bot with its own token. Hermes's built-in Discord bot keeps working untouched. For receive, we adapt Hermes core's `VoiceReceiver` (MIT, about 520 lines) into our package with attribution. It hooks discord.py's voice socket, decrypts the transport layer and then DAVE through the `davey` library, and decodes Opus per speaker. We pin discord.py to the version that receiver targets, because it touches discord.py's socket internals.
 
-Each 20 ms tick, the transport mixes the frames of allowlisted speakers into one mono stream and drops everyone else. It records which person produced voiced audio in each tick, so the session can credit a task to its speaker. When nobody talks, Discord stops sending packets, so the transport feeds paced silence to keep the provider's voice-activity detection working. On playback it never returns empty bytes, because an empty read kills discord.py's player thread.
+Each 20 ms tick, the transport mixes the frames of allowlisted speakers into one mono stream and drops everyone else. It records which person produced voiced audio in each tick, so the session can credit a task to its speaker. After a rejoin, Discord may not resend the speaking event that maps a stream to a person. We keep Hermes's fallback: when exactly one allowlisted person is in the channel, unmapped audio belongs to them, and otherwise we drop it. When nobody talks, Discord stops sending packets, so the transport feeds paced silence to keep the provider's voice-activity detection working. On playback it never returns empty bytes, because an empty read kills discord.py's player thread.
 
 ```mermaid
 flowchart LR
@@ -218,13 +244,13 @@ The plugin starts the service inside the Hermes gateway and stops it on unload. 
 - **Smart speaker transport.** The transport interface leaves room for it, but v1 builds only Discord and web.
 - **Gemini Live.** Its protocol is a third family. We add it after the two v1 adapters prove the provider interface.
 - **Sharing Hermes's own Discord bot.** That needs a plugin voice hook. RFC #77111 proposes one, and we can switch when it lands.
-- **Local voice-activity detection, echo cancellation, or turn-taking.** The providers own all of it.
+- **Local turn-taking or echo cancellation.** The providers decide when to speak and when to yield. The only local speech detection is the GPT-Live loudness gate, which flushes playback and decides nothing else.
 - **Training a custom router model.** Routing works zero-shot from profile descriptions and example phrases.
 - **Running Hermes's agent loop in-process.** We go through the API server even inside the gateway, to stay off private interfaces.
 
 ### Alternatives & Trade-offs
 
-**Fork hermes-talk.** It already does Discord, GPT-Live, Grok, and background tasks (MIT, 179 stars, active). Its size killed it: about 122k lines built around one profile, with Discord audio that patches private Hermes attributes. You chose a separate bot, which removes the main reason to share its Discord lane. We borrow its proven tricks (paced silence, silent underrun frames, truncation at the played offset, the data-framed announcement) as reference.
+**Fork hermes-talk.** It already does Discord, GPT-Live, Grok, and background tasks (MIT, 179 stars on its GitHub page on 2026-11-03, commits weekly). Its size killed it: about 122k lines built around one profile, with Discord audio that patches private Hermes attributes. You chose a separate bot, which removes the main reason to share its Discord lane. We borrow its proven tricks (paced silence, silent underrun frames, truncation at the played offset, the data-framed announcement) as reference.
 
 **Build on Pipecat.** Pipecat 1.15 (BSD-2) has adapters for GPT-Live, OpenAI Realtime, Grok, Gemini, and Nova Sonic. It has no Discord transport, and its pipeline model would own our session logic. Hermes plugins must also declare upper-bounded dependencies, and Pipecat pulls a large tree. We read its adapter source for edge cases instead.
 
@@ -234,6 +260,8 @@ The plugin starts the service inside the Hermes gateway and stops it on unload. 
 
 **Use `discord-ext-voice-recv` or py-cord for receive.** voice-recv is broken under DAVE. py-cord 2.8.1 wires DAVE decryption into receive, but its docs still warn that recording may not work, and switching libraries means leaving discord.py. Hermes's receiver works today on discord.py, and we keep py-cord as the fallback if adapting it fails.
 
+**Use the official `openai` Python SDK.** It has typed clients for GPT-Live and Realtime. Hermes core pins `openai==2.54.0`, and GPT-Live arrived in 3.x, so the plugin cannot install it into the gateway's environment. Running out of process (`python_runtime: external`) would lose the in-gateway lifecycle. We speak both wire protocols over `websockets`, which Hermes already ships, and read the SDK's types as the reference.
+
 Accepted trade-offs:
 
 | We give up | We get |
@@ -241,7 +269,7 @@ Accepted trade-offs:
 | A second Discord bot to create and invite | No dependency on Hermes internals |
 | Maintaining an adapted DAVE receiver | Working encrypted receive on the library Hermes already ships |
 | A loopback HTTP hop per task | Per-call profile, model, effort, progress, stop, and session continuity |
-| Writing our own provider adapters | A small core shaped around routing |
+| Writing our own provider adapters and wire protocol code | A small core shaped around routing, installable inside the gateway |
 
 ### How We Get There
 
@@ -258,6 +286,8 @@ We deliver one PR in six milestones. Each milestone ends green on the CI tiers t
 
 - **The adapted receiver depends on discord.py internals.** A discord.py upgrade can break it. We pin the version, and a unit test fails if the hooked attributes disappear.
 - **DAVE re-keys and unmapped speakers produce noise.** Garbage audio makes realtime models hallucinate (hermes-talk #8). The receiver drops frames from unmapped speakers and frames decrypted under a stale key generation.
+- **Dependencies must fit Hermes core's exact pins** (`aiohttp==3.14.5`, `websockets==15.0.1`, `numpy==2.5.4`, `discord.py[voice]==2.7.1`). `soxr` and `model2vec` are new to the environment and need Python 3.14 wheels. A CI check resolves our dependencies against Hermes's constraints, and task 1 confirms the wheels exist. If `soxr` lacks one, we fall back to `numpy`-based polyphase resampling.
+- **GPT-Live barge-in latency depends on the loudness gate.** A gate that trips on background noise cuts the model off. We gate only allowlisted speakers and tune the threshold in the live checklist.
 - **OpenAI Decisions publishes no latency numbers.** If it misses the 300 ms deadline often, the router falls back to the matcher, and the eval command shows the miss rate. Jev measured 127 ms median in LiteLLM's benchmark.
 - **GPT-Live's delegation event carries no task text.** Transcript windowing may cut a request short or merge two requests. The contract tests cover overlapping speech and back-to-back delegations.
 - **Grok may reject `conversation.item.truncate`.** The adapter declares truncate as a capability and falls back to cancel-only.
@@ -265,7 +295,6 @@ We deliver one PR in six milestones. Each milestone ends green on the CI tiers t
 - **Real-Hermes end-to-end in CI** needs Hermes installable on Python 3.14 in GitHub Actions. It also needs a profile pointed at our fake OpenAI-compatible endpoint. If either fails, that tier runs locally only, and we record that in the README.
 - **Provider sessions expire.** OpenAI Realtime caps sessions at 60 minutes, and GPT-Live's cap is undocumented. The session reconnects and re-seeds a short summary. Long calls get a live check, not a CI test.
 - [ ] Which model fills each cell of the default profile-by-effort table? We ship a commented example, and you fill in your own models.
-- [ ] What does the `target` field on `session.delegation.created` contain? We log it and decide from real traffic.
 
 ### FAQ
 
@@ -285,19 +314,22 @@ We deliver one PR in six milestones. Each milestone ends green on the CI tiers t
 ### Scope
 
 ```
-Repo: /home/user/hermes-duplex (currently only README.md). Python 3.14, uv, src layout not used; package dir at repo root.
+Repo: /home/user/hermes-duplex (currently only README.md). Python 3.14, uv.
+Layout (decided; mirrors hermes-talk, which `hermes plugins install` clones into ~/.hermes/plugins/<name>/): repo root IS the plugin dir and holds plugin.yaml + a thin root __init__.py (`from .hermes_duplex.plugin import register`); all code lives in the hermes_duplex/ subpackage and is imported relatively. pytest uses `--import-mode=importlib` with `testpaths=["tests"]` so the root __init__.py does not make tests import the repo as a package; pyright `include = ["hermes_duplex", "tests"]`.
 
 Files to create:
-- pyproject.toml — project "hermes-duplex"; requires-python ">=3.14,<3.15"; deps with upper bounds:
-    discord.py[voice]==2.7.1, davey>=0.2,<0.3, aiohttp>=3.14,<4, websockets>=15,<16, openai>=3.42,<4,
-    soxr>=0.5,<1, numpy>=2,<3, pyyaml>=6,<7, model2vec>=0.6,<1
-  optional extra "jev": typesafe-sdk; dev group: pytest, pytest-asyncio, ruff, pyright, aioresponses
+- pyproject.toml — project "hermes-duplex"; requires-python ">=3.14,<3.15"; deps with upper bounds, each range MUST contain Hermes core's exact pin (hermes-agent @6112c2a pyproject.toml):
+    discord.py[voice]==2.7.1 (brings davey; core pins it), aiohttp>=3.14.5,<4 (core 3.14.5), websockets>=15.0.1,<16 (core 15.0.1),
+    numpy>=2.5,<3 (core 2.5.4), pyyaml>=6,<7, soxr>=0.5,<1 (new; verify cp314 wheel), model2vec>=0.6,<1 (new; verify cp314 wheel + its deps vs core pins)
+  NO `openai` dependency (core pins openai==2.54.0; GPT-Live needs >=3.42): GPT-Live and Realtime protocols implemented over `websockets`; openai 3.42.1 wheel types (scratchpad/oa) are the protocol reference only.
+  Jev backend uses aiohttp directly (no typesafe-sdk). dev group: pytest, pytest-asyncio, ruff, pyright
   [project.scripts] hermes-duplex = "hermes_duplex.cli:main"; ruff + pyright + pytest config (markers: e2e, live)
 - uv.lock — committed
 - plugin.yaml — Hermes manifest v2: name hermes-duplex, version 0.1.0, manifest_version 2, api_version (match hermes-agent @6112c2a),
     description, provides_hooks/commands, requires_env (none mandatory), python_runtime default (in-process), license MIT
-- __init__.py at repo root OR hermes_duplex/__init__.py exposing register(ctx) — follow Hermes plugin discovery (verify against hermes-agent plugins/AGENTS.md: plugin dir root must contain plugin.yaml + __init__.py with register)
-- hermes_duplex/__init__.py — package; register(ctx): registers `/duplex` command (status|join|leave), `hermes duplex` CLI subcommands (serve, eval-router, doctor), and starts DuplexService via the lifecycle seam chosen in task 1
+- __init__.py (repo root) — `from .hermes_duplex.plugin import register` only
+- hermes_duplex/__init__.py — package marker
+- hermes_duplex/plugin.py — register(ctx): registers Hermes-side `/duplex` command (status only: active conversations, running tasks, provider; no join — joining is the own bot's Discord slash command), `hermes duplex` CLI subcommands (serve, eval-router, doctor), and starts DuplexService via the lifecycle seam chosen in task 1 (spike: registered platform whose connect() starts the service vs ctx.spawn_task; record outcome in docs/system/architecture.md)
 - hermes_duplex/config.py — load/validate duplex.yaml (default $HERMES_HOME/duplex.yaml, override --config / HERMES_DUPLEX_CONFIG); dataclasses; env-var indirection for secrets
 - hermes_duplex/service.py — DuplexService: builds transports, provider factory, router, dispatcher; start()/stop(); one VoiceSession per active conversation
 - hermes_duplex/session.py — VoiceSession: audio pump both ways, provider event loop, delegation → task flow, permission check, announcement queue, barge-in handling, reconnect/re-seed
@@ -306,9 +338,12 @@ Files to create:
 - hermes_duplex/audio/frames.py — PCM16 frame helpers, 20 ms framing, carry buffers
 - hermes_duplex/audio/resample.py — soxr-based stereo48k↔mono24k/16k streaming resamplers
 - hermes_duplex/audio/mixer.py — per-tick mix of allowed speakers (sum + clip), per-tick voiced-speaker attribution ring buffer
+- hermes_duplex/audio/gate.py — RMS loudness gate (per allowlisted speaker, hangover) used for GPT-Live local barge-in
+- hermes_duplex/audio/pacer.py — output pacer: holds provider audio, releases to transport ≤ lead_ms (default 200) ahead of real time; drop() discards held backlog
 - hermes_duplex/providers/base.py — RealtimeProvider Protocol, ProviderCapabilities, normalized event dataclasses
-- hermes_duplex/providers/gpt_live.py — GPT-Live adapter via openai client.live.connect() (client delegation)
-- hermes_duplex/providers/realtime.py — Realtime-family adapter via openai client.realtime.connect(); dialects "openai" and "xai" (base_url https://api.x.ai/v1, flat session shape, xai_ voice prefix, ping tolerance, truncate capability off)
+- hermes_duplex/providers/wire.py — shared WebSocket client (websockets 15): connect with auth headers, JSON event send/recv, ping tolerance, reconnect backoff
+- hermes_duplex/providers/gpt_live.py — GPT-Live adapter over wire.py (endpoint URL + event shapes from openai 3.42.1 `resources/live` + `types/live/*`; client delegation)
+- hermes_duplex/providers/realtime.py — Realtime-family adapter over wire.py (wss://api.openai.com/v1/realtime?model=…); dialects "openai" and "xai" (base_url https://api.x.ai/v1, flat session shape, xai_ voice prefix, ping tolerance, truncate capability off)
 - hermes_duplex/providers/fake.py — scriptable fake provider (replays JSONL scripts; records what the session sent)
 - hermes_duplex/providers/registry.py — name → factory; fail closed on unknown provider (never infer from available keys)
 - hermes_duplex/router/base.py — RouteRequest, RouteDecision, RouterBackend Protocol, ProfileSpec
@@ -335,7 +370,7 @@ Files to create:
 - tests/live/test_live_gpt_live.py (marker live) — real Hermes + real GPT-Live + Decisions via web transport with committed WAV fixtures
 - tests/fixtures/provider_scripts/*.jsonl, tests/fixtures/router_eval/phrases.yaml, tests/fixtures/audio/*.wav, tests/fakes/fake_llm.py (OpenAI-compatible chat completions stub for Hermes profiles)
 - tests/fixtures/hermes_home/ — template for two test profiles (general, stock-picker) with fake-LLM provider config
-- .github/workflows/ci.yml — uv sync --frozen; ruff check; ruff format --check; pyright; pytest -m "not live"; e2e job installs hermes-agent pinned SHA
+- .github/workflows/ci.yml — uv sync --frozen; ruff check; ruff format --check; pyright; pytest -m "not live and not e2e"; deps-compat job (resolve our deps with hermes-agent @6112c2a pyproject as constraints); e2e job installs hermes-agent pinned SHA and runs -m e2e
 - docs/system/architecture.md — how it works (layers, flows)
 - docs/live-checklist.md — manual Discord/GPT-Live/Grok checklist
 - AGENTS.md (+ CLAUDE.md pointer) — contributor entry point: layout, commands, rules
@@ -353,6 +388,7 @@ Off-limits (do NOT touch):
 
 MUST: Ship as a Hermes plugin that installs with `hermes plugins install` and passes `hermes plugins validate`.
 - `plugin.yaml` validates under hermes-agent @6112c2a's loader (`hermes plugins validate <path>` exits 0 in the real-Hermes e2e job).
+- A CI job resolves the package's dependencies with hermes-agent @6112c2a's pins as constraints and fails on conflict; `openai` is absent from the dependency tree.
 - `register(ctx)` only uses documented ctx methods (register_command, register_cli_command, register_hook, register_platform or spawn_task, on_unload, get_config); a test asserts no `import gateway`/`hermes_cli` internals in the package (grep-based).
 
 MUST: Load config from `duplex.yaml` with validation that fails closed.
@@ -365,12 +401,15 @@ MUST: Run the same DuplexService in-gateway and standalone (`hermes duplex serve
 
 MUST: Define a provider interface with normalized events and declared capabilities.
 - Events: SessionReady, SpeechStarted, SpeechStopped, OutputAudio(pcm, item_id), OutputDone, InputTranscript(delta, final), OutputTranscript(delta), DelegationRequested(id, offset_ms, target, tool_args|None), Error, Closed.
-- Capabilities: input_rate, output_rate, supports_truncate, supports_out_of_band_response, delegation_style ("live"|"tool"), max_session_s.
+- Capabilities: input_rate, output_rate, supports_truncate, supports_out_of_band_response, emits_speech_events, delegation_style ("live"|"tool"), max_session_s.
+- GPT-Live emits no SpeechStarted/SpeechStopped/OutputDone and no item ids (WebSocket output deltas carry no timing; openai 3.42.1 types/live/server_event.py); its capabilities set emits_speech_events=false, supports_truncate=false. Realtime family sets emits_speech_events=true.
 - Session code branches only on capabilities, never on provider name (lint-style unit test: no provider-name string comparisons in session.py).
 
 MUST: Implement the GPT-Live adapter with client delegation.
 - session.start sends instructions from prompts.py, voice from config, `delegation: {type: "client"}`.
 - On `session.delegation.created`, emit DelegationRequested; the session derives task text from input transcript since the previous delegation (or last 30 s) up to offset_ms + 1500 ms grace, plus the last assistant output sentence; contract test covers back-to-back and overlapping delegations.
+- Barge-in: when emits_speech_events=false, the session runs audio/gate.py on allowlisted input while the pacer holds or plays output; gate trip → transport.flush_playback() + pacer.drop() within one 20 ms tick; later output deltas play normally (model decides whether to continue). Contract test: output streaming, input energy rises → flush within 1 tick, held backlog dropped.
+- Log `session.delegation.created.target` (Literal client|responses|decisions; expect "client").
 - Progress → `session.thinking.append` (≤500 tokens, throttled to ≤1 per 5 s per delegation); final result → `session.commentary.append` with delegation_id; failures → commentary with a short apology and reason.
 
 MUST: Implement the Realtime adapter with dialects "openai" and "xai".
@@ -384,8 +423,9 @@ MUST: Implement the router with a pluggable backend interface and composite poli
 - Backends: knn (local), decisions (OpenAI), jev (TypeSafe; base_url configurable). Selected by config; `knn` always runs as fast path when enabled.
 - Composite: main-path deadline default 300 ms (configurable); fast path accepted early when top prob ≥ 0.85 and margin ≥ 0.3 and consistent with sticky profile; fallback order main → knn (if top ≥ 0.5) → active profile → `general` (configurable default profile), effort default medium.
 - Choices always include the default profile and `_control`; `_control` decisions never dispatch to Hermes.
-- Sticky: per speaker, active profile expires after 10 min idle (configurable); leave active profile only if follow-up prob < 0.5 and the winner beats active by ≥ 0.2.
-- Model = `profiles.<p>.models.<effort>` (provider + model); missing cell falls back to profile `default_model`, else Hermes profile default (omit model in request).
+- Sticky: per speaker, active profile expires after 10 min idle (configurable); leave active profile only if follow-up prob < 0.5 and the winner beats active by ≥ 0.2. When followup_prob is None (knn/fallback/hint sources), leave active profile only if the winner beats active by ≥ 0.3.
+- `_control` uses built-in examples (status: "what are you working on", "any updates", "how's that task going"; cancel: "cancel that", "stop that task", "never mind") merged with optional config examples; decision backends get `_control` as a choice with a fixed description.
+- Model = `profiles.<p>.models.<effort>` (ModelChoice: provider + model, both required); missing cell falls back to profile `default_model`, else Hermes profile default (omit model in request).
 - Circuit breaker: after 3 consecutive main-path failures/timeouts, skip main path for 30 s.
 - Every decision logs one structured line: speaker, profile, effort, model, confidence, top-3 probabilities, source backend, latency_ms, sticky flag.
 - Router sees all profiles; permission check happens after routing.
@@ -397,16 +437,18 @@ MUST: Dispatch tasks via the Hermes API server.
 - `POST {base}/p/{profile}/v1/runs` with `{input, session_id, model?, provider?, model_options: {reasoning: {effort}}}`, bearer key for that profile, `Idempotency-Key` = task uuid.
 - `session_id` = `duplex-{person}-{profile}` (stable → follow-up context).
 - Stream `GET .../v1/runs/{id}/events`; map tool.started/completed and message.interim to progress, run.completed/failed/cancelled to terminal states; `POST .../stop` on cancel.
-- HTTP 409 on session bind → retry once with suffixed session id and log; connection refused → spoken "Hermes is unreachable" and task failed.
+- Error mapping keyed on response `code` (hermes-agent gateway/platforms/api_server_runs.py, api_server_authority_runs.py, session_api_turn.py): `session_busy` (409) → retry same session_id + same Idempotency-Key after 1 s, ≤5 times; `admission_queued` (503, x-should-retry false) → treat as accepted, never resend, poll `GET /p/{p}/v1/runs/{id}` (or events) until running; `runtime_draining`/`storage_unavailable` (503 + Retry-After) → retry same request + same Idempotency-Key honoring Retry-After, ≤3 times; `idempotency_key_conflict` (409) → bug: fail task, log error; any other 4xx/409 code (`profile_mismatch`, `permission_denied`, …) → fail task with spoken short reason; connection refused → spoken "Hermes is unreachable", task failed. session_id is NEVER changed on retry.
+- Same (person, profile) runs serialize in Hermes's session FIFO; TaskTracker state `queued` when a run is admitted but not started (`run.queued`/status queued), and the voice model is told "queued behind task N"; different profiles run concurrently. Contract test with the fake API returning session_busy then success, and admission_queued.
 
 MUST: Track tasks and support status and cancel.
-- TaskTracker states: routing → running → completed|failed|cancelled|unknown; persisted append-only JSONL before announcing "started".
+- TaskTracker states: routing → queued → running → completed|failed|cancelled|unknown (queued may be skipped); persisted append-only JSONL before announcing "started".
 - `_control` status → spoken summary of running tasks for that speaker; cancel → stops the most recent running task of that speaker (or named by number).
 
 MUST: Enforce people and permissions.
 - Audio from unknown Discord users is dropped before mixing (unit test with mixed SSRCs).
-- Web WS without a valid token → 401 close; token maps to exactly one person.
-- Task credited to the person with the most voiced 20 ms ticks in [offset_ms − 4000, offset_ms + 500] (GPT-Live) or the 4 s before the function call (Realtime); ties → most recent voiced.
+- Web `/ws` upgrade without a valid token (query param `token` or `Sec-WebSocket-Protocol` bearer) → HTTP 401 before upgrade; token maps to exactly one person.
+- Time base: `InputFrame.t_ms` = milliseconds of audio sent to the CURRENT provider session (frame count × 20), reset to 0 on provider (re)connect; GPT-Live `offset_ms` is on the same timeline. The attribution ring buffer is cleared on reconnect.
+- Task credited to the person with the most voiced 20 ms ticks in [offset_ms − 4000, offset_ms + 500] (GPT-Live) or the 4 s of t_ms before the function call arrived (Realtime); ties → most recent voiced; no voiced ticks → no dispatch, spoken "who's asking?". Unit test crossing a reconnect.
 - Routed profile not allowed for that person → no dispatch, spoken refusal naming the profile, logged.
 
 MUST: Frame Hermes results as data.
@@ -414,8 +456,9 @@ MUST: Frame Hermes results as data.
 
 MUST: Implement the Discord transport with its own bot.
 - Bot token from env; `/duplex join` (or text "join") joins the invoker's voice channel; `/duplex leave`; only people on the allowlist can invoke.
-- Receiver adapted from Hermes VoiceReceiver: NaCl + DAVE decrypt via davey, per-SSRC Opus decode at 48 kHz stereo, SSRC→user from SPEAKING events, stale key-generation and unmapped-SSRC frames dropped; streaming frames (no silence segmentation).
+- Receiver adapted from Hermes VoiceReceiver: NaCl + DAVE decrypt via davey, per-SSRC Opus decode at 48 kHz stereo, SSRC→user from SPEAKING events; unmapped SSRC → keep Hermes's sole-allowed-member inference (adapter.py:1050-1053, 1106-1124: attribute to the only allowlisted member in channel), else drop; stale key-generation frames dropped; streaming frames (no silence segmentation).
 - 20 ms mix tick; paced silence frames when no packets; resample to provider input rate with soxr streaming (carry state, no clicks).
+- Output audio passes through audio/pacer.py (lead ≤ 200 ms by default) for every provider, so a flush discards at most the lead plus held backlog.
 - Playback AudioSource returns a silent 3840-byte frame on underrun, never b""; bounded queue (5 s) drop-oldest; flush on SpeechStarted within one tick.
 - Reconnect: on voice disconnect/move, attempt rejoin up to 3 times with backoff, keeping the provider session; then end with a spoken message.
 - Unit test asserts the discord.py private attributes the receiver hooks exist on the pinned version.
@@ -434,7 +477,7 @@ MUST: Provide a real-Hermes end-to-end test (marker `e2e`).
 - Installs hermes-agent at pinned SHA 6112c2a into the test env (CI job; locally skipped with reason if `hermes` not importable/installed).
 - Creates temp HERMES_HOME with profiles `general` and `stock-picker`, each configured with an OpenAI-compatible custom provider pointing at `tests/fakes/fake_llm.py` (returns deterministic text per profile); enables API server with per-profile keys; installs this plugin from the repo path; starts `hermes gateway`.
 - Drives the web transport WS with the fake provider scripted to delegate "how is my portfolio doing" then "and what about Tesla"; router = knn with fixture phrases.
-- Asserts: run created on `/p/stock-picker/...`, second task reuses session id (sticky), fake LLM received the expected model + reasoning effort, result announced through provider (fake records commentary/announcement text), unauthorized person gets refusal and no run.
+- Asserts: run created on `/p/stock-picker/...`, second task reuses session id (sticky), the run's status/`requested_runtime` from `GET /p/stock-picker/v1/runs/{id}` reports the requested model, provider and reasoning effort (asserted at the Hermes boundary; the fake LLM is only asserted to receive the model name, since Hermes may drop reasoning params for custom endpoints), result announced through provider (fake records commentary/announcement text), unauthorized person gets refusal and no run.
 - Gateway shut down and temp home removed after test.
 
 SHOULD: Provide a live end-to-end test (marker `live`), skipped unless OPENAI_API_KEY and HERMES_DUPLEX_LIVE=1.
@@ -472,6 +515,12 @@ class RealtimeProvider(Protocol):
     async def close(self) -> None: ...
 
 @dataclass(frozen=True)
+class ModelChoice: provider: str; model: str          # provider REQUIRED (Hermes honors bare model only with allow_bare_model)
+
+ProviderEvent = (SessionReady | SpeechStarted | SpeechStopped | OutputAudio | OutputDone | InputTranscript
+                 | OutputTranscript | DelegationRequested | ProviderError | Closed)   # frozen dataclasses, fields per Requirements
+
+@dataclass(frozen=True)
 class DelegationRef: delegation_id: str | None; call_id: str | None; task_id: int
 
 # hermes_duplex/transports/base.py
@@ -503,12 +552,22 @@ class RouteDecision:
     probabilities: Mapping[str, float]; followup_prob: float | None
     sticky: bool; source: Literal["decisions", "jev", "knn", "hint", "sticky", "fallback"]; latency_ms: int
 
+@dataclass(frozen=True)
+class BackendResult:
+    profile_probs: Mapping[str, float]; effort_probs: Mapping[Effort, float] | None
+    followup_prob: float | None; latency_ms: int; backend: str
+
 class RouterBackend(Protocol):
     name: str
     async def configure(self, profiles: Sequence[ProfileSpec]) -> None: ...
     async def classify(self, req: RouteRequest, deadline_ms: int) -> BackendResult: ...  # probs for profile + effort + followup
 
 # hermes_duplex/dispatch/hermes_api.py
+@dataclass(frozen=True)
+class RunEvent:
+    kind: Literal["queued", "started", "progress", "message", "completed", "failed", "cancelled"]
+    text: str | None; raw: Mapping[str, Any]
+
 class HermesApiClient:
     async def start_run(self, profile: str, text: str, session_id: str, model: ModelChoice | None, effort: Effort, idem: str) -> str: ...
     def events(self, profile: str, run_id: str) -> AsyncIterator[RunEvent]: ...
@@ -540,6 +599,7 @@ profiles:
       low:    {provider: openai, model: <fill>}
       medium: {provider: openai, model: <fill>}
       high:   {provider: anthropic, model: <fill>}
+    default_model: {provider: openai, model: <fill>}   # used when an effort cell is missing
   general: {description: Anything else, examples: ["what's the weather", "set a reminder"]}
 people:
   rob:   {discord_id: "123", web_token_env: DUPLEX_TOKEN_ROB,   profiles: ["*"]}
@@ -568,10 +628,17 @@ transports:
 | Unmapped SSRC / stale DAVE generation | Frames dropped (never sent to provider) | Rekey handling from receiver |
 | Discord voice disconnect/move | Rejoin ≤3; provider session kept | Spoken end message after failures |
 | Playback queue overflow | Drop oldest frames | — |
-| Web token invalid | WS closed 4401 | — |
+| Web token invalid | HTTP 401 before upgrade | — |
 | Grok truncate unsupported | Capability false → cancel-only | — |
 | Result text longer than cap | Truncate with "…(more in Hermes)" | — |
-| HTTP 409 session bind | Retry once with suffixed session id | Logged |
+| Hermes `session_busy` (409) | Retry same session + Idempotency-Key after 1 s, ≤5 | Fail task with spoken reason |
+| Hermes `admission_queued` (503) | Accepted; poll status; never resend | TaskTracker `queued` |
+| Hermes `runtime_draining` / `storage_unavailable` (503) | Retry same request per Retry-After, ≤3 | Fail task |
+| Hermes other 409 / 4xx code | Fail task, speak short reason | Logged with code |
+| Second task same person+profile | Queued in Hermes FIFO; spoken "queued behind task N" | — |
+| GPT-Live barge-in | Loudness gate trip → flush playback + drop pacer backlog ≤1 tick | — |
+| Rejoin, SPEAKING not resent | Sole allowlisted member inference, else drop | Next SPEAKING event remaps |
+| No voiced speaker for a delegation | No dispatch; spoken "who's asking?" | — |
 
 ### Test Strategy
 
@@ -614,6 +681,11 @@ Key test scenarios:
 | Control intent | "cancel that" | running task stopped via /stop; spoken confirmation |
 | Provider reconnect | fake closes socket mid-task | reconnect, re-seed, result announced on new session |
 | Underrun | playback queue empty | AudioSource.read returns 3840 zero bytes |
+| GPT-Live barge-in | fake GPT-Live streaming output; allowlisted input RMS above gate | flush_playback + pacer.drop within 1 tick; no truncate sent |
+| Hermes busy session | fake API: session_busy then 202 | same session_id + Idempotency-Key resent; task runs |
+| Hermes admission queued | fake API: 503 admission_queued | no resend; TaskTracker queued → running via poll |
+| Deps compat | resolve with hermes-agent @6112c2a pins | resolves; no openai in tree |
+| Attribution across reconnect | delegation offset after provider reconnect | credited using new-session t_ms; ring buffer reset |
 | Resample continuity | 1 s sine split in odd chunks | output matches one-shot resample within tolerance, no discontinuity |
 
 ### Research Findings
@@ -629,7 +701,10 @@ Detailed notes: `research-prior-art.md`, `research-hermes.md`, `research-voice-a
   - Discord VoiceReceiver: `plugins/platforms/discord/adapter.py:703-1222` (NaCl + DAVE via `davey` at :1056, per-SSRC Opus, rekey streak); utterance-based (SILENCE_THRESHOLD 1.5 s) — we adapt to streaming.
   - GPT-Live desktop mode: `tools/voice_live.py` (LIVE_PERSONA, VOICE_LIVE_TURN_NOTE), `hermes_cli/web_routers/audio.py:180-210` (`delegation:{type:"client"}`).
   - Policy: `AGENTS.md`, `plugins/AGENTS.md` — standalone repos for third-party integrations, no core patching, internal imports not API.
-  - Runtime: Python 3.14, aiohttp 3.14.5, websockets 15.0.1, discord.py[voice]==2.7.1, uv, pytest 9.1.1.
+  - Runtime: Python 3.14, uv, pytest 9.1.1. Exact core pins (pyproject.toml): openai==2.54.0 (:40), websockets==15.0.1 (:136), discord.py[voice]==2.7.1 (:272), aiohttp==3.14.5 (:273), numpy==2.5.4 (:314). Plugins may not move core pins (pm/AGENTS.md:27; hermes_cli/plugins_loader.py:236-240).
+  - API server errors: gateway/platforms/api_server_runs.py (:558 idempotency_key_conflict, :730 session FIFO admission), api_server_authority_runs.py:18-34 (RuntimeStoreError → 409 default), session_api_turn.py:30-34 (admission_queued: never resend).
+  - Discord rejoin SSRC inference: plugins/platforms/discord/adapter.py:1050-1053, 1106-1124.
+  - GPT-Live WebSocket has no speech/timing events: openai 3.42.1 types/live/server_event.py, output_audio_delta_event.py; live-conversations.md:338; hermes-talk talk_live_protocol.py:241.
 
 #### External Research
 
@@ -643,7 +718,7 @@ Detailed notes: `research-prior-art.md`, `research-hermes.md`, `research-voice-a
 - Gemini Live: https://ai.google.dev/gemini-api/docs/live-api/capabilities.md.txt (deferred).
 - Jev: https://docs.typesafe.ai, LiteLLM benchmark https://docs.litellm.ai/blog/jev-auto-router-benchmark (p50 127 ms / p95 231 ms, 80 synthetic prompts).
 - model2vec (MIT) https://github.com/MinishLab/model2vec; semantic-router https://github.com/aurelio-labs/semantic-router.
-- Discord DAVE mandatory: https://discord.com/blog/every-voice-and-video-call-on-discord-is-now-end-to-end-encrypted; discord-ext-voice-recv DAVE issues #53/#61 (broken); py-cord 2.8.1 `discord/voice/receive/reader.py` dave.decrypt.
+- Discord DAVE mandatory: https://discord.com/blog/every-voice-and-video-call-on-discord-is-now-end-to-end-encrypted; discord-ext-voice-recv DAVE issues #53/#61 (broken) and unmerged DAVE PRs #54, #56, #58, #62, #65 (https://github.com/imayhaveborkedit/discord-ext-voice-recv/pulls, state as of 2026-10 per researcher); py-cord 2.8.1 `discord/voice/receive/reader.py` dave.decrypt.
 - Pipecat 1.15 https://docs.pipecat.ai/llms.txt (reference for adapter edge cases); Hermes RFC https://github.com/NousResearch/hermes-agent/issues/77111.
 
 #### User-Provided Artifacts
