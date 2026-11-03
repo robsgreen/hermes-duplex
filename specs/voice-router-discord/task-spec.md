@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 93 / 161 sub-tasks complete
+> **Progress:** 104 / 161 sub-tasks complete
 
 **Read before every task:**
 
@@ -402,24 +402,24 @@ docs/system/architecture.md                   (create)
 
 **Sub-tasks:**
 
-- [ ] **2.4.1** — Lifecycle seam spike. Install hermes-agent @`6112c2adb9e11f69734a29be9d2696f345ffa06a` into a scratch venv (`uv venv /tmp/h && uv pip install --python /tmp/h "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@6112c2adb9e11f69734a29be9d2696f345ffa06a"`) and read `hermes_cli/plugins.py` (`register_platform` at ~:779, `spawn_task` at ~:425 which calls `asyncio.get_running_loop()` and so needs a running loop, `on_unload` at ~:416) and `hermes_cli/plugin_isolation.py:35`. Determine whether `register()` runs with a running event loop in the gateway. Choose: (a) `ctx.spawn_task(service.run())` when a loop is running, or (b) `ctx.register_platform(...)` with an adapter whose `connect()` starts the service. Do not import Hermes internals at runtime in either choice. Record the outcome and the evidence in `docs/system/architecture.md` under a "Gateway lifecycle seam" heading.
-- [ ] **2.4.2** — `service.py`: `build_service(config) -> DuplexService` is the one factory both modes use. It builds the provider factory (registry), router (CompositeRouter with configured backends), `HermesApiClient`, `TaskTracker`, `PermissionChecker`, and enabled transports. `start()` starts transports; each new `Conversation` gets one `VoiceSession`. `stop()` cancels all tasks, closes provider sockets, disconnects transports, and closes the web server, and finishes within 5 s (enforce with `asyncio.timeout(5)`; log anything it had to abandon).
-- [ ] **2.4.3** — `plugin.py` `register(ctx)`: register the Hermes `/duplex` slash command (status only: active conversations, running tasks, provider name; no join); register the `duplex` CLI command with subcommands `serve` (this task), `eval-router` (Task 3.4 fills it), `doctor` (Task 6.4 fills it); start the service through the seam from 2.4.1; `ctx.on_unload(...)` stops it. A missing `duplex.yaml` logs one warning and does not start the service (the gateway keeps working). Update `plugin.yaml` if the seam registers anything that must be declared.
-- [ ] **2.4.4** — `cli.py`: `hermes-duplex serve [--config PATH]` and the same handlers for the Hermes CLI subcommands; `serve` runs `build_service(...)` until SIGINT/SIGTERM, then `stop()`.
-- [ ] **2.4.5** — `tests/fixtures/router_eval/phrases.yaml`: labelled phrases for `general` and `stock-picker` (and `_control`), including the plan's scenario phrases, with expected profile and effort. Tasks 2.5 and 3.4 reuse it. The knn router in tests uses its examples.
-- [ ] **2.4.6** — In-process e2e `tests/e2e/test_web_fake_provider.py` (runs in the default tier, no marker): start `build_service` with the fake provider (`delegate_portfolio.jsonl`), knn router (fake embedder or real model2vec if cached; prefer a deterministic embedder), and `fake_hermes_api`; connect an aiohttp WS client with rob's token; stream voiced PCM (a −20 dBFS sine) at real-time pace; assert a run on `/p/stock-picker/v1/runs`, the second task reuses `session_id` `duplex-rob-stock-picker` with `sticky=True` in the decision log, and the fake recorded `deliver_result` text containing the report template. Repeat with alex's token: refusal recorded via `say`, no run requested.
-- [ ] **2.4.7** — Unit tests: standalone startup and shutdown through `cli` handlers; `stop()` within 5 s even when a provider `close()` hangs (assert elapsed < 5.5 s); `register(ctx)` with a recording fake ctx registers only documented methods and does not raise when `duplex.yaml` is missing.
+- [x] **2.4.1** — Lifecycle seam spike. Install hermes-agent @`6112c2adb9e11f69734a29be9d2696f345ffa06a` into a scratch venv (`uv venv /tmp/h && uv pip install --python /tmp/h "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@6112c2adb9e11f69734a29be9d2696f345ffa06a"`) and read `hermes_cli/plugins.py` (`register_platform` at ~:779, `spawn_task` at ~:425 which calls `asyncio.get_running_loop()` and so needs a running loop, `on_unload` at ~:416) and `hermes_cli/plugin_isolation.py:35`. Determine whether `register()` runs with a running event loop in the gateway. Choose: (a) `ctx.spawn_task(service.run())` when a loop is running, or (b) `ctx.register_platform(...)` with an adapter whose `connect()` starts the service. Do not import Hermes internals at runtime in either choice. Record the outcome and the evidence in `docs/system/architecture.md` under a "Gateway lifecycle seam" heading.
+- [x] **2.4.2** — `service.py`: `build_service(config) -> DuplexService` is the one factory both modes use. It builds the provider factory (registry), router (CompositeRouter with configured backends), `HermesApiClient`, `TaskTracker`, `PermissionChecker`, and enabled transports. `start()` starts transports; each new `Conversation` gets one `VoiceSession`. `stop()` cancels all tasks, closes provider sockets, disconnects transports, and closes the web server, and finishes within 5 s (enforce with `asyncio.timeout(5)`; log anything it had to abandon).
+- [x] **2.4.3** — `plugin.py` `register(ctx)`: register the Hermes `/duplex` slash command (status only: active conversations, running tasks, provider name; no join); register the `duplex` CLI command with subcommands `serve` (this task), `eval-router` (Task 3.4 fills it), `doctor` (Task 6.4 fills it); start the service through the seam from 2.4.1; `ctx.on_unload(...)` stops it. A missing `duplex.yaml` logs one warning and does not start the service (the gateway keeps working). Update `plugin.yaml` if the seam registers anything that must be declared.
+- [x] **2.4.4** — `cli.py`: `hermes-duplex serve [--config PATH]` and the same handlers for the Hermes CLI subcommands; `serve` runs `build_service(...)` until SIGINT/SIGTERM, then `stop()`.
+- [x] **2.4.5** — `tests/fixtures/router_eval/phrases.yaml`: labelled phrases for `general` and `stock-picker` (and `_control`), including the plan's scenario phrases, with expected profile and effort. Tasks 2.5 and 3.4 reuse it. The knn router in tests uses its examples.
+- [x] **2.4.6** — In-process e2e `tests/e2e/test_web_fake_provider.py` (runs in the default tier, no marker): start `build_service` with the fake provider (`delegate_portfolio.jsonl`), knn router (fake embedder or real model2vec if cached; prefer a deterministic embedder), and `fake_hermes_api`; connect an aiohttp WS client with rob's token; stream voiced PCM (a −20 dBFS sine) at real-time pace; assert a run on `/p/stock-picker/v1/runs`, the second task reuses `session_id` `duplex-rob-stock-picker` with `sticky=True` in the decision log, and the fake recorded `deliver_result` text containing the report template. Repeat with alex's token: refusal recorded via `say`, no run requested.
+- [x] **2.4.7** — Unit tests: standalone startup and shutdown through `cli` handlers; `stop()` within 5 s even when a provider `close()` hangs (assert elapsed < 5.5 s); `register(ctx)` with a recording fake ctx registers only documented methods and does not raise when `duplex.yaml` is missing.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest -m "not live and not e2e"` passes, including `tests/e2e/test_web_fake_provider.py`, the lifecycle tests, and the register test.
-- [ ] **Requirements:**
-    - [ ] "Both paths construct DuplexService through one factory; … a unit test exercises standalone startup/shutdown."
-    - [ ] "Service stop cancels all tasks, closes provider sockets, disconnects Discord, closes web server within 5 s (asserted)."
-    - [ ] "register(ctx): registers Hermes-side `/duplex` command (status only …), `hermes duplex` CLI subcommands (serve, eval-router, doctor), and starts DuplexService via the lifecycle seam chosen in task 1 … record outcome in docs/system/architecture.md".
-    - [ ] "In-process e2e: web WS → session (fake provider) → knn router → fake Hermes API; runs in default CI".
-- [ ] **Verify:** `uv run hermes-duplex serve --config <test config>` starts, `curl -i 127.0.0.1:8765/` returns 200, and Ctrl-C exits in under 5 s. `docs/system/architecture.md` names the chosen seam and the evidence.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest -m "not live and not e2e"` passes, including `tests/e2e/test_web_fake_provider.py`, the lifecycle tests, and the register test.
+- [x] **Requirements:**
+    - [x] "Both paths construct DuplexService through one factory; … a unit test exercises standalone startup/shutdown."
+    - [x] "Service stop cancels all tasks, closes provider sockets, disconnects Discord, closes web server within 5 s (asserted)."
+    - [x] "register(ctx): registers Hermes-side `/duplex` command (status only …), `hermes duplex` CLI subcommands (serve, eval-router, doctor), and starts DuplexService via the lifecycle seam chosen in task 1 … record outcome in docs/system/architecture.md".
+    - [x] "In-process e2e: web WS → session (fake provider) → knn router → fake Hermes API; runs in default CI".
+- [x] **Verify:** `uv run hermes-duplex serve --config <test config>` starts, `curl -i 127.0.0.1:8765/` returns 200, and Ctrl-C exits in under 5 s. `docs/system/architecture.md` names the chosen seam and the evidence.
 
 ---
 
@@ -824,18 +824,18 @@ tests/unit/test_playback.py                       (create)
 
 **Sub-tasks:**
 
-- [ ] **5.3.1** — `DuplexAudioSource(discord.AudioSource)`: `is_opus()` False; `read()` returns one 3840-byte 48 kHz stereo PCM frame; on underrun return a silent 3840-byte frame, never `b""` (an empty read ends discord.py's player thread).
-- [ ] **5.3.2** — Thread-safe bounded queue of 5 s (250 frames) that drops the oldest frames on overflow; `feed(pcm48_stereo)` re-chunks to 3840-byte frames with a carry buffer.
-- [ ] **5.3.3** — `flush()` empties the queue within one tick and returns the ms played of the current item (frames read since the last item boundary × 20).
-- [ ] **5.3.4** — Unit tests: "Underrun" (empty queue → 3840 zero bytes); never `b""` across many reads; overflow drops oldest; flush empties and returns played ms.
+- [x] **5.3.1** — `DuplexAudioSource(discord.AudioSource)`: `is_opus()` False; `read()` returns one 3840-byte 48 kHz stereo PCM frame; on underrun return a silent 3840-byte frame, never `b""` (an empty read ends discord.py's player thread).
+- [x] **5.3.2** — Thread-safe bounded queue of 5 s (250 frames) that drops the oldest frames on overflow; `feed(pcm48_stereo)` re-chunks to 3840-byte frames with a carry buffer.
+- [x] **5.3.3** — `flush()` empties the queue within one tick and returns the ms played of the current item (frames read since the last item boundary × 20).
+- [x] **5.3.4** — Unit tests: "Underrun" (empty queue → 3840 zero bytes); never `b""` across many reads; overflow drops oldest; flush empties and returns played ms.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest tests/unit/test_playback.py` passes.
-- [ ] **Requirements:**
-    - [ ] "Playback AudioSource returns a silent 3840-byte frame on underrun, never b""; bounded queue (5 s) drop-oldest; flush on SpeechStarted within one tick."
-- [ ] **Verify:** In a one-liner, call `read()` 1000 times on an empty source and confirm every result is 3840 bytes.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest tests/unit/test_playback.py` passes.
+- [x] **Requirements:**
+    - [x] "Playback AudioSource returns a silent 3840-byte frame on underrun, never b""; bounded queue (5 s) drop-oldest; flush on SpeechStarted within one tick."
+- [x] **Verify:** In a one-liner, call `read()` 1000 times on an empty source and confirm every result is 3840 bytes.
 
 ---
 

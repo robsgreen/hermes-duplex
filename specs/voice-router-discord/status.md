@@ -66,3 +66,7 @@ PR: (none)
 - 2026-11-03 04:53 - Dispatched sdlc-coder: Task 4.3
 - 2026-11-03 04:54 - Task 3.1 verified and committed. Backends matched by name to router.backend/fast_path; backend .name must equal config value when wiring decisions/jev in service
 - 2026-11-03 04:54 - Dispatched sdlc-coder: Task 6.1
+- 2026-11-03 05:00 - Task 2.4 verified and committed. Seam = ctx.register_platform('duplex') (register() runs on loop-less loader thread). Handoffs: 2.5 enable platforms.duplex in fixture config; mark only test_real_hermes.py as e2e; WIRING GAP: build_service raises NotImplementedError for decisions/jev backends and discord transport — needs RouterBackend close() + from_config wiring (assign to 3.4 after 3.3 lands; Discord wiring is 5.4.5)
+- 2026-11-03 05:00 - Dispatched sdlc-coder: Task 2.5
+- 2026-11-03 05:00 - Task 5.3 verified and committed. Handoff 5.4: DuplexAudioSource(audio.playback_queue_s); flush_playback = source.flush() + pacer.drop(), return source ms
+- 2026-11-03 05:00 - Dispatched sdlc-coder: Task 5.4 (2.5 dispatch logged earlier; sent now)
