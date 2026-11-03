@@ -3,7 +3,7 @@
 > **Source:** `.sdlc/specs/voice-router-discord/master-plan.md`
 > **Created:** 2026-11-03
 > **Last Updated:** 2026-11-03
-> **Progress:** 153 / 161 sub-tasks complete (4.3.6 MAY deferred)
+> **Progress:** 155 / 161 sub-tasks complete (4.3.6 MAY deferred; 7.1.1 fixtures pending user key)
 
 **Read before every task:**
 
@@ -1036,17 +1036,17 @@ tests/fixtures/audio/*.wav                (create)
 
 **Sub-tasks:**
 
-- [ ] **7.1.1** — Generate the WAV fixtures once with a TTS model (24 kHz mono PCM16): "How is my portfolio doing?", "And what about Tesla?", plus a short silence file. Commit them. If no TTS key is available in the coder session, stop and report it as blocked for the user.
-- [ ] **7.1.2** — `conftest.py`: mark `live`; skip unless `OPENAI_API_KEY` is set and `HERMES_DUPLEX_LIVE=1`. Reuse the Task 2.5 Hermes fixture, but with the profiles' real model config taken from env (document the variables in the test docstring).
-- [ ] **7.1.3** — Test: provider `gpt-live`, router `decisions` with knn fast path; stream the WAVs through the web WS at real-time pace with silence between; assert the routed profile is stock-picker and a non-empty spoken announcement (output transcript after the commentary) arrives within 60 s.
+- [ ] **7.1.1** (PENDING USER: spoken WAVs need OPENAI_API_KEY — run `uv run python -m tests.live.make_audio_fixtures`; silence.wav committed) — Generate the WAV fixtures once with a TTS model (24 kHz mono PCM16): "How is my portfolio doing?", "And what about Tesla?", plus a short silence file. Commit them. If no TTS key is available in the coder session, stop and report it as blocked for the user.
+- [x] **7.1.2** — `conftest.py`: mark `live`; skip unless `OPENAI_API_KEY` is set and `HERMES_DUPLEX_LIVE=1`. Reuse the Task 2.5 Hermes fixture, but with the profiles' real model config taken from env (document the variables in the test docstring).
+- [x] **7.1.3** — Test: provider `gpt-live`, router `decisions` with knn fast path; stream the WAVs through the web WS at real-time pace with silence between; assert the routed profile is stock-picker and a non-empty spoken announcement (output transcript after the commentary) arrives within 60 s.
 
 **Validation:**
 
-- [ ] **Build:** Build gate exits 0.
-- [ ] **Tests:** `uv run pytest -m live` skips with the stated reason when keys are absent; `uv run pytest -m "not live and not e2e"` still passes.
-- [ ] **Requirements:**
-    - [ ] SHOULD "Provide a live end-to-end test (marker `live`), skipped unless OPENAI_API_KEY and HERMES_DUPLEX_LIVE=1." and "Real Hermes …, real GPT-Live, decisions router; streams committed WAV fixtures … at real-time pace; asserts routing to stock-picker and a non-empty spoken announcement transcript within 60 s."
-- [ ] **Verify:** `uv run pytest -m live -rs` prints the skip reason naming both variables.
+- [x] **Build:** Build gate exits 0.
+- [x] **Tests:** `uv run pytest -m live` skips with the stated reason when keys are absent; `uv run pytest -m "not live and not e2e"` still passes.
+- [x] **Requirements:**
+    - [x] SHOULD "Provide a live end-to-end test (marker `live`), skipped unless OPENAI_API_KEY and HERMES_DUPLEX_LIVE=1." and "Real Hermes …, real GPT-Live, decisions router; streams committed WAV fixtures … at real-time pace; asserts routing to stock-picker and a non-empty spoken announcement transcript within 60 s."
+- [x] **Verify:** `uv run pytest -m live -rs` prints the skip reason naming both variables.
 
 ---
 

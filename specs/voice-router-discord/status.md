@@ -85,3 +85,4 @@ PR: (none)
 - 2026-11-03 05:34 - Task 6.4 + service wiring verified and committed (decisions/jev selectable; backends closed on stop; gate threshold passed). e2e 2 passed per coder
 - 2026-11-03 05:34 - Dispatched sdlc-coder: Tasks 7.1, 7.2
 - 2026-11-03 05:59 - Task 7.2 verified (lock clean; README recipe e2e 2 passed per coder) and committed. Recheck markers left in docs for 6.2/7.1 sections — resolve in Documentation phase. Review note: dispatch/hermes_api.py uses absolute imports (layout rule says relative)
+- 2026-11-03 06:05 - Task 7.1 partial committed: live tier written, skips without keys/fixtures; 7.1.1 spoken WAVs pending user OPENAI_API_KEY. No live run passed (none faked). Docs follow-up: mention make_audio_fixtures + HERMES_DUPLEX_LIVE_* vars (Documentation phase)
