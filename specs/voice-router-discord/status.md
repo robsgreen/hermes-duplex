@@ -11,7 +11,7 @@ PR: (none)
 - [x] **Task Generation**
 - [x] **Implementation**
 - [x] **Testing**
-- [ ] **Documentation**
+- [x] **Documentation**
 - [ ] **Review**
 - [ ] **Wrap-up**
 - [ ] **PR**
@@ -92,3 +92,7 @@ PR: (none)
 - 2026-11-03 06:30 - Testing verified independently: gate green, 646 default tests, 4 real-Hermes e2e, live skipped (no key); test-spec.md fully checked; committed. REVIEW NOTES: (1) plan MUST 'Service stop cancels all tasks' vs code leaves Hermes runs running on stop; (2) unused prompts HERMES_UNREACHABLE/not_configured; (3) dispatch/hermes_api.py absolute imports vs relative-import rule; (4) workspace.md capabilities table stale
 - 2026-11-03 06:30 - Phase → Documentation
 - 2026-11-03 06:30 - Skill: sdlc-documentation; dispatched sdlc-doc-keeper
+- 2026-11-03 06:35 - Documentation: docs updated (README.md, AGENTS.md, docs/system/architecture.md, docs/live-checklist.md, .sdlc/workspace.md). Flaky test reported: tests/contract/test_realtime_session.py::test_announcement_is_spoken_anyway_after_the_wait_cap (wait-start race) -> review
+- 2026-11-03 06:35 - Phase → Review; skill: sdlc-review
+- 2026-11-03 06:36 - Review frozen at e5c2a70 (135 files, +24090). Panel: A=sdlc-reviewer/opus, B=sdlc-reviewer/opus; fan-out by area (voice side, orchestration side) x 2 seats
+- 2026-11-03 06:40 - Mechanical checks run; M1 flaky test confirmed (2/8 isolated). review.md started

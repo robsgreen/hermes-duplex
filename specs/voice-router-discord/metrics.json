@@ -5,10 +5,10 @@
   "harnessVersion": "0.1.0",
   "rubricVersion": "1.0",
   "specName": "voice-router-discord",
-  "generatedAt": "2026-11-03T06:30:37Z",
+  "generatedAt": "2026-11-03T06:35:45Z",
   "specStatus": "in-progress",
   "velocity": {
-    "wallClockMinutes": 337,
+    "wallClockMinutes": 342,
     "timeToPrMinutes": null,
     "sessionCount": 1,
     "phaseDurationsMinutes": {
@@ -17,12 +17,12 @@
       "implementation": 134,
       "testing": 19,
       "review": 0,
-      "houseKeeping": 0,
+      "houseKeeping": 5,
       "postMortem": 0
     }
   },
   "lifecycle": {
-    "furthestPhase": "Testing",
+    "furthestPhase": "Documentation",
     "stalled": false
   },
   "throughput": {
@@ -34,7 +34,7 @@
     "hardGateInterventions": 0,
     "resumeCount": 0,
     "reviewFixCycles": 0,
-    "subAgentDispatches": 38,
+    "subAgentDispatches": 39,
     "postMortemActionItems": 0,
     "autonomousCompletion": false,
     "postPrRevisionCycles": 0
@@ -64,7 +64,7 @@
     "filesCreated": 134,
     "filesModified": 1,
     "filesDeleted": 0,
-    "linesAdded": 24054,
+    "linesAdded": 24090,
     "linesRemoved": 1
   },
   "scopeDelta": {
@@ -77,7 +77,7 @@
     "prUrls": []
   },
   "parseHealth": {
-    "eventsValid": 44,
+    "eventsValid": 46,
     "eventsMalformed": 0,
     "eventsUnknownType": 0,
     "eventsReviewRounds": 0,
