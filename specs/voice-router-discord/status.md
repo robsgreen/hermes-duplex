@@ -28,3 +28,4 @@ PR: (none)
 - 2026-11-03 01:13 - User chose own Discord bot; multi-transport (Discord, web, smart speaker) required
 - 2026-11-03 01:15 - User chose v1 scope: Discord + web page
 - 2026-11-03 01:17 - User chose multi-user allowlist with per-profile permissions
+- 2026-11-03 01:34 - Success criteria confirmed; approaches presented
