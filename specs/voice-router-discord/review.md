@@ -70,3 +70,38 @@ Contract tier: 3 (all four dispatches; new repo, no external consumers). Contrac
 Coder fixed all 17 selected (P1-P9, P11-P16, P19; M1). Orchestrator verification: build gate pass; default tier 667 passed ×3; e2e 4 passed; wait-cap test 0/20 failures; P8 description no longer promises a number (realtime.py:63-64); P9 docstrings say attribution keys by session input ms (transports/base.py:26-29, mixer.py:60-61); P14 no absolute self-imports (grep empty) + AST test; P15 dead prompts removed (grep empty).
 Deviations accepted: P19 uses TaskTracker.stopping() so _end stays quiet during a cancel (one confirmation on tool and control paths); P12 passes a `permitted` predicate into route(); P15 deleted dead prompts; P1 changes send_function_output to return bool (Tier 3); P7 2.5 chars/token applies to all providers.
 Logic fixes sent to scoped re-review: P1, P2, P3, P4, P5, P6, P7, P11, P12, P13, P15, P16, P19.
+
+## Scoped re-review (cycle 2) — on c339ac5
+Seat A: 12/13 resolved (P11 mostly; P19 race). Seat B: 11/13 resolved (P7 not resolved; P2 partly).
+Resolution per original finding: P1 resolved; P2 resolved for human strangers (bot case reopened as P25); P3, P4, P5, P6, P12, P13, P15, P16 resolved; P7 NOT resolved (Seat B measured 1250-char numeric results at 529-1117 o200k tokens > 500; Seat A's "resolved" only checked the char cap — orchestrator accepts B's measurement); P11 mostly (P28 leftover); P19 mostly (P26 race).
+Mechanical fixes P8, P9, P14 verified by orchestrator (no re-review needed).
+
+### New findings surfaced at the two-round cap (observations, reason: surfaced at two-round cap)
+- P25 medium introduced logic — transports/discord/receiver.py:415-419 — inference skips every bot, so another bot's (e.g. TTS/music) unmapped SSRC is credited to the sole allowlisted person; test_other_bots_do_not_prevent_inference pins it. Both seats (B ran it). Fix: exclude only our own bot. Security residual of P2 — flagged for the user at the PR gate.
+- P27 medium introduced logic — providers/realtime.py:462-468 — deferred response.create is sent even when the calling response was cancelled by barge-in (talks over the user; stale floor count). Both seats (A ran it). Fix: on cancelled response.done drop the due reply and release the floor count.
+- P26 low introduced logic — session.py:777-779 — _end reads tracker.stopping() after awaiting the transition, so a cancel can still be confirmed twice (A ran 5/5). Fix: read the flag before the await.
+- P28 low introduced logic — session.py:785-788 — status of a task by number still says "running" for an unfollowed task.
+- P29 low introduced logic — tasks.py:169-181 + session.py:722-726 — "Task N started" spoken for a task Hermes queued behind an unfollowed run.
+- P7 (unresolved, medium escalated logic) — prompts.py:8-16, gpt_live.py:41-43,197 — 2.5 chars/token is not a safe bound for numeric/CJK text; docstring + architecture.md "fits whole" claim false. Fix options: ~1 char/token for GPT-Live appends, split across appends, or a real tokenizer (new dependency → plan decision).
+
+### Needs user decision (added)
+- P30 tasks.py:169-201 — unfollowed tasks are excluded from ahead_of/cancel: a new task may be announced "started" while Hermes queues it, and the person cannot cancel the still-running run. Decide together with P23 (stop Hermes runs at session/service end?).
+
+## Final checks (on c339ac5)
+- Check: uv sync --frozen → pass
+- Check: uv run ruff check . → pass
+- Check: uv run ruff format --check . → pass
+- Check: uv run pyright → pass
+- Check: uv run pytest -m "not live and not e2e" → pass (667 passed, 3 consecutive runs)
+- Check: PATH=<hermes-venv>/bin:$PATH uv run pytest -m e2e → pass (4 passed)
+- Check: wait-cap test isolated ×20 → pass (0 failures)
+Final checks: pass
+
+## Resolution summary
+- Gating critical/high: P1 resolved; P2 resolved for its reported case (human stranger), bot variant recorded as P25 (medium) for the PR gate. M1/P13 resolved.
+- Gating-mechanical: P8, P9, P14 resolved (verified).
+- Red-flag: P6, P15 resolved.
+- Escalated: P3, P4, P5, P11 (P28 leftover), P12, P16, P19 (P26 leftover) resolved; P7 unresolved → observation (not critical/high).
+- Observations carried to PR gate: P7, P10, P17, P18, P20, P21, P22, P25, P26, P27, P28, P29.
+- Needs user decision: P23, P24, P30.
+Review complete (two-round cap reached; no unresolved critical/high or gating-mechanical findings).
