@@ -16,10 +16,11 @@ from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.notices import NOT_HEARD, PROVIDER_LOST
+from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
 from hermes_duplex.providers.gpt_live.prompt import GptLivePrompter, frame_result
 from hermes_duplex.providers.wire import WireError
-from hermes_duplex.router.base import ControlIntent, RouteDecision
+from hermes_duplex.router.base import ControlIntent, Effort, RouteDecision
 from hermes_duplex.service import prompt_context
 from hermes_duplex.session import PROVIDER_LOST_REASON, VoiceSession
 from hermes_duplex.tasks import TaskTracker
@@ -51,6 +52,9 @@ class _StubRouter:
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str]] = []
+
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        return None
 
     async def route(
         self,

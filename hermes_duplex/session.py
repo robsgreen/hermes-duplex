@@ -21,13 +21,14 @@ from .audio.gate import LoudnessGate
 from .audio.mixer import AttributionRing
 from .audio.pacer import OutputPacer
 from .config import AudioConfig
-from .dispatch.hermes_api import HermesApiClient, HermesApiError, RunEvent
+from .dispatch.hermes_api import HermesApiClient, HermesApiError, RunEvent, RunStart
 from .people import PermissionChecker
 from .profiles import ActiveProfiles, SwitchOutcome
 from .prompts.base import SENTENCE_END, PromptContext, TaskReport
 from .prompts.notices import (
     LOST_TRACK,
     NO_SUCH_TASK,
+    NO_SWITCH_QUESTION,
     NO_TASK_GIVEN,
     NOT_HEARD,
     NOTHING_TO_CANCEL,
@@ -42,6 +43,7 @@ from .prompts.notices import (
     only_one_running,
     queued_behind,
     refusal,
+    suggest_switch,
     switch_refused,
     switched_to,
     task_already_ended,
@@ -56,6 +58,7 @@ from .prompts.notices import (
 )
 from .providers.base import (
     CANCEL_TASK_TOOL,
+    CONFIRM_SWITCH_TOOL,
     DELEGATE_RECEIPT,
     DELEGATE_TOOL,
     SWITCH_PROFILE_TOOL,
@@ -64,6 +67,7 @@ from .providers.base import (
     DelegationRef,
     DelegationRequested,
     InputTranscript,
+    ModelChoice,
     OutputAudio,
     OutputDone,
     OutputTranscript,
@@ -74,8 +78,8 @@ from .providers.base import (
     SpeechStopped,
 )
 from .providers.wire import WireError, retry_connect
-from .router.base import RouteDecision
-from .switching import parse_switch_request
+from .router.base import Effort, RouteDecision
+from .switching import is_affirmative, is_negative, parse_switch_request, read_switch_request
 from .tasks import TERMINAL_STATES, Task, TaskState, TaskTracker
 from .transports.base import Conversation
 
@@ -125,6 +129,10 @@ SHORT_PROVIDER_SESSION_S = 5.0
 MAX_SHORT_PROVIDER_SESSIONS = 3
 """After this many short-lived provider sessions in a row the session stops reconnecting: a provider
 that accepts the connection and drops it at once would otherwise be reconnected forever."""
+
+HOLD_TIMEOUT_S = 30.0
+"""A request held while its speaker is asked whether to switch profiles runs on their active profile
+when no answer comes within this many seconds (on the session's ``sleep``)."""
 
 _NAMED_TASK = re.compile(r"\btask\s+(?:number\s+|#\s*)?(\d+)\b", re.IGNORECASE)
 """A task named by its number: "task 2", "task number 2", "task #2". Accepted, never advertised."""
@@ -255,6 +263,10 @@ class Router(Protocol):
         history: Sequence[str] = (),
     ) -> RouteDecision: ...
 
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        """The model for a run at ``effort`` on ``profile``, from that profile's effort table."""
+        ...
+
 
 @dataclass(frozen=True)
 class _TimedText:
@@ -357,6 +369,29 @@ class _Announcement:
 
 
 @dataclass(frozen=True)
+class _Request:
+    """A hand-off routed for its effort, ready to run as a task once its profile is settled."""
+
+    call: DelegationRequested
+    speaker: str
+    text: str
+    context: str | None
+    """What the assistant said just before the request, or None (see ``_with_context``)."""
+
+    effort: Effort
+
+
+@dataclass
+class _Hold:
+    """A request held while its speaker is asked whether to switch to ``suggestion`` first."""
+
+    request: _Request
+    suggestion: str
+    expiry: asyncio.Task[None] | None = None
+    """Runs the request on the active profile after ``HOLD_TIMEOUT_S``; None until it is started."""
+
+
+@dataclass(frozen=True)
 class _Ending:
     """How a task ended, and the two ways to tell it."""
 
@@ -403,6 +438,21 @@ class VoiceSession:
     session first hears a person whose saved profile could no longer be used, it tells them they are
     back on their default (``fallback_to_default``).
 
+    A switch request followed by a further request ("switch to stock-picker and check NVDA",
+    ``read_switch_request``) switches first and then hands the rest off on the new profile, without a
+    switch suggestion; when the switch does not happen, the rest is dropped with the switch's notice.
+
+    When the router suggests another profile for a request (``RouteDecision.suggestion``), the session
+    holds the request, one per speaker, and asks whether to switch (``suggest_switch``). The speaker's
+    answer settles it: a ``confirm_switch`` call, or a hand-off from them that is only a yes or a no
+    (``is_affirmative``, ``is_negative``), which is never routed or run. On yes the session switches
+    to the suggestion and runs the request there; on no, or with no answer within
+    ``HOLD_TIMEOUT_S``, it runs on the speaker's active profile. Any other hand-off or
+    ``switch_profile`` call from the speaker ends the hold the same way, after its own switch if it
+    makes one, so a held request runs at the routed effort on whatever profile is active then, with
+    that profile's model (``Router.model_for``). Holds still pending when the session ends start on
+    the active profile and are left unattended like the session's other open tasks.
+
     Tool-style providers get exactly one function output per call. A ``delegate`` call is answered
     at once with ``DELEGATE_RECEIPT``, before routing, so the model can go on talking; the spoken
     start notice follows once the task is routed and permitted. ``task_status`` and ``cancel_task``
@@ -410,7 +460,8 @@ class VoiceSession:
     ``task_id`` or by the user's words (``about``); see ``_resolve_task``. People hear a task only by
     its topic (``notices.topic``); its number is an internal id. A ``switch_profile`` call is answered
     with its outcome as ``status``, and with the notice to speak as ``message`` unless it switched (the
-    confirmation follows on its own). A call nobody can be credited with is answered with
+    confirmation follows on its own); so is a ``confirm_switch`` that accepts, while one that declines
+    is answered ``"declined"``, and one with no question pending ``"nothing_pending"``. A call nobody can be credited with is answered with
     ``"not_started"`` and a question for the model to ask.
 
     Results and notices are announcements, spoken one at a time in the order they arise. When the
@@ -530,11 +581,14 @@ class VoiceSession:
         """Each configured profile's name and spoken aliases, as ``parse_switch_request`` takes them."""
         self._switch_subscriptions: dict[str, Callable[[], None]] = {}
         """Per person the session listens to ``active_profiles`` for, how to stop listening."""
+        self._holds: dict[str, _Hold] = {}
+        """Per speaker, the request held while they are asked whether to switch profiles."""
 
     async def run(self) -> None:
         """Connect the provider and run until the conversation or the provider session ends.
 
-        On the way out, stops listening for switches, leaves this session's tasks unattended
+        On the way out, stops listening for switches, starts each held request on its speaker's active
+        profile (``_start_held``), leaves this session's tasks unattended
         (``TaskTracker.leave_unattended``: their Hermes runs continue until a later session adopts
         them, tasks queued without a run id become ``unknown``, and ends not spoken yet are left
         untold), closes the provider, and closes the conversation when the provider ended and could
@@ -566,6 +620,7 @@ class VoiceSession:
             for task in (*pumps, *self._delegations):
                 task.cancel()
             await asyncio.gather(*pumps, *self._delegations, return_exceptions=True)
+            await self._start_held()
             await self._tracker.leave_unattended(self._task_numbers, self._untold)
             await self._provider.close()
 
@@ -896,8 +951,14 @@ class VoiceSession:
                 else None
             )
             outcome, notice = await self._switch(speaker, target)
-            payload = {"status": outcome} if notice is None else {"status": outcome, "message": notice}
-            await self._answer(request, payload)
+            await self._answer(request, _switch_output(outcome, notice))
+            self._end_hold(speaker)
+        elif request.target == CONFIRM_SWITCH_TOOL:
+            settled = await self._settle_hold(speaker, accept=args.get("accept") is True)
+            if settled is None:
+                await self._answer(request, {"status": "nothing_pending", "message": NO_SWITCH_QUESTION})
+            else:
+                await self._answer(request, _switch_output(*settled))
         else:
             logger.warning("call %s is to the unknown tool %r", request.id, request.target)
             await self._answer(request, {"status": "not_started", "message": unknown_tool(request.target)})
@@ -958,10 +1019,12 @@ class VoiceSession:
         split = any(0 < o - offset_ms < SPLIT_WITHIN_MS for o in self._live_offsets)
         return start_ms, offset_ms if split else offset_ms + TRANSCRIPT_GRACE_MS
 
-    def _spawn(self, coroutine: Coroutine[Any, Any, None]) -> None:
+    def _spawn(self, coroutine: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        """Run ``coroutine`` in the background until it ends or the session does."""
         task = asyncio.create_task(coroutine)
         self._delegations.add(task)
         task.add_done_callback(self._delegation_done)
+        return task
 
     def _delegation_done(self, task: asyncio.Task[None]) -> None:
         self._delegations.discard(task)
@@ -970,23 +1033,40 @@ class VoiceSession:
 
     async def _delegate(
         self,
-        request: DelegationRequested,
+        call: DelegationRequested,
         text: str,
         speaker: str,
         context: str | None = None,
     ) -> None:
-        """Route ``text`` for its effort, check the speaker may use their active profile, and run it
-        there as a task; a status or cancel request is answered from the tracker instead, and a switch
-        request (``parse_switch_request``) is carried out before any routing, with its notice spoken.
+        """Handle ``speaker``'s hand-off ``text``: an answer to their pending switch question settles
+        it; a switch request (``read_switch_request``) is carried out before any routing, with its
+        notice spoken, and any further request in it continues on the new profile; anything else ends
+        their hold and is routed for its effort.
+
+        A routed status or cancel request is answered from the tracker. A request the router suggests
+        another profile for is held while the speaker is asked whether to switch (``_hold``); any
+        other runs at once on the speaker's active profile, when they may use it.
 
         ``context`` is what the assistant said just before the request, or None; the router sees it
         as the latest history line and Hermes gets it after the request.
         """
-        if (target := parse_switch_request(text, self._switch_names)) is not None:
-            _, notice = await self._switch(speaker, target)
+        if speaker in self._holds and (is_affirmative(text) or is_negative(text)):
+            settled = await self._settle_hold(speaker, accept=is_affirmative(text))
+            if settled is not None and settled[1] is not None:
+                self._announce(settled[1])
+            return
+
+        switch = read_switch_request(text, self._switch_names)
+        if switch is not None:
+            outcome, notice = await self._switch(speaker, switch.target)
             if notice is not None:
                 self._announce(notice)
-            return
+            self._end_hold(speaker)
+            if switch.rest is None or outcome not in ("switched", "already_active"):
+                return
+            text = switch.rest
+        else:
+            self._end_hold(speaker)
 
         lines = [text for _, text in self._history]
         history = (*lines, context) if context else tuple(lines)
@@ -1002,27 +1082,124 @@ class VoiceSession:
             self._announce(self._status(speaker, text))
             return
 
-        if not permitted(profile):
-            logger.warning("refused a task for %s: not allowed to use profile %s", speaker, profile)
-            self._announce(refusal(profile))
+        request = _Request(call, speaker, text, context, decision.effort)
+        suggestion = decision.suggestion
+        # A request said with an explicit switch has its profile chosen already.
+        if switch is None and suggestion is not None and suggestion != profile and permitted(suggestion):
+            self._hold(request, suggestion)
             return
+        if (task := await self._create_task(request, profile, decision.model)) is not None:
+            await self._run_task(task, _ref(task), _with_context(text, context))
 
+    def _hold(self, request: _Request, suggestion: str) -> None:
+        """Hold ``request`` while its speaker is asked whether to switch to ``suggestion``, until they
+        answer, they hand off something else, or ``HOLD_TIMEOUT_S`` passes."""
+        speaker = request.speaker
+        self._end_hold(speaker)  # one held while this one was routed is older: it runs as is
+        hold = _Hold(request, suggestion)
+        self._holds[speaker] = hold
+        logger.info("holding a request of %s while asking to switch to %s", speaker, suggestion)
+        self._announce(suggest_switch(suggestion))
+
+        async def expire() -> None:
+            await self._sleep(HOLD_TIMEOUT_S)
+            if self._holds.get(speaker) is hold:
+                del self._holds[speaker]
+                logger.info("%s did not answer the switch question; running the request as is", speaker)
+                await self._run_held(hold)
+
+        hold.expiry = self._spawn(expire())
+
+    def _take_hold(self, speaker: str) -> _Hold | None:
+        """Remove and return ``speaker``'s hold, stopping its expiry; None when they have none."""
+        hold = self._holds.pop(speaker, None)
+        if hold is not None and hold.expiry is not None:
+            hold.expiry.cancel()
+        return hold
+
+    async def _settle_hold(self, speaker: str, *, accept: bool) -> tuple[str, str | None] | None:
+        """Settle ``speaker``'s switch question with their answer: on ``accept``, switch to the
+        suggestion; then run the held request on their active profile in the background.
+
+        Returns the switch's outcome and notice as ``_switch`` does, or ``"declined"`` and None; None
+        when no question of theirs is pending.
+        """
+        if (hold := self._take_hold(speaker)) is None:
+            return None
+        settled: tuple[str, str | None] = (
+            await self._switch(speaker, hold.suggestion) if accept else ("declined", None)
+        )
+        self._spawn(self._run_held(hold))
+        return settled
+
+    def _end_hold(self, speaker: str) -> None:
+        """Run ``speaker``'s held request, if any, on their active profile in the background, unasked."""
+        if (hold := self._take_hold(speaker)) is not None:
+            logger.info("%s handed off something else; running the held request as is", speaker)
+            self._spawn(self._run_held(hold))
+
+    async def _run_held(self, hold: _Hold) -> None:
+        """Run ``hold``'s request as a task (``_create_held_task``) and follow it to its end."""
+        if (task := await self._create_held_task(hold)) is not None:
+            await self._run_task(task, _ref(task), _with_context(hold.request.text, hold.request.context))
+
+    async def _start_held(self) -> None:
+        """Start every held request as a task (``_create_held_task``) without following it, for a
+        session that is ending: the tasks are left unattended with the session's others."""
+        holds = [hold for speaker in list(self._holds) if (hold := self._take_hold(speaker)) is not None]
+        for hold in holds:
+            if (task := await self._create_held_task(hold)) is not None:
+                logger.info("the session is ending; starting held task %d unattended", task.number)
+                await self._start_run(
+                    task, _ref(task), _with_context(hold.request.text, hold.request.context)
+                )
+
+    async def _create_held_task(self, hold: _Hold) -> Task | None:
+        """Track ``hold``'s request as a task on its speaker's active profile as it is now, at the
+        routed effort with that profile's model (``_create_task``)."""
+        request = hold.request
+        profile = self._active_profiles.get(request.speaker)
+        return await self._create_task(request, profile, self._router.model_for(profile, request.effort))
+
+    async def _create_task(self, request: _Request, profile: str, model: ModelChoice | None) -> Task | None:
+        """Track ``request`` as a new task of this session's on ``profile`` with ``model``; None, with
+        a refusal spoken, when its speaker may not use ``profile``."""
+        if not self._may_use(request.speaker, profile):
+            logger.warning("refused a task for %s: not allowed to use profile %s", request.speaker, profile)
+            self._announce(refusal(profile))
+            return None
         live = self._capabilities["delegation_style"] == "live"
         task = await self._tracker.create(
-            person=speaker,
+            person=request.speaker,
             profile=profile,
-            effort=decision.effort,
-            model=decision.model,
-            text=text,
-            delegation_id=request.id if live else None,
-            call_id=None if live else request.id,
+            effort=request.effort,
+            model=model,
+            text=request.text,
+            delegation_id=request.call.id if live else None,
+            call_id=None if live else request.call.id,
         )
         self._task_numbers.append(task.number)
-        ref = _ref(task)
-        await self._run_task(task, ref, _with_context(text, context))
+        return task
 
     async def _run_task(self, task: Task, ref: DelegationRef, hermes_input: str) -> None:
         """Start ``task`` on Hermes with ``hermes_input``, announce it, and follow it to its end."""
+        start = await self._start_run(task, ref, hermes_input)
+        if start is None:
+            return
+        ahead = self._tracker.ahead_of(task.number)
+        announcement = queued_behind(task, ahead) if ahead else task_started(task)
+        if self._capabilities["delegation_style"] == "tool":
+            self._announce(announcement)  # the call's receipt said only that it was received; this says what
+        else:
+            await self._report_progress(ref, announcement)
+        if start.run_id is None:
+            # Hermes queued it without an id: it cannot be followed, and the tracker expires it.
+            return
+        await self._follow(task, ref, start.run_id)
+
+    async def _start_run(self, task: Task, ref: DelegationRef, hermes_input: str) -> RunStart | None:
+        """Start ``task`` on Hermes with ``hermes_input`` and record that it is queued or running;
+        None when Hermes refused it, which ends the task as failed (announced for ``ref``)."""
         try:
             start = await self._hermes.start_run(
                 task.profile,
@@ -1034,19 +1211,9 @@ class VoiceSession:
             )
         except HermesApiError as error:
             await self._end(task.number, _failure(task, error.reason), ref, away=False)
-            return
-
+            return None
         await self._transition(task.number, "queued" if start.queued else "running", run_id=start.run_id)
-        ahead = self._tracker.ahead_of(task.number)
-        announcement = queued_behind(task, ahead) if ahead else task_started(task)
-        if self._capabilities["delegation_style"] == "tool":
-            self._announce(announcement)  # the call's receipt said only that it was received; this says what
-        else:
-            await self._report_progress(ref, announcement)
-        if start.run_id is None:
-            # Hermes queued it without an id: it cannot be followed, and the tracker expires it.
-            return
-        await self._follow(task, ref, start.run_id)
+        return start
 
     async def _follow_adopted(self, task: Task) -> None:
         """Follow ``task``, adopted from an earlier conversation, to its end.
@@ -1288,6 +1455,12 @@ def _with_context(text: str, context: str | None) -> str:
     if not context:
         return text
     return f'{text}\n\n(Context: just before this request, the voice assistant said: "{context}")'
+
+
+def _switch_output(outcome: str, notice: str | None) -> Mapping[str, Any]:
+    """The function output for a switch call: its ``outcome`` as ``status``, and ``notice`` to speak
+    as ``message`` when there is one."""
+    return {"status": outcome} if notice is None else {"status": outcome, "message": notice}
 
 
 def _ref(task: Task) -> DelegationRef:

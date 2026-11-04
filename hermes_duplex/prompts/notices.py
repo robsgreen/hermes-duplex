@@ -200,6 +200,10 @@ def suggest_switch(profile: str) -> str:
     return f"That sounds like a {profile} question. Want me to switch?"
 
 
+NO_SWITCH_QUESTION = "There's no question about switching agents waiting for an answer."
+"""Function output message for a ``confirm_switch`` call while nothing waits on the person's answer."""
+
+
 def fallback_to_default(profile: str) -> str:
     """Notice that the speaker's saved profile can no longer be used, so they are back on their
     default ``profile``."""

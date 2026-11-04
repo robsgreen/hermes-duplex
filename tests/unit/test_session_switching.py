@@ -23,8 +23,9 @@ from hermes_duplex.prompts.notices import (
     switched_to,
     which_profile,
 )
+from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
-from hermes_duplex.router.base import RouteDecision
+from hermes_duplex.router.base import Effort, RouteDecision
 from hermes_duplex.session import VoiceSession
 from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.base import InputFrame
@@ -68,6 +69,9 @@ class _RecordingRouter:
 
     def __init__(self) -> None:
         self.requests: list[str] = []
+
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        return None
 
     async def route(
         self,
@@ -281,6 +285,55 @@ async def test_a_switch_to_the_active_profile_says_it_already_is(harness: _Harne
     await harness.wait_for(lambda: bool(harness.said()))
 
     assert harness.said() == [already_active("general")]
+    harness.assert_nothing_ran()
+
+
+async def test_a_switch_followed_by_a_request_switches_then_runs_the_request_there(
+    harness: _Harness,
+) -> None:
+    harness.start([_handoff("call_1", "switch to stock-picker and check NVDA")], _frames(1000, "rob"))
+
+    await harness.wait_for(lambda: bool(harness.api.requests_to("POST", "/runs")))
+
+    (run,) = harness.api.requests_to("POST", "/runs")
+    assert run.path == "/p/stock-picker/v1/runs"
+    assert run.body["input"] == "check NVDA"
+    assert harness.router.requests == ["check NVDA"], "only the request is routed, not the switch"
+    assert harness.active_profiles.get("rob") == "stock-picker"
+    await harness.wait_for(lambda: len(harness.said()) == 2)
+    assert harness.said()[0] == switched_to("stock-picker")
+
+
+@pytest.mark.parametrize(
+    ("speaker", "words", "notice"),
+    [
+        ("alex", "switch to stock-picker and check NVDA", switch_refused("stock-picker")),
+        ("rob", "switch to finance and check NVDA", which_profile(EVERY_PROFILE)),
+    ],
+)
+async def test_a_request_after_a_switch_that_does_not_happen_is_dropped(
+    harness: _Harness, speaker: str, words: str, notice: str
+) -> None:
+    harness.start([_handoff("call_1", words)], _frames(1000, speaker))
+
+    await harness.wait_for(lambda: bool(harness.said()))
+    await asyncio.sleep(0.1)
+
+    assert harness.said() == [notice]
+    harness.assert_nothing_ran()
+
+
+@pytest.mark.parametrize(
+    "words",
+    ["switch to stock-picker please", "let me talk to the stock picker please", "switch to stocks, thanks"],
+)
+async def test_polite_words_after_a_switch_are_no_request(harness: _Harness, words: str) -> None:
+    harness.start([_handoff("call_1", words)], _frames(1000, "rob"))
+
+    await harness.wait_for(lambda: bool(harness.said()))
+    await asyncio.sleep(0.1)
+
+    assert harness.said() == [switched_to("stock-picker")]
     harness.assert_nothing_ran()
 
 

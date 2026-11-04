@@ -31,7 +31,7 @@ from hermes_duplex.prompts.notices import (
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
 from hermes_duplex.providers.gpt_live.prompt import frame_result
-from hermes_duplex.router.base import ControlIntent, RouteDecision
+from hermes_duplex.router.base import ControlIntent, Effort, RouteDecision
 from hermes_duplex.router.composite import CompositeRouter
 from hermes_duplex.router.knn import KnnBackend
 from hermes_duplex.session import Router, VoiceSession, _resolve_task, _topic_words
@@ -135,6 +135,9 @@ class _StubRouter:
         self.permitted: list[dict[str, bool]] = []
         """Per request, whether the speaker may use each profile, as the session told the router."""
         self.after_route: dict[str, Callable[[], Awaitable[object]]] = {}
+
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        return None
 
     async def route(
         self,

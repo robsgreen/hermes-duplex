@@ -19,11 +19,18 @@ from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.base import TaskReport, json_report
-from hermes_duplex.prompts.notices import NO_SUCH_TASK, switched_to, task_summary, which_to_cancel
+from hermes_duplex.prompts.notices import (
+    NO_SUCH_TASK,
+    suggest_switch,
+    switched_to,
+    task_summary,
+    which_to_cancel,
+)
+from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.realtime.adapter import Dialect, RealtimeApiProvider
 from hermes_duplex.providers.realtime.openai.dialect import OPENAI
 from hermes_duplex.providers.realtime.xai.dialect import XAI
-from hermes_duplex.router.base import ControlIntent, RouteDecision
+from hermes_duplex.router.base import ControlIntent, Effort, RouteDecision
 from hermes_duplex.service import prompt_context
 from hermes_duplex.session import ANNOUNCEMENT_MAX_WAIT_S, VoiceSession
 from hermes_duplex.tasks import TaskTracker
@@ -47,11 +54,11 @@ OPEN_RUN = RunScript(events=[{"event": "run.started"}])
 STARTED_WEATHER = 'Started "what\'s the weather" on the stock-picker agent.'
 
 
-def _decision(control_intent: ControlIntent | None = None) -> RouteDecision:
+def _decision(control_intent: ControlIntent | None = None, suggestion: str | None = None) -> RouteDecision:
     return RouteDecision(
         effort="medium",
         model=None,
-        suggestion=None,
+        suggestion=suggestion,
         control_intent=control_intent,
         probabilities={},
         source="knn",
@@ -62,6 +69,7 @@ def _decision(control_intent: ControlIntent | None = None) -> RouteDecision:
 ROUTES = {
     "how is my portfolio doing": _decision(),
     "what's the weather": _decision(),
+    "what's the weather tomorrow": _decision(suggestion="general"),
     "cancel that": _decision("cancel"),
 }
 
@@ -71,6 +79,9 @@ class _StubRouter:
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, str]] = []
+
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        return None
 
     async def route(
         self,
@@ -669,3 +680,40 @@ async def test_switch_profile_tool_switches_updates_the_instructions_and_confirm
         )
         assert harness.router.requests == []
         assert api.requests_to("POST", "/runs") == []
+
+
+async def test_a_suggested_switch_is_asked_after_the_receipt_and_confirm_switch_runs_it_there(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    async with _session(tmp_path, api) as harness:
+        await harness.wait_for(lambda: len(harness.sent("session.update")) == 2)  # Rob was heard
+
+        await harness.server.send(*_responding("call_1", "delegate", {"task": "what's the weather tomorrow"}))
+        sent_s = time.perf_counter()
+        await harness.wait_for(lambda: "call_1" in harness.outputs(), timeout_s=1)
+        receipt_ms = (time.perf_counter() - sent_s) * 1000
+        await harness.answer_requests()
+        await harness.wait_for(lambda: bool(harness.announcements()))
+
+        assert receipt_ms < RECEIPT_BUDGET_MS
+        assert harness.outputs()["call_1"] == {"status": "received"}
+        assert harness.announcements() == [suggest_switch("general")], "the question follows the receipt"
+        assert api.requests_to("POST", "/runs") == []
+
+        await harness.answer_requests()
+        await harness.server.send(*_responding("call_2", "confirm_switch", {"accept": True}))
+        await harness.wait_for(lambda: "call_2" in harness.outputs())
+        await harness.answer_requests()
+        await harness.wait_for(lambda: len(harness.announcements()) == 2)
+        await harness.answer_requests()
+        await harness.wait_for(lambda: len(harness.announcements()) == 3)
+
+        assert harness.outputs()["call_2"] == {"status": "switched"}
+        assert harness.announcements()[1:] == [
+            switched_to("general"),
+            'Started "what\'s the weather tomorrow" on the general agent.',
+        ]
+        assert harness.active_profiles.get("rob") == "general"
+        (run,) = api.requests_to("POST", "/runs")
+        assert run.path == "/p/general/v1/runs"
+        assert harness.router.requests == [("what's the weather tomorrow", "rob", "stock-picker")]

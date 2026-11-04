@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from ..config import CONTROL_PROFILE, ProfileConfig, RouterConfig
+from ..providers.base import ModelChoice
 from .base import (
     BackendResult,
     Effort,
@@ -266,13 +267,18 @@ class CompositeRouter:
                 suggestion = self._suggestion(probs, active, permitted)
         return RouteDecision(
             effort=effort,
-            model=None if control_intent is not None else self._profiles[active].model_for(effort),
+            model=None if control_intent is not None else self.model_for(active, effort),
             suggestion=suggestion,
             control_intent=control_intent,
             probabilities=probs,
             source=source,
             latency_ms=round((self._clock() - started) * 1000),
         )
+
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        """The model for a run at ``effort`` on the configured ``profile``, from its effort table
+        (``ProfileConfig.model_for``); None means the Hermes profile's own default."""
+        return self._profiles[profile].model_for(effort)
 
     def _suggestion(
         self, probs: Mapping[str, float], active: str, permitted: Callable[[str], bool] | None

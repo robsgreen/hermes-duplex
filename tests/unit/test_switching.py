@@ -1,8 +1,15 @@
-"""Switch requests by name or alias, refused targets, and short yes/no answers."""
+"""Switch requests by name or alias, refused targets, a further request after the target, and short
+yes/no answers."""
 
 import pytest
 
-from hermes_duplex.switching import is_affirmative, is_negative, parse_switch_request
+from hermes_duplex.switching import (
+    SwitchRequest,
+    is_affirmative,
+    is_negative,
+    parse_switch_request,
+    read_switch_request,
+)
 
 NAMES = {
     "general": ["everyday"],
@@ -66,6 +73,44 @@ def test_longest_alias_wins() -> None:
 )
 def test_text_without_a_switch_request_is_none(text: str) -> None:
     assert parse_switch_request(text, NAMES) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "rest"),
+    [
+        ("switch to stock-picker and check NVDA", "check NVDA"),
+        ("Switch to the stock picker, and then tell me how NVDA did.", "tell me how NVDA did."),
+        ("talk to stocks. How's my portfolio?", "How's my portfolio?"),
+        ("go back to general so what's the weather in Paris", "what's the weather in Paris"),
+        ("switch to stocks, please check my holdings", "please check my holdings"),
+    ],
+)
+def test_request_after_the_target_is_the_rest(text: str, rest: str) -> None:
+    request = read_switch_request(text, NAMES)
+
+    assert request is not None
+    assert request.rest == rest
+    assert parse_switch_request(text, NAMES) == request.target
+
+
+@pytest.mark.parametrize(
+    ("text", "target"),
+    [
+        ("switch to stock-picker", "stock-picker"),
+        ("let me talk to the stock picker please", "stock-picker"),
+        ("switch to stocks, thanks!", "stock-picker"),
+        ("go back to general and thank you", "general"),
+        ("switch to the general profile", "general"),
+        ("talk to stocks about Tesla", "stock-picker"),
+        ("switch to general and", "general"),
+    ],
+)
+def test_polite_or_unjoined_words_after_the_target_are_no_request(text: str, target: str) -> None:
+    assert read_switch_request(text, NAMES) == SwitchRequest(target, None)
+
+
+def test_ambiguous_target_carries_no_request() -> None:
+    assert read_switch_request("switch to finance and check NVDA", NAMES) == SwitchRequest("ambiguous", None)
 
 
 @pytest.mark.parametrize(

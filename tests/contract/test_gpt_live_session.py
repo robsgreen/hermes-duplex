@@ -19,10 +19,11 @@ from hermes_duplex.config import load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
-from hermes_duplex.prompts.notices import switched_to
+from hermes_duplex.prompts.notices import suggest_switch, switched_to
+from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.gpt_live.adapter import GptLiveProvider
 from hermes_duplex.providers.gpt_live.prompt import GptLivePrompter, frame_result
-from hermes_duplex.router.base import ControlIntent, RouteDecision
+from hermes_duplex.router.base import ControlIntent, Effort, RouteDecision
 from hermes_duplex.service import prompt_context
 from hermes_duplex.session import VoiceSession
 from hermes_duplex.tasks import TaskTracker
@@ -36,11 +37,11 @@ LOUD_FRAME = np.full(frame_samples(RATE), 1000, dtype="<i2").tobytes()  # about 
 STARTED = [{"wait_for": "session.start"}, {"type": "session.started", "event_id": "event_1"}]
 
 
-def _decision(control_intent: ControlIntent | None = None) -> RouteDecision:
+def _decision(control_intent: ControlIntent | None = None, suggestion: str | None = None) -> RouteDecision:
     return RouteDecision(
         effort="medium",
         model=None,
-        suggestion=None,
+        suggestion=suggestion,
         control_intent=control_intent,
         probabilities={},
         source="knn",
@@ -52,6 +53,7 @@ ROUTES = {
     "how is my portfolio doing": _decision(),
     "and what about Tesla": _decision(),
     "what's the weather": _decision(),
+    "what's the weather tomorrow": _decision(suggestion="general"),
 }
 
 
@@ -60,6 +62,9 @@ class _StubRouter:
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, tuple[str, ...]]] = []
+
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        return None
 
     async def route(
         self,
@@ -506,3 +511,39 @@ async def test_a_switch_handed_off_as_words_restarts_gpt_live_on_the_new_profile
         ]
         assert harness.router.requests == []
         assert api.requests_to("POST", "/runs") == []
+
+
+async def test_a_no_handed_off_as_words_answers_the_switch_question_and_runs_on_the_active_profile(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(RunScript(events=[{"event": "run.started"}]))  # stays open
+    script = [
+        *STARTED,
+        _input("what's the weather tomorrow", 1000, 1800),
+        _delegation("del_1", 1900),
+        {"wait_for": "session.commentary.append"},  # the switch question
+        _input("no thanks", 2500, 2800),
+        _delegation("del_2", 2900),
+    ]
+    async with _session(tmp_path, api, script) as harness:
+        harness.conversation.feed(6000, _voiced(("rob", 1000, 1800), ("rob", 2500, 2800)))
+        harness.start()
+        await harness.wait_for(lambda: bool(harness.sent("session.thinking.append")))
+
+        assert harness.sent("session.commentary.append") == [
+            {"type": "session.commentary.append", "content": suggest_switch("general"), "delegation_id": None}
+        ]
+        assert [(text, speaker) for text, speaker, _ in harness.router.requests] == [
+            ("what's the weather tomorrow", "rob")
+        ], "the answer is never routed"
+        assert harness.active_profiles.get("rob") == "stock-picker"
+        (run,) = api.requests_to("POST", "/runs")
+        assert run.path == "/p/stock-picker/v1/runs"
+        assert run.body["input"] == "what's the weather tomorrow"
+        assert harness.sent("session.thinking.append") == [
+            {
+                "type": "session.thinking.append",
+                "content": 'Started "what\'s the weather tomorrow" on the stock-picker agent.',
+                "delegation_id": "del_1",
+            }
+        ]
