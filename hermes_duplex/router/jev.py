@@ -1,8 +1,7 @@
 """The ``jev`` router backend: TypeSafe's System One API (model Jev), called over HTTP with ``aiohttp``.
 
-One ``POST {base_url}/v1/systemone`` asks three questions about a request: which choice (profile or
-``_control``) should handle it, how much effort it needs, and whether it follows up on the previous
-task. The answers' probabilities become a ``BackendResult``. ``base_url`` is configurable so a
+One ``POST {base_url}/v1/systemone`` asks two questions about a request: which choice (profile or
+``_control``) should handle it, and how much effort it needs. The answers' probabilities become a ``BackendResult``. ``base_url`` is configurable so a
 service that speaks the same API can stand in for ``https://api.typesafe.ai``.
 
 Wire shape, from the API reference https://docs.typesafe.ai/api/system-one.md (OpenAPI 0.2.0),
@@ -51,7 +50,6 @@ _EFFORT_CRITERIA: Mapping[Effort, str] = {
     "medium": "An ordinary task",
     "high": "Multi-step research or analysis",
 }
-_FOLLOWUP_INSTRUCTIONS = "The request continues the previous task's topic."
 
 
 class JevError(Exception):
@@ -61,15 +59,14 @@ class JevError(Exception):
 
 @dataclass(frozen=True)
 class _Answers:
-    """The three answers of one reply, as probabilities."""
+    """The two answers of one reply, as probabilities."""
 
     profile_probs: dict[str, float]
     effort_probs: dict[Effort, float]
-    followup_prob: float
 
 
 class JevBackend:
-    """Scores requests with one System One call each: profile, effort, and follow-up.
+    """Scores requests with one System One call each: profile and effort.
 
     It cannot tell ``_control`` intents apart, so ``control_intent`` is always None. The backend owns
     one ``aiohttp.ClientSession``, opened on first ``classify``; call ``close()`` (or use the backend
@@ -124,7 +121,7 @@ class JevBackend:
         """Ask the System One API about ``req.text``, with its last few history lines as context.
 
         Gives up after ``deadline_ms``. Raises ``JevError`` when the call times out, cannot connect,
-        gets a non-200 reply, or the reply lacks any of the three answers with valid probabilities;
+        gets a non-200 reply, or the reply lacks either of the two answers with valid probabilities;
         raises ``RuntimeError`` before ``configure``.
         """
         if not self._profiles:
@@ -135,7 +132,6 @@ class JevBackend:
         return BackendResult(
             profile_probs=answers.profile_probs,
             effort_probs=answers.effort_probs,
-            followup_prob=answers.followup_prob,
             latency_ms=round((time.perf_counter() - started) * 1000),
             backend=self.name,
         )
@@ -164,7 +160,7 @@ class JevBackend:
 
 def _request_body(model: str, profiles: Sequence[ProfileSpec], req: RouteRequest) -> dict[str, Any]:
     """The System One request body for ``req``: the request and its recent history as the state,
-    and the profile, effort, and followup questions. A profile without a description is sent with a
+    and the profile and effort questions. A profile without a description is sent with a
     null description, which the API reads as the choice's name alone."""
     return {
         "model": model,
@@ -180,13 +176,12 @@ def _request_body(model: str, profiles: Sequence[ProfileSpec], req: RouteRequest
                 "instructions": _EFFORT_INSTRUCTIONS,
                 "criteria": dict(_EFFORT_CRITERIA),
             },
-            "followup": {"type": "noul", "instructions": _FOLLOWUP_INSTRUCTIONS},
         },
     }
 
 
 def _parse_answers(reply: Any, choices: Sequence[str]) -> _Answers:
-    """The profile, effort, and followup answers of ``reply``. Raises ``JevError`` when the reply
+    """The profile and effort answers of ``reply``. Raises ``JevError`` when the reply
     has no answers object or any answer is missing, of the wrong type, or malformed."""
     answers = reply.get("answers") if isinstance(reply, dict) else None
     if not isinstance(answers, dict):
@@ -194,7 +189,6 @@ def _parse_answers(reply: Any, choices: Sequence[str]) -> _Answers:
     return _Answers(
         profile_probs=_choice_probabilities(answers, "profile", choices),
         effort_probs=_choice_probabilities(answers, "effort", _EFFORTS),
-        followup_prob=_probability(_answer(answers, "followup", "noul").get("noul"), "followup"),
     )
 
 

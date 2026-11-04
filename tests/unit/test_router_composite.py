@@ -84,7 +84,6 @@ class _StubBackend:
             BackendResult(
                 profile_probs=profile_probs,
                 effort_probs=effort_probs,
-                followup_prob=None,
                 latency_ms=1,
                 backend=self.name,
                 control_intent=control_intent,

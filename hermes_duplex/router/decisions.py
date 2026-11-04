@@ -1,8 +1,8 @@
 """The ``decisions`` router backend: the OpenAI Decisions API, called over HTTP with ``aiohttp``.
 
-One ``POST {base_url}/decisions`` asks three questions about a request: which choice (profile or
-``_control``) should handle it, how much effort it needs, and whether it follows up on the previous
-task. The answers' probability lists become a ``BackendResult``.
+One ``POST {base_url}/decisions`` asks two questions about a request: which choice (profile or
+``_control``) should handle it, and how much effort it needs. The answers' probability lists become a
+``BackendResult``.
 """
 
 import time
@@ -33,7 +33,6 @@ _EFFORT_INSTRUCTIONS = (
     "Pick how much reasoning the last message's request needs: low for a quick lookup or a simple "
     "action, medium for an ordinary task, high for multi-step research or analysis."
 )
-_FOLLOWUP_INSTRUCTIONS = "The request continues the previous task's topic."
 
 
 class DecisionsError(Exception):
@@ -42,7 +41,7 @@ class DecisionsError(Exception):
 
 
 class DecisionsBackend:
-    """Scores requests with one OpenAI Decisions call each: profile, effort, and follow-up.
+    """Scores requests with one OpenAI Decisions call each: profile and effort.
 
     It cannot tell ``_control`` intents apart, so ``control_intent`` is always None. The backend owns
     one ``aiohttp.ClientSession``, opened on first ``classify``; call ``close()`` (or use the backend
@@ -83,7 +82,7 @@ class DecisionsBackend:
             self._session = None
 
     async def configure(self, profiles: Sequence[ProfileSpec]) -> None:
-        """Build the three questions, one profile choice per spec with its description; replaces any
+        """Build the two questions, one profile choice per spec with its description; replaces any
         earlier configuration.
 
         Raises ``ValueError`` unless there are 2 to 255 choices with unique names.
@@ -105,7 +104,6 @@ class DecisionsBackend:
                 "instructions": _EFFORT_INSTRUCTIONS,
                 "choices": [{"value": effort} for effort in _EFFORTS],
             },
-            {"type": "predicate", "name": "followup", "instructions": _FOLLOWUP_INSTRUCTIONS},
         ]
 
     async def classify(self, req: RouteRequest, deadline_ms: int) -> BackendResult:
@@ -113,8 +111,7 @@ class DecisionsBackend:
 
         Gives up after ``deadline_ms``. Raises ``DecisionsError`` when the call times out, cannot
         connect, gets a non-200 reply, refuses the profile question, or holds anything other than the
-        three answers with probabilities; a refused effort or follow-up question leaves that score
-        None. Raises ``RuntimeError`` before ``configure``.
+        two answers with probabilities; a refused effort question leaves the effort scores None. Raises ``RuntimeError`` before ``configure``.
         """
         if not self._questions:
             raise RuntimeError("DecisionsBackend.classify called before configure")
@@ -133,7 +130,6 @@ class DecisionsBackend:
         return BackendResult(
             profile_probs=_probabilities(answers, "profile", self._choices),
             effort_probs=None if "effort" in refused else _probabilities(answers, "effort", _EFFORTS),
-            followup_prob=None if "followup" in refused else _predicate_probability(answers, "followup"),
             latency_ms=round((time.perf_counter() - started) * 1000),
             backend=self.name,
         )
@@ -203,10 +199,6 @@ def _probabilities[V: str](
     if total <= 0:
         raise DecisionsError(f"Decisions API answer '{name}' has no positive probability")
     return {value: prob / total for value, prob in probs.items()}
-
-
-def _predicate_probability(answers: Mapping[str, Mapping[str, Any]], name: str) -> float:
-    return _probability(_answer(answers, name, "predicate").get("probability"), name)
 
 
 def _answer(answers: Mapping[str, Mapping[str, Any]], name: str, kind: str) -> Mapping[str, Any]:

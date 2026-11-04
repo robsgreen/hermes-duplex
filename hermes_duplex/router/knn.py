@@ -1,6 +1,6 @@
 """The local phrase matcher: nearest neighbour over static embeddings of each choice's phrases.
 
-It answers in a few milliseconds and judges only the profile, never effort or follow-up.
+It answers in a few milliseconds and judges only the profile, never effort.
 """
 
 import asyncio
@@ -97,7 +97,6 @@ class KnnBackend:
         return BackendResult(
             profile_probs={choice: float(p) for choice, p in zip(self._choices, probs, strict=True)},
             effort_probs=None,
-            followup_prob=None,
             latency_ms=round((time.perf_counter() - started) * 1000),
             backend=self.name,
             control_intent=control_intent,

@@ -78,7 +78,6 @@ def _answers() -> list[dict[str, Any]]:
     return [
         choice("profile", {"stock-picker": 0.9, "general": 0.05, "_control": 0.05}),
         choice("effort", {"low": 0.1, "medium": 0.2, "high": 0.7}),
-        {"type": "predicate", "name": "followup", "probability": 0.1},
     ]
 
 

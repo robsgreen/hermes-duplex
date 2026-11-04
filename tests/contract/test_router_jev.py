@@ -41,7 +41,6 @@ def _reply(answers: dict[str, Any]) -> dict[str, Any]:
 GOOD_ANSWERS: dict[str, Any] = {
     "profile": _choice_answer({"stock-picker": 0.7, "general": 0.2, "_control": 0.1}),
     "effort": _choice_answer({"low": 0.1, "medium": 0.3, "high": 0.6}),
-    "followup": {"type": "noul", "noul": 0.25},
 }
 
 
@@ -102,7 +101,7 @@ def _request(text: str = "should I buy NVDA", history: tuple[str, ...] = ()) -> 
 # --- request shape ---
 
 
-async def test_request_sends_model_key_state_and_three_named_questions(
+async def test_request_sends_model_key_state_and_two_named_questions(
     backend: JevBackend, fake: FakeSystemOneApi
 ) -> None:
     history = ("one", "two", "three", "four", "five")
@@ -114,8 +113,8 @@ async def test_request_sends_model_key_state_and_three_named_questions(
     [body] = fake.bodies
     assert body["model"] == "jev-latest"
     assert body["state"] == {"request": "and TSLA?", "earlier_messages": ["two", "three", "four", "five"]}
-    assert set(body["questions"]) == {"profile", "effort", "followup"}
-    profile, effort, followup = (body["questions"][name] for name in ("profile", "effort", "followup"))
+    assert set(body["questions"]) == {"profile", "effort"}
+    profile, effort = (body["questions"][name] for name in ("profile", "effort"))
     assert profile["type"] == "choice"
     assert profile["instructions"]
     assert profile["criteria"] == {
@@ -127,7 +126,6 @@ async def test_request_sends_model_key_state_and_three_named_questions(
     assert effort["instructions"]
     assert list(effort["criteria"]) == ["low", "medium", "high"]
     assert all(effort["criteria"].values())
-    assert followup == {"type": "noul", "instructions": "The request continues the previous task's topic."}
 
 
 async def test_request_without_history_sends_no_earlier_messages(
@@ -180,7 +178,6 @@ async def test_answers_map_to_backend_result(backend: JevBackend) -> None:
     assert result.backend == "jev"
     assert result.profile_probs == pytest.approx({"stock-picker": 0.7, "general": 0.2, "_control": 0.1})
     assert result.effort_probs == pytest.approx({"low": 0.1, "medium": 0.3, "high": 0.6})
-    assert result.followup_prob == 0.25
     assert result.control_intent is None
     assert result.latency_ms >= 0
 
@@ -190,7 +187,6 @@ async def test_missing_choices_get_zero_and_probabilities_are_normalized(
 ) -> None:
     fake.body = _reply(
         {
-            "followup": {"type": "noul", "noul": 0.9},
             "effort": _choice_answer({"low": 0.5, "medium": 0.5}),
             "profile": _choice_answer({"_control": 0.6, "general": 0.2}),
         }
@@ -200,7 +196,6 @@ async def test_missing_choices_get_zero_and_probabilities_are_normalized(
 
     assert result.profile_probs == pytest.approx({"stock-picker": 0.0, "general": 0.25, "_control": 0.75})
     assert result.effort_probs == pytest.approx({"low": 0.5, "medium": 0.5, "high": 0.0})
-    assert result.followup_prob == 0.9
 
 
 # --- malformed replies and failures ---
@@ -226,7 +221,6 @@ def _with_profile_probabilities(probabilities: Any) -> dict[str, Any]:
         pytest.param(_with("profile", "stock-picker"), id="answer-not-an-object"),
         pytest.param(_without("profile"), id="missing-profile"),
         pytest.param(_without("effort"), id="missing-effort"),
-        pytest.param(_without("followup"), id="missing-followup"),
         pytest.param(_with_profile_probabilities(None), id="no-probabilities"),
         pytest.param(_with_profile_probabilities([{"general": 0.9}]), id="probabilities-not-an-object"),
         pytest.param(_with_profile_probabilities({"home": 0.9}), id="unknown-choice"),
@@ -234,9 +228,7 @@ def _with_profile_probabilities(probabilities: Any) -> dict[str, Any]:
         pytest.param(_with_profile_probabilities({"general": "high"}), id="probability-not-a-number"),
         pytest.param(_with_profile_probabilities({"general": True}), id="probability-a-boolean"),
         pytest.param(_with_profile_probabilities({"general": 0.0}), id="all-zero"),
-        pytest.param(_with("followup", {"type": "choice", "probabilities": {}}), id="followup-wrong-type"),
-        pytest.param(_with("followup", {"type": "noul"}), id="followup-no-noul"),
-        pytest.param(_with("followup", {"type": "noul", "noul": -0.1}), id="followup-below-0"),
+        pytest.param(_with("effort", {"type": "noul", "noul": 0.5}), id="effort-wrong-type"),
     ],
 )
 async def test_malformed_reply_raises(backend: JevBackend, fake: FakeSystemOneApi, body: Any) -> None:

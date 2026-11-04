@@ -1,16 +1,20 @@
-"""Router eval: how well each backend alone, and the composite router, route a file of labelled phrases.
+"""Router eval: how well the router judges effort and suggests switches, with each backend alone and
+with the composite router, over a file of labelled phrases.
 
 A phrase file is YAML with a ``phrases`` list and an optional ``profiles`` section.
 ``tests/fixtures/router_eval/phrases.yaml`` is the reference file and documents the format:
 
 - ``profiles`` maps each profile to its ``description`` and ``examples``, in the shape of
   duplex.yaml's ``profiles`` section; it is what the router is configured with.
-- Each phrase has the ``text`` a speaker says, the ``profile`` it should route to (``_control`` for
-  status and cancel requests), and the ``effort`` it deserves. A follow-up names the phrase it
-  ``follows``, said earlier by the same speaker. A ``control_intent`` key is allowed and not scored.
+- Each phrase has the ``text`` a speaker says, the ``profile`` it belongs to (``_control`` for status
+  and cancel requests), the speaker's ``active`` profile when they say it, and the ``effort`` it
+  deserves. The router should suggest switching exactly when ``profile`` is a profile other than
+  ``active``. A follow-up names the phrase it ``follows``, said earlier by the same speaker. A
+  ``control_intent`` key is allowed and not scored.
 
-For each target the eval reports accuracy, macro-F1, the confusion matrix, effort exact and
-off-by-one rates, latency percentiles, and the deadline-miss rate (``EvalReport``).
+For each target the eval reports effort accuracy, suggestion precision and recall, how often the
+deciding backend's top choice is the labelled one (with macro-F1 and the confusion matrix), latency
+percentiles, and the deadline-miss rate (``EvalReport``).
 """
 
 import dataclasses
@@ -25,7 +29,7 @@ import numpy as np
 import yaml
 
 from ..config import CONTROL_PROFILE, Config, ProfileConfig, RouterConfig
-from .base import Effort, ProfileSpec, RouterBackend, RouteRequest, choice_specs
+from .base import Effort, RouterBackend
 from .composite import CompositeRouter
 from .factory import build_backends
 from .knn import Embedder, KnnBackend
@@ -36,10 +40,10 @@ COMPOSITE = "composite"
 """The target name of the composite router, beside the backend names."""
 
 NO_ANSWER = "no_answer"
-"""The confusion-matrix column of phrases a backend gave no answer for (it raised)."""
+"""The confusion-matrix column of phrases no backend answered in time."""
 
 _EFFORTS: tuple[Effort, ...] = get_args(Effort)
-_PHRASE_KEYS = frozenset({"text", "profile", "effort", "follows", "control_intent"})
+_PHRASE_KEYS = frozenset({"text", "profile", "active", "effort", "follows", "control_intent"})
 _PROFILE_KEYS = frozenset({"description", "examples"})
 
 
@@ -49,12 +53,14 @@ class PhraseFileError(ValueError):
 
 @dataclass(frozen=True)
 class LabelledPhrase:
-    """One utterance and where it should go. ``follows`` is the text of an earlier phrase that the same
-    speaker said just before it, or None."""
+    """One utterance and where it belongs. ``active`` is the profile the speaker is on when they say
+    it; ``follows`` is the text of an earlier phrase that the same speaker said just before it, or
+    None."""
 
     text: str
     profile: str
     effort: Effort
+    active: str
     follows: str | None = None
 
 
@@ -70,39 +76,49 @@ class PhraseFile:
 class EvalReport:
     """The scores of one target (a backend alone, or ``COMPOSITE``) over a phrase file.
 
-    Rates are fractions of ``phrase_count`` in [0, 1]. A phrase the target gave no answer for counts
-    as wrong and as a deadline miss. The effort rates are None when the target judges no effort (a
-    backend that never returns effort probabilities); ``effort_off_by_one_rate`` counts phrases
-    exactly one level off (low vs medium, medium vs high). Latencies are wall-clock times of each
-    request, in ms, by the nearest-rank method.
+    Rates are fractions in [0, 1], and None when nothing was there to score. Latencies are wall-clock
+    times of each request, in ms, by the nearest-rank method.
     """
 
     target: str
     phrase_count: int
     deadline_ms: int
-    accuracy: float
-    macro_f1: float
-    """Mean F1 over every label that was expected or predicted."""
-    effort_exact_rate: float | None
+    effort_accuracy: float | None
+    """Share of task phrases (labelled with a profile, not ``_control``) whose effort is the labelled
+    one. A backend that judges no effort is scored on the router's default effort."""
     effort_off_by_one_rate: float | None
+    """Share of task phrases exactly one effort level off (low vs medium, medium vs high)."""
+    suggestions_made: int
+    suggestion_precision: float | None
+    """Of the suggestions made, the share naming the labelled profile while it differs from
+    ``active``; None when none were made."""
+    suggestion_recall: float | None
+    """Of the phrases labelled with a profile other than ``active``, the share that got a suggestion
+    of that profile; None when there are none."""
+    choice_accuracy: float
+    """Share of phrases whose top-scored choice (profile or ``_control``) is the labelled one."""
+    macro_f1: float
+    """Mean F1 of the top-scored choice over every label that was expected or predicted."""
     latency_p50_ms: float
     latency_p95_ms: float
     latency_p99_ms: float
     deadline_miss_rate: float
-    """Phrases not answered within ``deadline_ms``: the target raised, or took longer."""
-    errors: int
-    """Phrases the target raised for."""
+    """Phrases not answered within ``deadline_ms``: unanswered, or answered later."""
+    unanswered: int
+    """Phrases no backend answered in time (each raised or missed the deadline), so the router fell
+    back."""
     confusion: Mapping[str, Mapping[str, int]]
-    """Expected label → predicted label → phrase count, over every profile and ``_control`` in
-    order, plus a ``NO_ANSWER`` column when ``errors`` is not zero."""
+    """Expected label → top-scored choice → phrase count, over every profile and ``_control`` in
+    order, plus a ``NO_ANSWER`` column when ``unanswered`` is not zero."""
 
 
 @dataclass(frozen=True)
 class _Outcome:
-    """What a target answered for one phrase; ``profile`` None means it raised."""
+    """What a target decided for one phrase; ``choice`` None means no backend answered."""
 
-    profile: str | None
-    effort: Effort | None
+    choice: str | None
+    effort: Effort
+    suggestion: str | None
     latency_ms: float
     in_time: bool
 
@@ -111,7 +127,8 @@ def load_phrases(path: str | Path) -> PhraseFile:
     """Load and check the phrase file at ``path``.
 
     Raises ``PhraseFileError`` when it cannot be read, a key is unknown or of the wrong type, there
-    are no phrases, two phrases share a text, an effort is not low, medium, or high, or a phrase
+    are no phrases, two phrases share a text, an effort is not low, medium, or high, a phrase has no
+    ``active`` profile or one the ``profiles`` section (when present) does not define, or a phrase
     ``follows`` a text that no earlier phrase has.
     """
     try:
@@ -123,7 +140,7 @@ def load_phrases(path: str | Path) -> PhraseFile:
     raw = cast(dict[str, Any], raw)
     _reject_unknown(raw, frozenset({"profiles", "phrases"}), str(path))
     profiles = _profiles(raw["profiles"], f"{path}: profiles") if "profiles" in raw else None
-    return PhraseFile(profiles=profiles, phrases=_phrases(raw.get("phrases"), f"{path}: phrases"))
+    return PhraseFile(profiles=profiles, phrases=_phrases(raw.get("phrases"), profiles, f"{path}: phrases"))
 
 
 async def evaluate_config(
@@ -179,42 +196,39 @@ async def evaluate(
 ) -> list[EvalReport]:
     """Route every phrase through each target in turn and score it; one report per target, in order.
 
-    A target is a backend's name (that backend alone, configured with every profile and ``_control``)
-    or ``COMPOSITE`` (a ``CompositeRouter`` over ``router`` and ``backends``). Phrases are routed in
-    order. A follow-up is sent by the speaker of the phrase it follows, with that speaker's earlier
-    phrases as history; each other phrase starts a new speaker. Each target gets that speaker's last
-    predicted profile as ``active_profile``, starting from ``router.default_profile`` (the first
-    profile when that is not one of ``profiles``). The composite's prediction is ``_control`` for a
-    control request, else its decision's most probable choice. ``clock`` returns seconds and times
+    A target is a backend's name or ``COMPOSITE``. Each target is a ``CompositeRouter`` over
+    ``router``'s settings (deadline, circuit breaker, suggestion rule): a backend's name means that
+    backend alone as the main path, without a fast path; ``COMPOSITE`` means ``router``'s own paths
+    over ``backends``. Phrases are routed in order, each with its ``active`` profile and every profile
+    permitted. A follow-up is sent by the speaker of the phrase it follows, with that speaker's earlier
+    phrases as history; each other phrase starts a new speaker. ``clock`` returns seconds and times
     each request; the deadline is ``router.deadline_ms``. ``phrases`` must not be empty.
 
-    Raises ``PhraseFileError`` when a phrase's profile is neither a profile nor ``_control``, and
-    ``ValueError`` when a target is neither a backend in ``backends`` nor ``COMPOSITE``, or
-    ``CompositeRouter`` rejects its arguments. A backend raising from ``classify`` is a wrong answer,
-    not an error; one raising from ``configure`` propagates.
+    Raises ``PhraseFileError`` when a phrase's profile is neither a profile nor ``_control``, or its
+    ``active`` is not a profile; ``ValueError`` when a target is neither a backend in ``backends`` nor
+    ``COMPOSITE``, or ``CompositeRouter`` rejects its arguments. A backend raising from ``classify``
+    leaves the phrase unanswered; one raising from ``configure`` propagates.
     """
     choices = (*profiles, CONTROL_PROFILE)
     if unknown := sorted({phrase.profile for phrase in phrases} - set(choices)):
         raise PhraseFileError(f"phrases expect profiles the router does not have: {', '.join(unknown)}")
+    if unknown := sorted({phrase.active for phrase in phrases} - set(profiles)):
+        raise PhraseFileError(
+            f"phrases are active on profiles the router does not have: {', '.join(unknown)}"
+        )
     by_name = {backend.name: backend for backend in backends}
     if missing := [target for target in targets if target != COMPOSITE and target not in by_name]:
         raise ValueError(f"no backend named '{missing[0]}' to evaluate")
-    composite = CompositeRouter(router, profiles, backends, clock=clock) if COMPOSITE in targets else None
 
     speakers = _speakers(phrases)
-    first_active = router.default_profile if router.default_profile in profiles else next(iter(profiles))
     reports: list[EvalReport] = []
     for target in targets:
         if target == COMPOSITE:
-            assert composite is not None
-            outcomes = await _run_composite(
-                composite, choices, phrases, speakers, first_active, router.deadline_ms, clock
-            )
+            composite = CompositeRouter(router, profiles, backends, clock=clock)
         else:
-            specs = choice_specs(profiles, router.control_examples)
-            outcomes = await _run_backend(
-                by_name[target], specs, choices, phrases, speakers, first_active, router.deadline_ms, clock
-            )
+            alone = dataclasses.replace(router, backend=target, fast_path=None)
+            composite = CompositeRouter(alone, profiles, [by_name[target]], clock=clock)
+        outcomes = await _run(composite, choices, phrases, speakers, router.deadline_ms, clock)
         reports.append(_report(target, phrases, outcomes, choices, router.deadline_ms))
     return reports
 
@@ -231,15 +245,21 @@ def format_table(reports: Sequence[EvalReport]) -> str:
         latencies = " / ".join(
             f"{ms:.1f}" for ms in (report.latency_p50_ms, report.latency_p95_ms, report.latency_p99_ms)
         )
+        rows = (
+            ("effort accuracy", _rate(report.effort_accuracy)),
+            ("effort off-by-one", _rate(report.effort_off_by_one_rate)),
+            ("suggestions made", str(report.suggestions_made)),
+            ("suggestion precision", _rate(report.suggestion_precision)),
+            ("suggestion recall", _rate(report.suggestion_recall)),
+            ("choice accuracy", _rate(report.choice_accuracy)),
+            ("choice macro-F1", _rate(report.macro_f1)),
+            ("latency p50/p95/p99", f"{latencies} ms"),
+            ("deadline misses", f"{report.deadline_miss_rate:.3f}  ({report.unanswered} unanswered)"),
+        )
         lines = [
             f"{report.target}  ({report.phrase_count} phrases, deadline {report.deadline_ms} ms)",
-            f"  accuracy             {report.accuracy:.3f}",
-            f"  macro-F1             {report.macro_f1:.3f}",
-            f"  effort exact         {_rate(report.effort_exact_rate)}",
-            f"  effort off-by-one    {_rate(report.effort_off_by_one_rate)}",
-            f"  latency p50/p95/p99  {latencies} ms",
-            f"  deadline misses      {report.deadline_miss_rate:.3f}  ({report.errors} errors)",
-            "  confusion (rows: expected, columns: predicted)",
+            *(f"  {label:<22}{value}" for label, value in rows),
+            "  confusion of the top choice (rows: expected, columns: predicted)",
         ]
         columns = list(next(iter(report.confusion.values())))
         label_width = max(len(label) for label in report.confusion)
@@ -272,73 +292,24 @@ def _speakers(phrases: Sequence[LabelledPhrase]) -> list[tuple[str, tuple[str, .
     return speakers
 
 
-async def _run_backend(
-    backend: RouterBackend,
-    specs: Sequence[ProfileSpec],
-    choices: Sequence[str],
-    phrases: Sequence[LabelledPhrase],
-    speakers: Sequence[tuple[str, tuple[str, ...]]],
-    first_active: str,
-    deadline_ms: int,
-    clock: Callable[[], float],
-) -> list[_Outcome]:
-    await backend.configure(specs)
-    active: dict[str, str] = {}
-    outcomes: list[_Outcome] = []
-    for phrase, (speaker, history) in zip(phrases, speakers, strict=True):
-        req = RouteRequest(
-            text=phrase.text,
-            speaker=speaker,
-            history=history,
-            active_profile=active.get(speaker, first_active),
-        )
-        started = clock()
-        try:
-            result = await backend.classify(req, deadline_ms)
-        except Exception:
-            latency_ms = (clock() - started) * 1000
-            logger.exception("router backend %s failed on %r", backend.name, phrase.text)
-            outcomes.append(_Outcome(profile=None, effort=None, latency_ms=latency_ms, in_time=False))
-            continue
-        latency_ms = (clock() - started) * 1000
-        probs = result.profile_probs
-        profile = max(choices, key=lambda choice: probs.get(choice, 0.0))
-        if profile != CONTROL_PROFILE:
-            active[speaker] = profile
-        efforts = result.effort_probs
-        effort = max(efforts, key=efforts.__getitem__) if efforts else None
-        outcomes.append(_Outcome(profile, effort, latency_ms, in_time=latency_ms <= deadline_ms))
-    return outcomes
-
-
-async def _run_composite(
+async def _run(
     router: CompositeRouter,
     choices: Sequence[str],
     phrases: Sequence[LabelledPhrase],
     speakers: Sequence[tuple[str, tuple[str, ...]]],
-    first_active: str,
     deadline_ms: int,
     clock: Callable[[], float],
 ) -> list[_Outcome]:
     await router.configure()
-    active: dict[str, str] = {}
     outcomes: list[_Outcome] = []
     for phrase, (speaker, history) in zip(phrases, speakers, strict=True):
         started = clock()
-        decision = await router.route(
-            phrase.text, speaker, active_profile=active.get(speaker, first_active), history=history
-        )
+        decision = await router.route(phrase.text, speaker, active_profile=phrase.active, history=history)
         latency_ms = (clock() - started) * 1000
         probs = decision.probabilities
-        if decision.control_intent is not None:
-            profile = CONTROL_PROFILE
-        elif probs:
-            profile = max(choices, key=lambda choice: probs.get(choice, 0.0))
-        else:
-            profile = active.get(speaker, first_active)
-        if profile != CONTROL_PROFILE:
-            active[speaker] = profile
-        outcomes.append(_Outcome(profile, decision.effort, latency_ms, latency_ms <= deadline_ms))
+        choice = max(choices, key=lambda choice: probs.get(choice, 0.0)) if probs else None
+        in_time = choice is not None and latency_ms <= deadline_ms
+        outcomes.append(_Outcome(choice, decision.effort, decision.suggestion, latency_ms, in_time))
     return outcomes
 
 
@@ -350,17 +321,27 @@ def _report(
     deadline_ms: int,
 ) -> EvalReport:
     count = len(phrases)
-    errors = sum(outcome.profile is None for outcome in outcomes)
-    columns = [*choices, NO_ANSWER] if errors else list(choices)
+    scored = list(zip(phrases, outcomes, strict=True))
+    unanswered = sum(outcome.choice is None for outcome in outcomes)
+    columns = [*choices, NO_ANSWER] if unanswered else list(choices)
     confusion = {expected: dict.fromkeys(columns, 0) for expected in choices}
-    for phrase, outcome in zip(phrases, outcomes, strict=True):
-        confusion[phrase.profile][outcome.profile or NO_ANSWER] += 1
+    for phrase, outcome in scored:
+        confusion[phrase.profile][outcome.choice or NO_ANSWER] += 1
 
-    judged_effort = any(outcome.effort is not None for outcome in outcomes)
     steps = [
         abs(_EFFORTS.index(outcome.effort) - _EFFORTS.index(phrase.effort))
-        for phrase, outcome in zip(phrases, outcomes, strict=True)
-        if outcome.effort is not None
+        for phrase, outcome in scored
+        if phrase.profile != CONTROL_PROFILE
+    ]
+    suggested = [(phrase, outcome) for phrase, outcome in scored if outcome.suggestion is not None]
+    right_suggestions = sum(
+        outcome.suggestion == phrase.profile and phrase.profile != phrase.active
+        for phrase, outcome in suggested
+    )
+    switches = [
+        (phrase, outcome)
+        for phrase, outcome in scored
+        if phrase.profile not in (CONTROL_PROFILE, phrase.active)
     ]
     p50, p95, p99 = np.percentile(
         [outcome.latency_ms for outcome in outcomes], [50, 95, 99], method="inverted_cdf"
@@ -369,17 +350,26 @@ def _report(
         target=target,
         phrase_count=count,
         deadline_ms=deadline_ms,
-        accuracy=sum(confusion[choice][choice] for choice in choices) / count,
+        effort_accuracy=_share(steps.count(0), len(steps)),
+        effort_off_by_one_rate=_share(steps.count(1), len(steps)),
+        suggestions_made=len(suggested),
+        suggestion_precision=_share(right_suggestions, len(suggested)),
+        suggestion_recall=_share(
+            sum(outcome.suggestion == phrase.profile for phrase, outcome in switches), len(switches)
+        ),
+        choice_accuracy=sum(confusion[choice][choice] for choice in choices) / count,
         macro_f1=_macro_f1(confusion, choices),
-        effort_exact_rate=steps.count(0) / count if judged_effort else None,
-        effort_off_by_one_rate=steps.count(1) / count if judged_effort else None,
         latency_p50_ms=float(p50),
         latency_p95_ms=float(p95),
         latency_p99_ms=float(p99),
         deadline_miss_rate=sum(not outcome.in_time for outcome in outcomes) / count,
-        errors=errors,
+        unanswered=unanswered,
         confusion=confusion,
     )
+
+
+def _share(part: int, whole: int) -> float | None:
+    return part / whole if whole else None
 
 
 def _macro_f1(confusion: Mapping[str, Mapping[str, int]], choices: Sequence[str]) -> float:
@@ -423,7 +413,11 @@ def _profiles(raw: Any, where: str) -> Mapping[str, ProfileConfig]:
     return profiles
 
 
-def _phrases(raw: Any, where: str) -> tuple[LabelledPhrase, ...]:
+def _phrases(
+    raw: Any, profiles: Mapping[str, ProfileConfig] | None, where: str
+) -> tuple[LabelledPhrase, ...]:
+    """The phrases of ``raw``; each ``active`` must be one of ``profiles``, or any profile name when
+    ``profiles`` is None (``evaluate`` checks it against the router's)."""
     if not isinstance(raw, list) or not raw:
         raise PhraseFileError(f"{where}: expected a non-empty list")
     phrases: list[LabelledPhrase] = []
@@ -434,20 +428,28 @@ def _phrases(raw: Any, where: str) -> tuple[LabelledPhrase, ...]:
             raise PhraseFileError(f"{here}: expected a mapping")
         item = cast(dict[str, Any], item)
         _reject_unknown(item, _PHRASE_KEYS, here)
-        text, profile, effort, follows = (item.get(key) for key in ("text", "profile", "effort", "follows"))
+        text, profile, active, effort, follows = (
+            item.get(key) for key in ("text", "profile", "active", "effort", "follows")
+        )
         if not isinstance(text, str) or not text:
             raise PhraseFileError(f"{here}.text: expected a non-empty string")
         if text in texts:
             raise PhraseFileError(f"{here}.text: '{text}' appears twice")
         if not isinstance(profile, str):
             raise PhraseFileError(f"{here}.profile: expected a string")
+        if not isinstance(active, str) or active == CONTROL_PROFILE:
+            raise PhraseFileError(f"{here}.active: expected the profile the speaker is on")
+        if profiles is not None and active not in profiles:
+            raise PhraseFileError(f"{here}.active: '{active}' is not a profile in the profiles section")
         if effort not in _EFFORTS:
             raise PhraseFileError(f"{here}.effort: expected one of {', '.join(_EFFORTS)}")
         if follows is not None and follows not in texts:
             raise PhraseFileError(f"{here}.follows: no earlier phrase is '{follows}'")
         texts.add(text)
         phrases.append(
-            LabelledPhrase(text=text, profile=profile, effort=cast(Effort, effort), follows=follows)
+            LabelledPhrase(
+                text=text, profile=profile, effort=cast(Effort, effort), active=active, follows=follows
+            )
         )
     return tuple(phrases)
 

@@ -125,13 +125,12 @@ class BackendResult:
     """One backend's scores for one request.
 
     ``profile_probs`` maps every configured choice to a probability; the values sum to 1.
-    ``effort_probs`` and ``followup_prob`` are None when the backend does not judge them.
+    ``effort_probs`` is None when the backend does not judge effort.
     ``latency_ms`` is how long the backend took; ``backend`` is its ``name``.
     """
 
     profile_probs: Mapping[str, float]
     effort_probs: Mapping[Effort, float] | None
-    followup_prob: float | None
     latency_ms: int
     backend: str
     control_intent: ControlIntent | None = None
@@ -150,7 +149,7 @@ class RouterBackend(Protocol):
         ...
 
     async def classify(self, req: RouteRequest, deadline_ms: int) -> BackendResult:
-        """Score ``req``: probabilities for profile, effort, and follow-up.
+        """Score ``req``: probabilities for each choice and, when the backend judges it, effort.
 
         ``deadline_ms`` is how long the caller will wait; a backend may give up after it. Raises on
         failure; the router falls back.

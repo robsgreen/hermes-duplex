@@ -44,7 +44,6 @@ async def test_routes_a_portfolio_phrase_to_stock_picker() -> None:
     assert set(result.profile_probs) == {"stock-picker", "general", CONTROL_PROFILE}
     assert sum(result.profile_probs.values()) == pytest.approx(1.0)
     assert result.effort_probs is None
-    assert result.followup_prob is None
     assert result.backend == "knn"
     assert result.latency_ms >= 0
 

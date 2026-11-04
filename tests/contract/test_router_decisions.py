@@ -47,7 +47,6 @@ def _reply(*answers: dict[str, Any]) -> dict[str, Any]:
 GOOD_ANSWERS = (
     _choice_answer("profile", {"stock-picker": 0.7, "general": 0.2, "_control": 0.1}),
     _choice_answer("effort", {"low": 0.1, "medium": 0.3, "high": 0.6}),
-    {"type": "predicate", "name": "followup", "probability": 0.25},
 )
 
 
@@ -107,7 +106,7 @@ def _request(text: str = "should I buy NVDA", history: tuple[str, ...] = ()) -> 
 # --- request shape ---
 
 
-async def test_request_sends_model_key_input_and_three_questions(
+async def test_request_sends_model_key_input_and_two_questions(
     backend: DecisionsBackend, fake: FakeDecisionsApi
 ) -> None:
     history = ("one", "two", "three", "four", "five")
@@ -120,7 +119,7 @@ async def test_request_sends_model_key_input_and_three_questions(
     assert body["input"] == [
         {"role": "user", "content": line} for line in ("two", "three", "four", "five", "and TSLA?")
     ]
-    profile, effort, followup = body["questions"]
+    profile, effort = body["questions"]
     assert profile["type"] == "choice"
     assert profile["name"] == "profile"
     assert profile["instructions"]
@@ -133,11 +132,6 @@ async def test_request_sends_model_key_input_and_three_questions(
     assert effort["name"] == "effort"
     assert effort["instructions"]
     assert effort["choices"] == [{"value": "low"}, {"value": "medium"}, {"value": "high"}]
-    assert followup == {
-        "type": "predicate",
-        "name": "followup",
-        "instructions": "The request continues the previous task's topic.",
-    }
 
 
 async def test_request_without_history_sends_only_the_text(
@@ -182,7 +176,6 @@ async def test_answers_map_to_backend_result(backend: DecisionsBackend) -> None:
     assert result.backend == "decisions"
     assert result.profile_probs == pytest.approx({"stock-picker": 0.7, "general": 0.2, "_control": 0.1})
     assert result.effort_probs == pytest.approx({"low": 0.1, "medium": 0.3, "high": 0.6})
-    assert result.followup_prob == 0.25
     assert result.control_intent is None
     assert result.latency_ms >= 0
 
@@ -191,7 +184,6 @@ async def test_answers_are_matched_by_name_and_missing_choices_get_zero(
     backend: DecisionsBackend, fake: FakeDecisionsApi
 ) -> None:
     fake.body = _reply(
-        {"type": "predicate", "name": "followup", "probability": 0.9},
         _choice_answer("effort", {"low": 0.5, "medium": 0.5}),
         _choice_answer("profile", {"_control": 0.6, "general": 0.2}),
     )
@@ -200,7 +192,6 @@ async def test_answers_are_matched_by_name_and_missing_choices_get_zero(
 
     assert result.profile_probs == pytest.approx({"stock-picker": 0.0, "general": 0.25, "_control": 0.75})
     assert result.effort_probs == pytest.approx({"low": 0.5, "medium": 0.5, "high": 0.0})
-    assert result.followup_prob == 0.9
 
 
 # --- refusals and failures ---
@@ -216,16 +207,15 @@ async def test_refused_profile_raises(backend: DecisionsBackend, fake: FakeDecis
         await backend.classify(_request(), deadline_ms=1000)
 
 
-async def test_refused_effort_and_followup_leave_those_scores_unjudged(
+async def test_refused_effort_leaves_effort_unjudged(
     backend: DecisionsBackend, fake: FakeDecisionsApi
 ) -> None:
-    fake.body = _reply(GOOD_ANSWERS[0], REFUSAL, {**REFUSAL, "name": "followup"})
+    fake.body = _reply(GOOD_ANSWERS[0], REFUSAL)
 
     result = await backend.classify(_request(), deadline_ms=1000)
 
     assert result.profile_probs == pytest.approx({"stock-picker": 0.7, "general": 0.2, "_control": 0.1})
     assert result.effort_probs is None
-    assert result.followup_prob is None
 
 
 def _without(name: str) -> dict[str, Any]:
@@ -245,7 +235,6 @@ def _with_profile(probabilities: Any) -> dict[str, Any]:
         pytest.param({"answers": ["profile"]}, id="answer-not-an-object"),
         pytest.param(_without("profile"), id="missing-profile"),
         pytest.param(_without("effort"), id="missing-effort"),
-        pytest.param(_without("followup"), id="missing-followup"),
         pytest.param(_with_profile(None), id="no-probabilities"),
         pytest.param(_with_profile([{"value": "home", "probability": 0.9}]), id="unknown-choice"),
         pytest.param(_with_profile(["general"]), id="probability-entry-not-an-object"),
@@ -255,11 +244,8 @@ def _with_profile(probabilities: Any) -> dict[str, Any]:
         ),
         pytest.param(_with_profile([{"value": "general", "probability": 0.0}]), id="all-zero"),
         pytest.param(
-            _reply(*GOOD_ANSWERS[:2], {"type": "choice", "name": "followup", "probabilities": []}),
-            id="followup-wrong-type",
-        ),
-        pytest.param(
-            _reply(*GOOD_ANSWERS[:2], {"type": "predicate", "name": "followup"}), id="followup-no-probability"
+            _reply(GOOD_ANSWERS[0], {"type": "predicate", "name": "effort", "probability": 0.5}),
+            id="effort-wrong-type",
         ),
     ],
 )

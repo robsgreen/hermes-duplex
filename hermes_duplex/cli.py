@@ -120,11 +120,15 @@ def eval_router(args: argparse.Namespace, *, embed: Embedder | None = None) -> i
     """Run ``eval-router`` with the parsed ``args``: print the scores to stdout and return 0, or print
     the error to stderr and return 1 when the phrase file, config, or a backend's setup is unusable.
 
-    ``embed`` replaces the knn backend's embedding model (tests pass a deterministic one).
+    ``embed`` replaces the knn backend's embedding model (tests pass a deterministic one). The
+    router's per-request ``route ...`` INFO lines are silenced while it runs.
     """
     # Imported here, like the service: the router pulls in numpy, model2vec, and aiohttp.
+    from .router import composite
     from .router.eval import evaluate_config, format_table, load_phrases, to_json
 
+    route_level = composite.logger.level
+    composite.logger.setLevel(max(logging.WARNING, route_level))
     try:
         phrase_file = load_phrases(args.phrases)
         config = load_config(args.config) if args.config is not None else None
@@ -132,6 +136,8 @@ def eval_router(args: argparse.Namespace, *, embed: Embedder | None = None) -> i
     except (ConfigError, ValueError) as error:
         print(f"hermes-duplex: {error}", file=sys.stderr)
         return _EXIT_CONFIG_ERROR
+    finally:
+        composite.logger.setLevel(route_level)
     print(json.dumps(to_json(reports), indent=2) if args.json else format_table(reports))
     return 0
 
