@@ -10,7 +10,7 @@
 {"type": "conversation.item.input_audio_transcription.delta", "event_id": "event_7", "item_id": "item_user_1", "content_index": 0, "delta": "portfolio doing"}
 {"type": "conversation.item.input_audio_transcription.completed", "event_id": "event_8", "item_id": "item_user_1", "content_index": 0, "transcript": "how is my portfolio doing?", "usage": {"type": "duration", "seconds": 1.3}}
 {"type": "response.created", "event_id": "event_9", "response": {"id": "resp_1", "object": "realtime.response", "status": "in_progress", "output": []}}
-{"type": "response.function_call_arguments.done", "event_id": "event_10", "response_id": "resp_1", "item_id": "item_call_1", "output_index": 0, "call_id": "call_1", "name": "delegate", "arguments": "{\"task\": \"check how Rob's portfolio is doing today\", \"profile_hint\": \"finance\"}"}
+{"type": "response.function_call_arguments.done", "event_id": "event_10", "response_id": "resp_1", "item_id": "item_call_1", "output_index": 0, "call_id": "call_1", "name": "delegate", "arguments": "{\"task\": \"check how Rob's portfolio is doing today\"}"}
 {"type": "response.done", "event_id": "event_11", "response": {"id": "resp_1", "object": "realtime.response", "status": "completed", "output": [{"id": "item_call_1", "type": "function_call", "call_id": "call_1", "name": "delegate"}]}}
 {"wait_for": "conversation.item.create"}
 {"wait_for": "response.create"}

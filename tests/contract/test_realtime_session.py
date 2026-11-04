@@ -448,7 +448,7 @@ async def test_control_intent_cancel_routed_from_delegate_stops_the_run_and_is_c
         await harness.answer_requests()
         await harness.wait_for(lambda: len(harness.announcements()) == 2)
 
-        assert harness.outputs()["call_2"] == {"status": "started"}
+        assert harness.outputs()["call_2"] == {"status": "received"}
         assert harness.announcements()[1] == 'Cancelled "how is my portfolio doing".'
         task = harness.tracker.get(1)
         assert task is not None and task.state == "cancelled"
@@ -509,22 +509,20 @@ async def test_status_and_cancel_tools_find_the_task_the_users_words_are_about(
         assert len(api.requests_to("POST", "/stop")) == 1
 
 
-async def test_delegate_receipt_comes_at_once_and_the_profile_hint_reaches_the_router(
+async def test_delegate_receipt_comes_at_once_and_the_task_reaches_the_router(
     tmp_path: Path, api: FakeHermesApi
 ) -> None:
     async with _session(tmp_path, api) as harness:
-        await harness.server.send(
-            *_responding("call_1", "delegate", {"task": "what's the weather", "profile_hint": "general"})
-        )
+        await harness.server.send(*_responding("call_1", "delegate", {"task": "what's the weather"}))
         sent_s = time.perf_counter()
         await harness.wait_for(lambda: "call_1" in harness.outputs(), timeout_s=1)
         receipt_ms = (time.perf_counter() - sent_s) * 1000
 
         print(f"delegate receipt reached the provider {receipt_ms:.1f} ms after the call was sent")
         assert receipt_ms < RECEIPT_BUDGET_MS
-        assert harness.outputs()["call_1"] == {"status": "started"}
+        assert harness.outputs()["call_1"] == {"status": "received"}
         await harness.wait_for(lambda: bool(harness.router.requests))
-        assert harness.router.requests == [("what's the weather", "rob", "general")]
+        assert harness.router.requests == [("what's the weather", "rob", None)]
 
 
 async def _response_create_waits_for_the_calling_response(

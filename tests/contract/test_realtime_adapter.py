@@ -85,6 +85,7 @@ def test_openai_capabilities_describe_tool_delegation_with_speech_events() -> No
         "emits_speech_events": True,
         "delegation_style": "tool",
         "max_session_s": 3600,
+        "replaces_instructions": True,
     }
     assert OPENAI.url == "wss://api.openai.com/v1/realtime"
 
@@ -115,39 +116,126 @@ async def test_connect_sends_session_update_with_pcm_turn_detection_and_tools() 
         "output": {"format": pcm, "voice": "cedar"},
     }
     assert session["tool_choice"] == "auto"
-    tools = {tool["name"]: tool for tool in session["tools"]}
-    assert list(tools) == ["delegate", "task_status", "cancel_task"]
+    assert session["tools"] == list(session_tools(PromptContext()))
+
+
+def test_session_tools_take_a_task_a_task_choice_a_profile_and_a_yes_or_no() -> None:
+    tools = {tool["name"]: tool for tool in session_tools(CONTEXT)}
+
+    assert list(tools) == ["delegate", "task_status", "cancel_task", "switch_profile", "confirm_switch"]
     assert all(tool["type"] == "function" for tool in tools.values())
     delegate = tools["delegate"]["parameters"]
-    assert delegate["properties"]["task"]["type"] == "string"
-    assert delegate["properties"]["profile_hint"]["type"] == "string"
+    assert delegate["properties"] == {
+        "task": {"type": "string", "description": "The request restated as one self-contained task."}
+    }
     assert delegate["required"] == ["task"]
     for name in ("task_status", "cancel_task"):
         assert tools[name]["parameters"]["properties"]["task_id"]["type"] == "integer"
         assert tools[name]["parameters"]["properties"]["about"]["type"] == "string"
         assert tools[name]["parameters"]["required"] == []
+    switch = tools["switch_profile"]["parameters"]
+    assert list(switch["properties"]) == ["profile"]
+    assert switch["properties"]["profile"]["type"] == "string"
+    assert switch["properties"]["profile"]["enum"] == ["stock-picker", "general"]
+    assert "alias" in switch["properties"]["profile"]["description"]
+    assert switch["required"] == ["profile"]
+    confirm = tools["confirm_switch"]
+    assert "question about switching" in confirm["description"]
+    assert list(confirm["parameters"]["properties"]) == ["accept"]
+    assert confirm["parameters"]["properties"]["accept"]["type"] == "boolean"
+    assert confirm["parameters"]["required"] == ["accept"]
+
+
+def test_the_delegate_receipt_says_the_request_was_received_not_started() -> None:
+    delegate, *_ = session_tools(CONTEXT)
+
+    assert '{"status": "received"}' in delegate["description"]
+    assert "started" not in delegate["description"]
+    assert "Hermes agents" not in delegate["description"]
 
 
 @pytest.mark.parametrize("dialect", [OPENAI, XAI])
-async def test_the_delegate_tool_lists_the_hermes_agents_of_the_prompt_context(dialect: Dialect) -> None:
+async def test_the_switch_profile_tool_lists_the_hermes_agents_of_the_prompt_context(
+    dialect: Dialect,
+) -> None:
     async with FakeWsServer(STARTED) as server:
         provider = _provider(server, dialect=dialect, prompt_context=CONTEXT)
         await provider.connect(INSTRUCTIONS, None, None)
         await provider.close()
 
     (update,) = server.client_events
-    delegate, *_ = update["session"]["tools"]
-    assert delegate["name"] == "delegate"
-    assert delegate["description"].endswith(
+    tools = {tool["name"]: tool for tool in update["session"]["tools"]}
+    assert tools["switch_profile"]["description"].endswith(
         " Hermes agents: stock-picker (Portfolio, holdings, trades); general."
     )
 
 
-def test_the_delegate_tool_lists_no_agents_without_profiles() -> None:
-    delegate, *_ = session_tools(PromptContext())
+def test_without_profiles_there_is_no_switch_profile_tool() -> None:
+    names = [tool["name"] for tool in session_tools(PromptContext())]
 
-    assert "Hermes agents" not in delegate["description"]
-    assert '{"status": "started"}' in delegate["description"]
+    assert names == ["delegate", "task_status", "cancel_task", "confirm_switch"]
+
+
+@pytest.mark.parametrize(
+    ("dialect", "instructions_session"),
+    [
+        (OPENAI, {"type": "realtime", "instructions": "Now on the stock-picker agent."}),
+        (XAI, {"instructions": "Now on the stock-picker agent."}),
+    ],
+)
+async def test_update_instructions_replaces_only_the_instructions_and_the_tools_still_work(
+    dialect: Dialect, instructions_session: dict[str, Any]
+) -> None:
+    script = [
+        *STARTED,
+        {"wait_for": "session.update"},
+        {"type": "session.updated", "event_id": "event_3"},
+        {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}},
+        {
+            "type": "response.function_call_arguments.done",
+            "call_id": "call_1",
+            "name": "switch_profile",
+            "arguments": '{"profile": "general"}',
+        },
+        {"type": "response.done", "response": {"id": "resp_1", "status": "completed"}},
+        {"close": {}},
+    ]
+    async with FakeWsServer(script) as server:
+        provider = _provider(server, dialect=dialect, prompt_context=CONTEXT)
+        await provider.connect(INSTRUCTIONS, None, None)
+        await provider.update_instructions("Now on the stock-picker agent.")
+        events = await _rest(provider.events())
+
+    connect_update, instructions_update = server.client_events
+    assert "tools" in connect_update["session"]
+    assert instructions_update == {"type": "session.update", "session": instructions_session}
+    assert events == [
+        SessionReady(),
+        ResponseStarted(),
+        DelegationRequested(
+            id="call_1", offset_ms=0, target="switch_profile", tool_args={"profile": "general"}
+        ),
+        OutputDone(),
+        Closed("remote_hangup"),
+    ]
+
+
+async def test_announcements_after_update_instructions_use_the_new_instructions() -> None:
+    async with FakeWsServer(STARTED) as server:
+        provider = _provider(server)
+        await provider.connect(INSTRUCTIONS, None, None)
+        await provider.update_instructions("Now on the stock-picker agent.")
+        await provider.say("Switched to stock-picker.")
+        await provider.close()
+
+    announcement = server.client_events[-1]
+    assert announcement["type"] == "response.create"
+    assert announcement["response"]["instructions"] == "Now on the stock-picker agent."
+
+
+async def test_update_instructions_before_connect_raises() -> None:
+    with pytest.raises(RuntimeError):
+        await RealtimeApiProvider(API_KEY, dialect=OPENAI).update_instructions("hello")
 
 
 async def test_connect_defaults_model_voice_and_turn_detection_and_seeds_history_summary() -> None:
@@ -215,7 +303,7 @@ async def test_session_maps_events_and_answers_the_delegate_call_within_50_ms() 
         id="call_1",
         offset_ms=1500,
         target="delegate",
-        tool_args={"task": "check how Rob's portfolio is doing today", "profile_hint": "finance"},
+        tool_args={"task": "check how Rob's portfolio is doing today"},
     )
     assert receipt_ms < RECEIPT_BUDGET_MS
     assert output == {
@@ -591,6 +679,7 @@ def test_xai_capabilities_turn_off_truncate_and_out_of_band_responses() -> None:
         "emits_speech_events": True,
         "delegation_style": "tool",
         "max_session_s": None,
+        "replaces_instructions": True,
     }
     assert XAI.url == "wss://api.x.ai/v1/realtime"
 
@@ -622,7 +711,7 @@ async def test_grok_connect_sends_the_flat_session_update_with_the_xai_voice_pre
             "tools": update["session"]["tools"],
         },
     }
-    assert [tool["name"] for tool in update["session"]["tools"]] == ["delegate", "task_status", "cancel_task"]
+    assert update["session"]["tools"] == list(session_tools(PromptContext()))
 
 
 @pytest.mark.parametrize(

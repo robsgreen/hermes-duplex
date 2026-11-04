@@ -295,6 +295,7 @@ async def test_records_every_call_in_memory_and_to_record_path(tmp_path: Path) -
     await provider.report_progress(ref, "looking it up")
     await provider.deliver_result(ref, "up 2%")
     await provider.say("task 3 is done")
+    await provider.update_instructions("be brief")
     await provider.close()
 
     ref_args = {"delegation_id": "d1", "call_id": None, "task_id": 3}
@@ -305,6 +306,7 @@ async def test_records_every_call_in_memory_and_to_record_path(tmp_path: Path) -
         SentCall("report_progress", {"ref": ref_args, "text": "looking it up"}),
         SentCall("deliver_result", {"ref": ref_args, "text": "up 2%"}),
         SentCall("say", {"text": "task 3 is done"}),
+        SentCall("update_instructions", {"text": "be brief"}),
         SentCall("close", {}),
     ]
     assert list(provider.calls) == expected
@@ -389,6 +391,14 @@ async def test_input_ms_uses_the_input_rate() -> None:
     provider = FakeProvider(capabilities={"input_rate": 16000})
     await provider.send_audio(_audio_ms(100, rate=16000))
     assert provider.input_ms == 100
+
+
+def test_replaces_instructions_is_on_by_default_and_can_be_turned_off() -> None:
+    assert DEFAULT_CAPABILITIES["replaces_instructions"] is True
+    assert (
+        FakeProvider(capabilities={"replaces_instructions": False}).capabilities["replaces_instructions"]
+        is False
+    )
 
 
 def test_unknown_capability_is_rejected() -> None:

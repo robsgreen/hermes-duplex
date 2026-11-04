@@ -37,25 +37,41 @@ class ProviderCapabilities(TypedDict):
 
     delegation_style: Literal["live", "tool"]
     """``"live"``: the provider delegates natively (GPT-Live client delegation). ``"tool"``: the model
-    calls the ``DELEGATE_TOOL``, ``TASK_STATUS_TOOL``, and ``CANCEL_TASK_TOOL`` function tools."""
+    calls the ``DELEGATE_TOOL``, ``TASK_STATUS_TOOL``, ``CANCEL_TASK_TOOL``, ``SWITCH_PROFILE_TOOL``, and
+    ``CONFIRM_SWITCH_TOOL`` function tools."""
 
     max_session_s: int | None
     """Longest session the provider allows, in seconds, before it closes it; None means no limit."""
 
+    replaces_instructions: bool
+    """Whether ``RealtimeProvider.update_instructions`` replaces the open session's instructions in place.
+
+    When false, new instructions take effect only through a new provider session (``connect``).
+    """
+
 
 DELEGATE_TOOL = "delegate"
-"""Function tool that hands a request to Hermes; its arguments are ``task`` and an optional
-``profile_hint`` (the agent the user named)."""
+"""Function tool that hands a request to Hermes; its one argument is ``task``."""
 
-DELEGATE_RECEIPT: Mapping[str, str] = {"status": "started"}
+DELEGATE_RECEIPT: Mapping[str, str] = {"status": "received"}
 """The function output that answers an accepted ``DELEGATE_TOOL`` call at once, before routing. It
-carries no task number: the task's number and result reach the model later as separate messages."""
+says only that the request arrived, not that a task started: the session has not yet decided where the
+request runs. A start notice, or a question about switching profiles, follows as a separate message,
+and so do the task's number and result."""
 
 TASK_STATUS_TOOL = "task_status"
 """Function tool that asks how the user's tasks are going; its optional ``task_id`` names one."""
 
 CANCEL_TASK_TOOL = "cancel_task"
 """Function tool that stops one of the user's tasks; its optional ``task_id`` names which."""
+
+SWITCH_PROFILE_TOOL = "switch_profile"
+"""Function tool that changes the speaker's active Hermes profile; its ``profile`` argument names the
+profile (the model maps a spoken alias to the profile's name)."""
+
+CONFIRM_SWITCH_TOOL = "confirm_switch"
+"""Function tool that answers the assistant's question about switching profiles; its boolean ``accept``
+is the user's yes or no."""
 
 
 @dataclass(frozen=True)
@@ -221,8 +237,8 @@ class RealtimeProvider(Protocol):
     """Writes this provider's instructions, task reports, and reconnect summaries."""
 
     prompt_context: PromptContext
-    """The deployment the instructions describe; Realtime-family adapters also list its profiles in
-    the ``delegate`` tool."""
+    """The deployment the instructions describe; Realtime-family adapters also offer its profiles in
+    the ``switch_profile`` tool."""
 
     async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
         """Open a session with these instructions and voice (None: the provider default).
@@ -265,6 +281,15 @@ class RealtimeProvider(Protocol):
 
     async def say(self, text: str) -> None:
         """Have the model speak a short notice, such as a refusal or status, with tools disabled."""
+        ...
+
+    async def update_instructions(self, text: str) -> None:
+        """Replace the open session's instructions with ``text``, keeping its tools, voice, and audio
+        settings, and the conversation so far.
+
+        Call it only when ``capabilities["replaces_instructions"]`` is true; otherwise it sends nothing
+        and raises ``NotImplementedError``.
+        """
         ...
 
     async def close(self) -> None:

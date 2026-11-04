@@ -55,6 +55,7 @@ CAPABILITIES: ProviderCapabilities = {
     "emits_speech_events": False,
     "delegation_style": "live",
     "max_session_s": None,
+    "replaces_instructions": False,
 }
 
 
@@ -197,6 +198,11 @@ class GptLiveProvider:
     async def say(self, text: str) -> None:
         """Append ``text`` as commentary for the model to speak, tied to no delegation (``_commentary``)."""
         await self._commentary(text, None)
+
+    async def update_instructions(self, text: str) -> None:
+        """Send nothing and raise ``NotImplementedError``: GPT-Live cannot replace a session's
+        instructions (``replaces_instructions`` is false), so new instructions need a new session."""
+        raise NotImplementedError("gpt-live does not support replaces_instructions; reconnect instead")
 
     async def close(self) -> None:
         """Ask the server to close the session, then close the connection; safe to call more than once."""

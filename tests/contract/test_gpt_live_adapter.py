@@ -60,8 +60,20 @@ def test_capabilities_describe_live_delegation_without_speech_events() -> None:
         "emits_speech_events": False,
         "delegation_style": "live",
         "max_session_s": None,
+        "replaces_instructions": False,
     }
     assert GPT_LIVE_URL == "wss://api.openai.com/v1/live/sessions"
+
+
+async def test_update_instructions_sends_nothing_and_names_the_capability() -> None:
+    async with FakeWsServer(STARTED) as server:
+        provider = _provider(server)
+        await provider.connect(INSTRUCTIONS, None, None)
+        with pytest.raises(NotImplementedError, match="replaces_instructions"):
+            await provider.update_instructions("You are Hermes, now on the stock-picker agent.")
+        await provider.close()
+
+    assert [event["type"] for event in server.client_events] == ["session.start", "session.close"]
 
 
 async def test_connect_sends_session_start_and_waits_for_session_started() -> None:

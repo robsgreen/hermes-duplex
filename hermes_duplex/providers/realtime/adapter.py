@@ -1,11 +1,11 @@
 """The Realtime-family adapter: OpenAI Realtime GA (and, by dialect, compatible APIs) over a WebSocket.
 
-The model hands work to this app by calling the ``delegate``, ``task_status``, and ``cancel_task``
-function tools; each call becomes a ``DelegationRequested`` whose ``target`` is the tool's name. The
-session answers a call with ``send_function_output``, which lets the model go on talking once the
-response that made the call is done. Results and
-notices are spoken by announcement responses: out of band (outside the conversation, tools disabled)
-where the dialect supports it, otherwise through a system item that is deleted once spoken.
+The model hands work to this app by calling the ``delegate``, ``task_status``, ``cancel_task``,
+``switch_profile``, and ``confirm_switch`` function tools; each call becomes a ``DelegationRequested``
+whose ``target`` is the tool's name. The session answers a call with ``send_function_output``, which
+lets the model go on talking once the response that made the call is done. Results and notices are
+spoken by announcement responses: out of band (outside the conversation, tools disabled) where the
+dialect supports it, otherwise through a system item that is deleted once spoken.
 
 Dialects: ``openai-realtime`` (OpenAI Realtime GA, ``openai/``) and ``xai-realtime`` (xAI Grok Voice,
 ``xai/``, which speaks the GA event names with a flatter session shape and has no truncate or
@@ -30,8 +30,10 @@ from ...prompts.base import PromptContext, VoicePrompter
 from ...prompts.blocks import agent_list
 from ..base import (
     CANCEL_TASK_TOOL,
+    CONFIRM_SWITCH_TOOL,
     DELEGATE_RECEIPT,
     DELEGATE_TOOL,
+    SWITCH_PROFILE_TOOL,
     TASK_STATUS_TOOL,
     Closed,
     DelegationRef,
@@ -75,17 +77,16 @@ the user's words; neither means all of their tasks, or for a cancel the only ope
 def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
     """The function tools every Realtime session offers, in the flat Realtime tool shape.
 
-    Always ``delegate``, ``task_status``, and ``cancel_task``; ``delegate``'s description lists the
-    Hermes agents in ``ctx.profiles``, so the model knows what ``profile_hint`` can name.
+    Always ``delegate``, ``task_status``, ``cancel_task``, and ``confirm_switch``; ``switch_profile``
+    too when ``ctx.profiles`` names any profile. Its ``profile`` argument is an enum of those names, and
+    its description lists them with their descriptions.
     """
-    agents = agent_list(ctx.profiles)
     delegate = (
-        f"Hand a request to Hermes. Returns at once with only {json.dumps(DELEGATE_RECEIPT)}; the task's "
-        "start and result are announced later, so keep talking with the user meanwhile."
+        f"Hand a request to Hermes. Returns at once with only {json.dumps(DELEGATE_RECEIPT)}: the request "
+        "arrived, but no task is running yet. A start notice, or a question about switching agents, "
+        "follows later; keep talking with the user meanwhile."
     )
-    if agents:
-        delegate += f" Hermes agents: {agents}."
-    return (
+    tools: list[Mapping[str, Any]] = [
         {
             "type": "function",
             "name": DELEGATE_TOOL,
@@ -96,10 +97,6 @@ def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
                     "task": {
                         "type": "string",
                         "description": "The request restated as one self-contained task.",
-                    },
-                    "profile_hint": {
-                        "type": "string",
-                        "description": "The Hermes agent the user asked for by name; omit it otherwise.",
                     },
                 },
                 "required": ["task"],
@@ -120,7 +117,52 @@ def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
             "description": "Stop one of the user's delegated tasks.",
             "parameters": _TASK_CHOICE_PARAMETERS,
         },
+    ]
+    if ctx.profiles:
+        tools.append(
+            {
+                "type": "function",
+                "name": SWITCH_PROFILE_TOOL,
+                "description": (
+                    "Switch the Hermes agent that runs the user's requests from now on, when the user asks "
+                    f"to. Hermes agents: {agent_list(ctx.profiles)}."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "profile": {
+                            "type": "string",
+                            "enum": [name for name, _ in ctx.profiles],
+                            "description": (
+                                "The agent to switch to. The user may name it by a spoken alias or "
+                                "nickname; pass the agent's name from this list."
+                            ),
+                        },
+                    },
+                    "required": ["profile"],
+                },
+            }
+        )
+    tools.append(
+        {
+            "type": "function",
+            "name": CONFIRM_SWITCH_TOOL,
+            "description": (
+                "Give the user's answer to the assistant's question about switching to another agent."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "accept": {
+                        "type": "boolean",
+                        "description": "True when the user said yes to the switch, false when they said no.",
+                    },
+                },
+                "required": ["accept"],
+            },
+        }
     )
+    return tuple(tools)
 
 
 @dataclass(frozen=True)
@@ -160,6 +202,10 @@ class Dialect:
     session_config: Callable[[SessionSettings], dict[str, Any]]
     """Builds the ``session`` object of the ``session.update`` event."""
 
+    instructions_config: Callable[[str], dict[str, Any]]
+    """Builds the ``session`` object of a ``session.update`` that replaces only the instructions,
+    leaving the tools and audio settings as they are."""
+
 
 class RealtimeApiProvider:
     """A ``RealtimeProvider`` for a Realtime-compatible API. Each ``connect`` opens a new session."""
@@ -182,7 +228,7 @@ class RealtimeApiProvider:
         the dialect's default.
         ``start_timeout_s`` bounds the wait for ``session.updated`` after the WebSocket opens.
         ``prompt_context`` is the deployment the instructions describe (None: the defaults); its
-        profiles are listed in the ``delegate`` tool.
+        profiles are offered in the ``switch_profile`` tool.
         """
         self.name = dialect.provider_name
         self.capabilities = dialect.capabilities
@@ -359,6 +405,16 @@ class RealtimeApiProvider:
     async def say(self, text: str) -> None:
         """Have the model speak the notice ``text`` as an announcement."""
         await self._announce(text)
+
+    async def update_instructions(self, text: str) -> None:
+        """Replace the open session's instructions with ``text`` by a ``session.update`` that carries
+        only the instructions, so the tools, voice, audio settings, and conversation stay as they are.
+
+        Later announcements use ``text`` too. Raises ``RuntimeError`` before ``connect`` has succeeded.
+        """
+        wire = self._open_wire()
+        await wire.send({"type": "session.update", "session": self._dialect.instructions_config(text)})
+        self._instructions = text
 
     async def close(self) -> None:
         """Close the connection; safe to call more than once."""

@@ -11,8 +11,8 @@ Triggers:
 - ``"after_ms": N`` fires N ms of wall-clock time after the previous step fired, or after ``connect``
   for the first step of a connection.
 - ``"on_sent": "<method>"`` fires once the session calls that method (``connect``, ``truncate``,
-  ``send_function_output``, ``report_progress``, ``deliver_result``, ``say``, or ``close``) after the
-  previous step fired.
+  ``send_function_output``, ``report_progress``, ``deliver_result``, ``say``, ``update_instructions``,
+  or ``close``) after the previous step fired.
 
 Events, each mapping to one ``ProviderEvent``:
 
@@ -78,11 +78,21 @@ DEFAULT_CAPABILITIES: ProviderCapabilities = {
     "emits_speech_events": True,
     "delegation_style": "tool",
     "max_session_s": None,
+    "replaces_instructions": True,
 }
 """The fake's capabilities unless overridden: a Realtime-family provider with tool-style delegation."""
 
 RECORDED_METHODS = frozenset(
-    {"connect", "truncate", "send_function_output", "report_progress", "deliver_result", "say", "close"}
+    {
+        "connect",
+        "truncate",
+        "send_function_output",
+        "report_progress",
+        "deliver_result",
+        "say",
+        "update_instructions",
+        "close",
+    }
 )
 """The provider calls the fake records, and the methods an ``on_sent`` trigger can name."""
 
@@ -272,6 +282,10 @@ class FakeProvider:
     async def say(self, text: str) -> None:
         self._respond()
         await self._record("say", {"text": text})
+
+    async def update_instructions(self, text: str) -> None:
+        """Record the call, whatever ``replaces_instructions`` says, so a test sees a misuse."""
+        await self._record("update_instructions", {"text": text})
 
     async def close(self) -> None:
         await self._record("close", {})

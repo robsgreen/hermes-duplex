@@ -565,7 +565,12 @@ def _capabilities(section: _Section | None) -> Mapping[str, int | bool | str] | 
     for name in ("input_rate", "output_rate", "max_session_s"):
         if section.has(name):
             overrides[name] = section.positive_int(name, 0)
-    for name in ("supports_truncate", "supports_out_of_band_response", "emits_speech_events"):
+    for name in (
+        "supports_truncate",
+        "supports_out_of_band_response",
+        "emits_speech_events",
+        "replaces_instructions",
+    ):
         if section.has(name):
             overrides[name] = section.flag(name, False)
     style = section.text("delegation_style")

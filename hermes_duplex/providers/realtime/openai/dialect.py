@@ -27,6 +27,11 @@ def _openai_session(settings: SessionSettings) -> dict[str, Any]:
     }
 
 
+def _openai_instructions(instructions: str) -> dict[str, Any]:
+    """An OpenAI Realtime GA session update holding only ``instructions`` (and the required ``type``)."""
+    return {"type": "realtime", "instructions": instructions}
+
+
 OPENAI = Dialect(
     provider_name="openai-realtime",
     url="wss://api.openai.com/v1/realtime",
@@ -41,7 +46,9 @@ OPENAI = Dialect(
         "emits_speech_events": True,
         "delegation_style": "tool",
         "max_session_s": 3600,
+        "replaces_instructions": True,
     },
     prompter=OpenAiRealtimePrompter(),
     session_config=_openai_session,
+    instructions_config=_openai_instructions,
 )

@@ -288,7 +288,9 @@ async def test_queue_status_and_cancel_by_voice(tmp_path: Path, api: FakeHermesA
         'Cancelled "and what about Tesla".',
     ]
     # Every call got exactly one receipt; status and cancel were answered without a Hermes run.
-    assert [args["payload"] for args in stack.recorded("send_function_output")] == [{"status": "started"}] * 4
+    assert [args["payload"] for args in stack.recorded("send_function_output")] == [
+        {"status": "received"}
+    ] * 4
     first, second = api.requests_to("POST", "/runs")
     assert {first.body["session_id"], second.body["session_id"]} == {"duplex-rob-stock-picker"}
     second_run = list(api.runs.values())[1]

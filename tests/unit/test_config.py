@@ -656,7 +656,13 @@ def test_fake_capabilities_hold_only_the_keys_set(tmp_path: Path) -> None:
     raw = _valid_raw()
     _fake_provider(
         raw,
-        {"delegation_style": "live", "emits_speech_events": False, "input_rate": 16000, "output_rate": None},
+        {
+            "delegation_style": "live",
+            "emits_speech_events": False,
+            "replaces_instructions": False,
+            "input_rate": 16000,
+            "output_rate": None,
+        },
     )
     path = tmp_path / "duplex.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
@@ -666,6 +672,7 @@ def test_fake_capabilities_hold_only_the_keys_set(tmp_path: Path) -> None:
     assert config.provider.capabilities == {
         "delegation_style": "live",
         "emits_speech_events": False,
+        "replaces_instructions": False,
         "input_rate": 16000,
     }
 
@@ -675,6 +682,7 @@ def test_fake_capabilities_hold_only_the_keys_set(tmp_path: Path) -> None:
     [
         ({"delegation_style": "native"}, "provider.capabilities.delegation_style"),
         ({"supports_truncate": "yes"}, "provider.capabilities.supports_truncate"),
+        ({"replaces_instructions": "no"}, "provider.capabilities.replaces_instructions"),
         ({"input_rate": 0}, "provider.capabilities.input_rate"),
         ({"max_session_s": "600"}, "provider.capabilities.max_session_s"),
         ({"barge_in": True}, "provider.capabilities.barge_in"),

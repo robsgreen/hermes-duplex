@@ -37,6 +37,11 @@ def _xai_session(settings: SessionSettings) -> dict[str, Any]:
     }
 
 
+def _xai_instructions(instructions: str) -> dict[str, Any]:
+    """An xAI Grok Voice session update holding only ``instructions``."""
+    return {"instructions": instructions}
+
+
 XAI = Dialect(
     provider_name="xai-realtime",
     url="wss://api.x.ai/v1/realtime",
@@ -51,7 +56,9 @@ XAI = Dialect(
         "emits_speech_events": True,
         "delegation_style": "tool",
         "max_session_s": None,
+        "replaces_instructions": True,
     },
     prompter=GrokPrompter(),
     session_config=_xai_session,
+    instructions_config=_xai_instructions,
 )
