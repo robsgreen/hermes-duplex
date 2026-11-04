@@ -19,7 +19,7 @@ from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.base import TaskReport, json_report
-from hermes_duplex.prompts.notices import NO_SUCH_TASK, task_summary, which_to_cancel
+from hermes_duplex.prompts.notices import NO_SUCH_TASK, switched_to, task_summary, which_to_cancel
 from hermes_duplex.providers.realtime.adapter import Dialect, RealtimeApiProvider
 from hermes_duplex.providers.realtime.openai.dialect import OPENAI
 from hermes_duplex.providers.realtime.xai.dialect import XAI
@@ -647,3 +647,25 @@ async def test_a_context_change_replaces_only_the_instructions_in_place(
     }
     assert "tools" not in update["session"]
     assert len(server.connections) == 1
+
+
+async def test_switch_profile_tool_switches_updates_the_instructions_and_confirms_it(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    async with _session(tmp_path, api) as harness:
+        await harness.wait_for(lambda: len(harness.sent("session.update")) == 2)  # Rob was heard
+
+        await harness.server.send(*_responding("call_1", "switch_profile", {"profile": "general"}))
+        await harness.wait_for(lambda: "call_1" in harness.outputs())
+        await harness.answer_requests()
+        await harness.wait_for(lambda: bool(harness.announcements()))
+
+        assert harness.outputs()["call_1"] == {"status": "switched"}
+        assert harness.announcements() == [switched_to("general")]
+        assert harness.active_profiles.get("rob") == "general"
+        update = harness.sent("session.update")[2]
+        assert update["session"] == OPENAI.instructions_config(
+            OPENAI.prompter.instructions(prompt_context(harness.config, "general"))
+        )
+        assert harness.router.requests == []
+        assert api.requests_to("POST", "/runs") == []

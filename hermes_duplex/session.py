@@ -7,6 +7,7 @@ provider's ``prompter``, never through the provider's name.
 """
 
 import asyncio
+import functools
 import logging
 import re
 import time
@@ -22,7 +23,7 @@ from .audio.pacer import OutputPacer
 from .config import AudioConfig
 from .dispatch.hermes_api import HermesApiClient, HermesApiError, RunEvent
 from .people import PermissionChecker
-from .profiles import ActiveProfiles
+from .profiles import ActiveProfiles, SwitchOutcome
 from .prompts.base import SENTENCE_END, PromptContext, TaskReport
 from .prompts.notices import (
     LOST_TRACK,
@@ -32,13 +33,17 @@ from .prompts.notices import (
     NOTHING_TO_CANCEL,
     PROVIDER_LOST,
     WHO_IS_ASKING,
+    already_active,
     cancel_failed,
     cancelled_while_away,
     failed_while_away,
+    fallback_to_default,
     finished_while_away,
     only_one_running,
     queued_behind,
     refusal,
+    switch_refused,
+    switched_to,
     task_already_ended,
     task_cancelled,
     task_failed,
@@ -46,12 +51,14 @@ from .prompts.notices import (
     task_summary,
     topic,
     unknown_tool,
+    which_profile,
     which_to_cancel,
 )
 from .providers.base import (
     CANCEL_TASK_TOOL,
     DELEGATE_RECEIPT,
     DELEGATE_TOOL,
+    SWITCH_PROFILE_TOOL,
     TASK_STATUS_TOOL,
     Closed,
     DelegationRef,
@@ -68,6 +75,7 @@ from .providers.base import (
 )
 from .providers.wire import WireError, retry_connect
 from .router.base import RouteDecision
+from .switching import parse_switch_request
 from .tasks import TERMINAL_STATES, Task, TaskState, TaskTracker
 from .transports.base import Conversation
 
@@ -384,13 +392,26 @@ class VoiceSession:
     Hermes tasks keep running through it. Hand-offs always run on the speaker's own active profile,
     whatever the instructions speak for.
 
+    People switch their active profile only by asking: a ``switch_profile`` call, or a hand-off whose
+    words are a switch request (``parse_switch_request`` over each profile's name and
+    ``profile_aliases``), which is checked before routing and so never reaches the router or Hermes.
+    The session listens to ``active_profiles`` for every person it hears (and the conversation's
+    ``person``) until it ends, so a switch made anywhere, here, in another conversation, or through
+    a transport's own control, moves the instructions to the new profile and is confirmed aloud
+    (``switched_to``) once. A switch that does not happen is answered with ``already_active``,
+    ``switch_refused``, or, for a name that fits no profile or several, ``which_profile``. When the
+    session first hears a person whose saved profile could no longer be used, it tells them they are
+    back on their default (``fallback_to_default``).
+
     Tool-style providers get exactly one function output per call. A ``delegate`` call is answered
     at once with ``DELEGATE_RECEIPT``, before routing, so the model can go on talking; the spoken
     start notice follows once the task is routed and permitted. ``task_status`` and ``cancel_task``
     calls are answered from the ``TaskTracker`` in the function output itself, and name the task by
     ``task_id`` or by the user's words (``about``); see ``_resolve_task``. People hear a task only by
-    its topic (``notices.topic``); its number is an internal id. A call nobody can be credited with is
-    answered with ``"not_started"`` and a question for the model to ask.
+    its topic (``notices.topic``); its number is an internal id. A ``switch_profile`` call is answered
+    with its outcome as ``status``, and with the notice to speak as ``message`` unless it switched (the
+    confirmation follows on its own). A call nobody can be credited with is answered with
+    ``"not_started"`` and a question for the model to ask.
 
     Results and notices are announcements, spoken one at a time in the order they arise. When the
     provider emits speech events, each waits for the floor: the model idle, playback drained, and
@@ -439,6 +460,7 @@ class VoiceSession:
         active_profiles: ActiveProfiles,
         prompt_context_for: Callable[[str], PromptContext],
         default_profile: str,
+        profile_aliases: Mapping[str, Sequence[str]] | None = None,
         voice: str | None = None,
         pacer_lead_ms: int = 200,
         gate_threshold_dbfs: float = AudioConfig.gate_threshold_dbfs,
@@ -503,17 +525,25 @@ class VoiceSession:
         """Held while a provider session opens or its instructions change, so they never interleave."""
         self._restarting = False
         """Set when the session closed the provider itself to restart it with new instructions."""
+        aliases = profile_aliases or {}
+        self._switch_names = {name: tuple(aliases.get(name, ())) for name, _ in self._prompt_context.profiles}
+        """Each configured profile's name and spoken aliases, as ``parse_switch_request`` takes them."""
+        self._switch_subscriptions: dict[str, Callable[[], None]] = {}
+        """Per person the session listens to ``active_profiles`` for, how to stop listening."""
 
     async def run(self) -> None:
         """Connect the provider and run until the conversation or the provider session ends.
 
-        On the way out, leaves this session's tasks unattended (``TaskTracker.leave_unattended``:
-        their Hermes runs continue until a later session adopts them, tasks queued without a run id
-        become ``unknown``, and ends not spoken yet are left untold), closes the provider, and closes
-        the conversation when the provider ended and could not be reconnected. Cancelling ``run``
-        does the same. Raises ``WireError`` when the first connect fails.
+        On the way out, stops listening for switches, leaves this session's tasks unattended
+        (``TaskTracker.leave_unattended``: their Hermes runs continue until a later session adopts
+        them, tasks queued without a run id become ``unknown``, and ends not spoken yet are left
+        untold), closes the provider, and closes the conversation when the provider ended and could
+        not be reconnected. Cancelling ``run`` does the same. Raises ``WireError`` when the first
+        connect fails.
         """
         pumps: tuple[asyncio.Task[None], ...] = ()
+        if self._conversation.person is not None:
+            self._listen_for_switches(self._conversation.person)
         try:
             await self._connect(None)
             events = asyncio.create_task(self._handle_events())
@@ -530,6 +560,9 @@ class VoiceSession:
             if events in done:
                 await self._conversation.close(PROVIDER_LOST_REASON)
         finally:
+            # First, so no switch made elsewhere starts work here while the session winds down.
+            for unsubscribe in self._switch_subscriptions.values():
+                unsubscribe()
             for task in (*pumps, *self._delegations):
                 task.cancel()
             await asyncio.gather(*pumps, *self._delegations, return_exceptions=True)
@@ -593,9 +626,7 @@ class VoiceSession:
                 if talking and self._output_pending():
                     await self._barge_in()
             for person in frame.voiced_speakers - self._people_heard:
-                self._people_heard.add(person)
-                self._change_prompt_context(self._active_profiles.get(person))
-                self._adopt_tasks(person)
+                self._first_heard(person)
             if not self._provider_open.is_set():
                 continue  # reconnecting: the new provider session starts with the input after it opens
             # Placed on the provider session's own timeline: the transport's t_ms never restarts.
@@ -606,6 +637,29 @@ class VoiceSession:
                 if connection == self._connection:
                     self._sent_ms = t_ms + FRAME_MS
                     self._input_advanced.notify_all()
+
+    def _first_heard(self, person: str) -> None:
+        """Take in ``person``, voiced for the first time in this session: listen for their switches,
+        tell them when they were moved back to their default, move the instructions to their active
+        profile, and adopt their unattended tasks."""
+        self._people_heard.add(person)
+        self._listen_for_switches(person)
+        if (fallback := self._active_profiles.fallback_pending(person)) is not None:
+            self._announce(fallback_to_default(fallback))
+        self._change_prompt_context(self._active_profiles.get(person))
+        self._adopt_tasks(person)
+
+    def _listen_for_switches(self, person: str) -> None:
+        """Until the session ends, follow each switch of ``person``'s active profile: the instructions
+        move to the new profile, and the switch is confirmed aloud."""
+        if person in self._switch_subscriptions:
+            return
+
+        async def switched(profile: str) -> None:
+            self._change_prompt_context(profile)
+            self._announce(switched_to(profile))
+
+        self._switch_subscriptions[person] = self._active_profiles.subscribe(person, switched)
 
     async def _pump_adoptions(self) -> None:
         """Adopt the tasks other sessions leave unattended or untold for the people heard here."""
@@ -833,6 +887,17 @@ class VoiceSession:
             await self._answer(
                 request, {"status": "ok", "message": await self._cancel(speaker, words, number)}
             )
+        elif request.target == SWITCH_PROFILE_TOOL:
+            name = args.get("profile")
+            # Read as a spoken switch request, so a name resolves exactly as one would.
+            target = (
+                parse_switch_request(f"switch to {name}", self._switch_names)
+                if isinstance(name, str)
+                else None
+            )
+            outcome, notice = await self._switch(speaker, target)
+            payload = {"status": outcome} if notice is None else {"status": outcome, "message": notice}
+            await self._answer(request, payload)
         else:
             logger.warning("call %s is to the unknown tool %r", request.id, request.target)
             await self._answer(request, {"status": "not_started", "message": unknown_tool(request.target)})
@@ -911,18 +976,21 @@ class VoiceSession:
         context: str | None = None,
     ) -> None:
         """Route ``text`` for its effort, check the speaker may use their active profile, and run it
-        there as a task; a status or cancel request is answered from the tracker instead.
+        there as a task; a status or cancel request is answered from the tracker instead, and a switch
+        request (``parse_switch_request``) is carried out before any routing, with its notice spoken.
 
         ``context`` is what the assistant said just before the request, or None; the router sees it
         as the latest history line and Hermes gets it after the request.
         """
+        if (target := parse_switch_request(text, self._switch_names)) is not None:
+            _, notice = await self._switch(speaker, target)
+            if notice is not None:
+                self._announce(notice)
+            return
+
         lines = [text for _, text in self._history]
         history = (*lines, context) if context else tuple(lines)
-        person = self._permissions.by_name(speaker)
-
-        def permitted(profile: str) -> bool:
-            return person is not None and self._permissions.allowed(person, profile)
-
+        permitted = functools.partial(self._may_use, speaker)
         profile = self._active_profiles.get(speaker)
         decision = await self._router.route(
             text, speaker, active_profile=profile, permitted=permitted, history=history
@@ -1094,6 +1162,37 @@ class VoiceSession:
             return NO_SUCH_TASK
         await self._notify_tasks()
         return task_cancelled(task) if task.state == "cancelled" else task_already_ended(task)
+
+    async def _switch(self, speaker: str, target: str | None) -> tuple[SwitchOutcome, str | None]:
+        """Switch ``speaker``'s active profile to ``target``, a profile name, or ``"ambiguous"`` or None
+        when their words named no single profile; return the outcome and the notice that answers it.
+
+        The notice is None for ``"switched"``: the store's notification confirms it (``switched_to``),
+        in this conversation and in every other one listening for the speaker. A target that names no
+        single profile is ``"unknown"``, answered by ``which_profile`` listing what they may use.
+        """
+        outcome: SwitchOutcome = "unknown"
+        if target is not None and target != "ambiguous":
+            outcome = (await self._active_profiles.switch(speaker, target)).outcome
+            logger.info("switch of %s to profile %s: %s", speaker, target, outcome)
+            match outcome:
+                case "switched":
+                    return outcome, None
+                case "already_active":
+                    return outcome, already_active(target)
+                case "refused":
+                    return outcome, switch_refused(target)
+                case "unknown":
+                    pass
+        else:
+            logger.info("switch of %s named no single profile", speaker)
+        names = [name for name in self._switch_names if self._may_use(speaker, name)]
+        return outcome, which_profile(names)
+
+    def _may_use(self, person: str, profile: str) -> bool:
+        """Whether ``person`` may run tasks on ``profile``."""
+        entry = self._permissions.by_name(person)
+        return entry is not None and self._permissions.allowed(entry, profile)
 
     def _announce(self, text: str, ref: DelegationRef | None = None) -> None:
         """Queue ``text`` for the model to speak: ``ref``'s result, or a notice when ``ref`` is None.

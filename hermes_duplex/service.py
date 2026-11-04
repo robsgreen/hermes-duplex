@@ -170,6 +170,7 @@ class DuplexService:
             active_profiles=self._active_profiles,
             prompt_context_for=lambda profile: prompt_context(self._config, profile),
             default_profile=self._config.router.default_profile,
+            profile_aliases={name: profile.aliases for name, profile in self._config.profiles.items()},
             voice=self._config.provider.voice,
             pacer_lead_ms=self._config.audio.pacer_lead_ms,
             gate_threshold_dbfs=self._config.audio.gate_threshold_dbfs,

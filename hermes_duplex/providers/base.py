@@ -227,7 +227,8 @@ class RealtimeProvider(Protocol):
 
     The session calls ``connect`` once per provider session (again after a reconnect), then streams
     audio in with ``send_audio`` while consuming ``events``. It writes everything the model reads
-    with ``prompter`` from ``prompt_context``.
+    with ``prompter``; the instructions come from the conversation's own current prompt context,
+    which the session keeps and renders, not from ``prompt_context``.
     """
 
     name: str
@@ -237,8 +238,8 @@ class RealtimeProvider(Protocol):
     """Writes this provider's instructions, task reports, and reconnect summaries."""
 
     prompt_context: PromptContext
-    """The deployment the instructions describe; Realtime-family adapters also offer its profiles in
-    the ``switch_profile`` tool."""
+    """The deployment's profiles, which Realtime-family adapters offer in the ``switch_profile`` tool;
+    the session does not render the instructions from it."""
 
     async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
         """Open a session with these instructions and voice (None: the provider default).

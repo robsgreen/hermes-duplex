@@ -1,5 +1,6 @@
 """The router as config builds it: the OpenAI Decisions backend over HTTP as the main path and knn as
-the fast path, with Decisions too slow, failing, or skipped by the circuit breaker.
+the fast path, with Decisions too slow, failing, or skipped by the circuit breaker; and a session's
+switch requests, which never reach the router whichever backend config names.
 
 Config loading, ``build_backends``, ``CompositeRouter``, ``DecisionsBackend`` (real HTTP), and
 ``KnnBackend`` are the real ones; the Decisions API is an aiohttp fake and the embedding model a
@@ -8,7 +9,7 @@ deterministic one.
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any, Self
 
@@ -16,10 +17,21 @@ import pytest
 import yaml
 from aiohttp import web
 
+from hermes_duplex import service
+from hermes_duplex.audio.frames import silent_frame
 from hermes_duplex.config import load_config
+from hermes_duplex.dispatch.hermes_api import HermesApiClient
+from hermes_duplex.people import PermissionChecker
+from hermes_duplex.profiles import ActiveProfiles
+from hermes_duplex.prompts.notices import switched_to, which_profile
+from hermes_duplex.providers.fake.adapter import FakeProvider
 from hermes_duplex.router.composite import BREAKER_OPEN_S, CompositeRouter
 from hermes_duplex.router.factory import build_backends
+from hermes_duplex.session import VoiceSession
+from hermes_duplex.tasks import TaskTracker
+from hermes_duplex.transports.base import InputFrame
 from tests.fakes.fake_embedder import fake_embed
+from tests.fakes.fake_hermes_api import FakeHermesApi
 
 PHRASES = Path(__file__).resolve().parents[1] / "fixtures" / "router_eval" / "phrases.yaml"
 DEADLINE_MS = 300
@@ -170,3 +182,114 @@ async def test_every_backend_failing_gives_the_default_effort_on_the_active_prof
         assert (decision.suggestion, decision.control_intent) == (None, None)
     # The third failure opened the breaker, so the last request did not ask Decisions.
     assert failing.calls == 3
+
+
+class _SilentConversation:
+    """A ``Conversation`` in which ``person`` talks for ``duration_ms``, then nothing until it is closed."""
+
+    id = "router-flow-1"
+    person: str | None = None
+
+    def __init__(self, person: str, duration_ms: int) -> None:
+        rate = 24000
+        self._frames = [
+            InputFrame(silent_frame(rate), rate, frozenset({person}), t_ms)
+            for t_ms in range(0, duration_ms, 20)
+        ]
+        self._closed = asyncio.Event()
+
+    async def frames(self) -> AsyncIterator[InputFrame]:
+        for frame in self._frames:
+            yield frame
+        await self._closed.wait()
+
+    async def play(self, pcm16_mono: bytes, rate: int) -> None:
+        pass
+
+    async def flush_playback(self) -> None:
+        pass
+
+    async def notify(self, event: dict[str, Any]) -> None:
+        pass
+
+    async def close(self, reason: str) -> None:
+        self._closed.set()
+
+
+async def _switch_through_a_session(
+    tmp_path: Path, backend: str, api_base_url: str, requests: Sequence[str]
+) -> tuple[list[str], str]:
+    """Run a session whose router is the real composite over ``backend`` (its API at ``api_base_url``),
+    in which Rob hands off each of ``requests`` in turn; return what was said and Rob's active profile."""
+    section: dict[str, Any] = {"backend": backend}
+    if backend != "knn":
+        section[backend] = {"api_key_env": "ROUTER_KEY", "base_url": api_base_url}
+    profiles = yaml.safe_load(PHRASES.read_text(encoding="utf-8"))["profiles"]
+    profiles["stock-picker"]["aliases"] = ["the stock picker"]
+    raw = {
+        "hermes": {"api_base": "http://127.0.0.1:8642"},
+        "provider": {"name": "fake"},
+        "router": section,
+        "profiles": profiles,
+        "people": {"rob": {"profiles": ["*"]}},
+    }
+    path = tmp_path / "duplex.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    config = load_config(path, env={"ROUTER_KEY": "sk-test-0123456789"})
+    router = CompositeRouter(config.router, config.profiles, build_backends(config, embed=fake_embed))
+    permissions = PermissionChecker(config)
+    store = ActiveProfiles(tmp_path / "home" / "duplex" / "active_profiles.json", permissions, config)
+    tracker = TaskTracker(tmp_path / "home")
+    script = [
+        {
+            "at_input_ms": 200 * (n + 1),
+            "event": {"type": "delegation", "id": f"c{n}", "tool_args": {"task": text}},
+        }
+        for n, text in enumerate(requests)
+    ]
+    provider = FakeProvider(script)
+    conversation = _SilentConversation("rob", 200 * (len(requests) + 2))
+    async with FakeHermesApi({}) as hermes_api:
+        hermes = HermesApiClient(hermes_api.api_base, lambda _profile: None)
+        await router.configure()
+        session = VoiceSession(
+            conversation,
+            provider,
+            router=router,
+            hermes=hermes,
+            tracker=tracker,
+            permissions=permissions,
+            active_profiles=store,
+            prompt_context_for=lambda profile: service.prompt_context(config, profile),
+            default_profile=config.router.default_profile,
+            profile_aliases={name: profile.aliases for name, profile in config.profiles.items()},
+        )
+        run = asyncio.create_task(session.run())
+        try:
+            async with asyncio.timeout(5):
+                while len([call for call in provider.calls if call.method == "say"]) < len(requests):
+                    await asyncio.sleep(0.01)
+        finally:
+            await conversation.close("test over")
+            await asyncio.wait_for(run, timeout=5)
+            await hermes.close()
+            await tracker.close()
+            await router.close()
+        assert hermes_api.requests_to("POST", "/runs") == []
+    return [call.args["text"] for call in provider.calls if call.method == "say"], store.get("rob")
+
+
+@pytest.mark.parametrize("backend", ["knn", "decisions", "jev"])
+async def test_switch_requests_give_the_same_result_under_every_backend_without_routing(
+    tmp_path: Path, backend: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO")
+    async with FakeDecisions() as stub:  # stands in for whichever API the backend calls; never asked
+        said, active = await _switch_through_a_session(
+            tmp_path, backend, stub.base_url, ["let me talk to the stock picker", "switch to finance"]
+        )
+
+    assert said == [switched_to("stock-picker"), which_profile(["general", "stock-picker"])]
+    assert active == "stock-picker"
+    assert stub.calls == 0
+    assert not [record for record in caplog.records if record.getMessage().startswith("route ")]

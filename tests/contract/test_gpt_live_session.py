@@ -19,6 +19,7 @@ from hermes_duplex.config import load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
+from hermes_duplex.prompts.notices import switched_to
 from hermes_duplex.providers.gpt_live.adapter import GptLiveProvider
 from hermes_duplex.providers.gpt_live.prompt import GptLivePrompter, frame_result
 from hermes_duplex.router.base import ControlIntent, RouteDecision
@@ -472,3 +473,36 @@ async def test_a_context_change_restarts_gpt_live_with_new_instructions_and_the_
                 "delegation_id": None,
             }
         ]
+
+
+async def test_a_switch_handed_off_as_words_restarts_gpt_live_on_the_new_profile_and_confirms_it(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    script = [
+        *STARTED,
+        _input("switch to general", 1000, 1800),
+        _delegation("del_1", 1900),
+        {"wait_for": "session.close"},
+        {"close": {}},
+        {"wait_for": "session.start"},
+        {"type": "session.started", "event_id": "event_2"},
+    ]
+    async with _session(tmp_path, api, script) as harness:
+        harness.conversation.feed(4000, _voiced(("rob", 1000, 1800)))
+        harness.start()
+        await harness.wait_for(lambda: bool(harness.sent("session.commentary.append")))
+
+        assert harness.active_profiles.get("rob") == "general"
+        first, second = harness.server.connections
+        assert [event["type"] for event in first.events if event["type"] != "session.input_audio.append"] == [
+            "session.start",
+            "session.close",
+        ], "no task was started or announced"
+        assert second.events[0]["session"]["instructions"] == GptLivePrompter().instructions(
+            prompt_context(harness.config, "general")
+        )
+        assert harness.sent("session.commentary.append") == [
+            {"type": "session.commentary.append", "content": switched_to("general"), "delegation_id": None}
+        ]
+        assert harness.router.requests == []
+        assert api.requests_to("POST", "/runs") == []

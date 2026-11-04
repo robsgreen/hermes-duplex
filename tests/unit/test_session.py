@@ -24,6 +24,7 @@ from hermes_duplex.prompts.notices import (
     NOTHING_TO_CANCEL,
     WHO_IS_ASKING,
     only_one_running,
+    switched_to,
     task_summary,
     which_to_cancel,
 )
@@ -537,8 +538,16 @@ async def test_router_is_told_which_profiles_the_speaker_may_use(harness: _Harne
 
 
 def _switch_rob_to_general_after(harness: _Harness, text: str) -> None:
-    """Rob switches to general right after asking ``text``, so his next request runs there."""
+    """Rob switches to general right after asking ``text``, so his next request runs there; the session
+    confirms it with ``ROB_ON_GENERAL`` before announcing that request's start."""
     harness.stub.after_route[text] = lambda: harness.active_profiles.switch("rob", "general")
+
+
+ROB_ON_GENERAL = switched_to("general")
+
+AFTER_THE_SWITCH_IS_CONFIRMED = {"on_sent": "say", "event": {"type": "output_transcript", "delta": ""}}
+"""A script step that changes nothing, so the next ``on_sent: say`` step waits for the say after the
+switch confirmation."""
 
 
 async def _session_that_ended(tmp_path: Path, api: FakeHermesApi) -> _Harness:
@@ -802,6 +811,7 @@ async def test_control_cancel_by_number(harness: _Harness, api: FakeHermesApi) -
     harness.start(
         [
             _delegation(500, "call_1", "how is my portfolio doing"),
+            AFTER_THE_SWITCH_IS_CONFIRMED,
             {
                 "on_sent": "say",
                 "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "what's the weather"}},
@@ -814,13 +824,9 @@ async def test_control_cancel_by_number(harness: _Harness, api: FakeHermesApi) -
         _frames(1000, _voiced("rob")),
     )
 
-    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 4)
 
-    assert harness.texts("say") == [
-        STARTED_1,
-        STARTED_WEATHER,
-        CANCELLED_1,
-    ]
+    assert harness.texts("say") == [ROB_ON_GENERAL, STARTED_1, STARTED_WEATHER, CANCELLED_1]
     second = harness.tracker.get(2)
     assert second is not None and second.state == "running"
 
@@ -853,6 +859,7 @@ async def test_tasks_on_different_profiles_run_concurrently(harness: _Harness, a
     harness.start(
         [
             _delegation(500, "call_1", "how is my portfolio doing"),
+            AFTER_THE_SWITCH_IS_CONFIRMED,
             {
                 "on_sent": "say",
                 "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "what's the weather"}},
@@ -863,7 +870,7 @@ async def test_tasks_on_different_profiles_run_concurrently(harness: _Harness, a
 
     await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
 
-    assert harness.texts("say")[1] == STARTED_WEATHER
+    assert harness.texts("say") == [ROB_ON_GENERAL, STARTED_1, STARTED_WEATHER]
     [delivered] = harness.sent("deliver_result")
     assert delivered.args["ref"]["task_id"] == 2
     first = harness.tracker.get(1)
