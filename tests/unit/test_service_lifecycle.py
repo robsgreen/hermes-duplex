@@ -12,6 +12,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import aiohttp
+import discord
 import pytest
 import yaml
 from aiohttp import web
@@ -174,7 +175,9 @@ async def test_stop_finishes_within_5_s_when_a_provider_close_hangs(
         assert provider.closing.is_set()
         assert "did not stop within" in caplog.text
         assert started.status().conversations == ()
-        assert (await socket.receive(timeout=1)).type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED)
+        while (message := await socket.receive(timeout=1)).type == aiohttp.WSMsgType.TEXT:
+            pass  # the status the page got before the stop
+        assert message.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED)
         with pytest.raises(aiohttp.ClientConnectionError):
             await http.get(url)
 
@@ -190,6 +193,47 @@ async def test_status_lists_active_conversations(started: DuplexService) -> None
     assert status.provider == "fake"
     assert [conversation_id.startswith("web-rob-") for conversation_id in status.conversations] == [True]
     assert status.tasks == ()
+
+
+async def test_status_shows_each_persons_active_profile_and_the_transports_switch_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(
+        tmp_path,
+        profiles={"general": {}, "notes": {"aliases": ["my notes"]}},
+        people={
+            "rob": {"web_token_env": "TOKEN_ROB", "discord_id": "123", "profiles": ["*"]},
+            "alex": {"profiles": ["general"]},
+        },
+        transports={
+            "discord": {"enabled": True, "bot_token_env": "BOT_TOKEN"},
+            "web": {"enabled": True, "port": 0},
+        },
+    )
+    duplex = build_service(config, embed=fake_embed)
+    bot, web_transport = duplex.transports
+    assert isinstance(bot, DiscordTransport) and isinstance(web_transport, WebTransport)
+    for name in ("login", "connect", "close"):
+        monkeypatch.setattr(bot.client, name, AsyncMock())
+    monkeypatch.setattr(bot.commands, "sync", AsyncMock())
+    await duplex.start()
+    try:
+        assert duplex.status().active_profiles == {"rob": "general", "alex": "general"}
+
+        # The bot and the page share the service's store: an alias from Discord moves rob's page.
+        url = _web_url(duplex, "/ws")
+        async with (
+            aiohttp.ClientSession() as http,
+            http.ws_connect(url, protocols=("bearer", ENV["TOKEN_ROB"])) as page,
+        ):
+            assert json.loads((await page.receive(timeout=1)).data)["active_profile"] == "general"
+            rob = cast(discord.User, discord.Object(123))
+            assert "now talking to notes" in await bot.switch_profile(rob, "my notes")
+            assert json.loads((await page.receive(timeout=1)).data)["active_profile"] == "notes"
+
+        assert duplex.status().active_profiles == {"rob": "notes", "alex": "general"}
+    finally:
+        await duplex.stop()
 
 
 async def test_service_runs_the_discord_bot_and_disconnects_it_on_stop(

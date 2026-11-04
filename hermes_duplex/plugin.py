@@ -46,7 +46,7 @@ def register(ctx: Any) -> None:
     ctx.register_command(
         COMMAND_NAME,
         lifecycle.status_text,
-        description="hermes-duplex status: active conversations, running tasks, provider",
+        description="hermes-duplex status: active conversations, running tasks, active profiles, provider",
     )
     ctx.register_cli_command(
         COMMAND_NAME,
@@ -151,7 +151,8 @@ class GatewayLifecycle:
             logger.warning("hermes-duplex: the voice service did not stop in time on unload")
 
     def status_text(self, raw_args: str = "") -> str:
-        """The ``/duplex`` command: active conversations, running tasks, and the provider."""
+        """The ``/duplex`` command: active conversations, running tasks, each person's active profile,
+        and the provider."""
         service = self._service
         if service is None:
             return f"hermes-duplex is not running in this process (config: {self.config_path})."
@@ -169,6 +170,8 @@ class GatewayLifecycle:
             )
         else:
             lines.append("No running tasks.")
+        lines.append("Active profiles:")
+        lines.extend(f"- {person}: {profile}" for person, profile in status.active_profiles.items())
         return "\n".join(lines)
 
 

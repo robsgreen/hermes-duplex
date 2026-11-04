@@ -1,18 +1,22 @@
-"""WebTransport: token auth before the upgrade, audio in and out, control frames, and the static page."""
+"""WebTransport: token auth before the upgrade, audio in and out, control frames, profile switches,
+and the static page."""
 
 import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import numpy as np
 import pytest
 import yaml
 
-from hermes_duplex.config import AudioConfig, WebConfig, load_config
+from hermes_duplex.config import AudioConfig, Config, WebConfig, load_config
 from hermes_duplex.people import PermissionChecker
+from hermes_duplex.profiles import ActiveProfiles
+from hermes_duplex.prompts.notices import already_active, switch_refused, which_profile
 from hermes_duplex.transports.base import Conversation, InputFrame
 from hermes_duplex.transports.web.server import WebConversation, WebTransport
 
@@ -51,12 +55,13 @@ class Server:
         return await asyncio.wait_for(self.conversations.get(), RECEIVE_TIMEOUT_S)
 
 
-def _people(tmp_path: Path) -> PermissionChecker:
+def _config(tmp_path: Path) -> Config:
+    """Two profiles, general first; ``rob`` may use both, ``alex`` only general."""
     raw = {
         "hermes": {"api_base": "http://127.0.0.1:8642"},
         "provider": {"name": "fake"},
         "router": {"backend": "knn"},
-        "profiles": {"general": {}},
+        "profiles": {"general": {}, "stock-picker": {}},
         "people": {
             "rob": {"web_token_env": "TOKEN_ROB", "profiles": ["*"]},
             "alex": {"web_token_env": "TOKEN_ALEX", "profiles": ["general"]},
@@ -64,12 +69,29 @@ def _people(tmp_path: Path) -> PermissionChecker:
     }
     path = tmp_path / "duplex.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    return PermissionChecker(load_config(path, env=ENV))
+    return load_config(path, env={**ENV, "HERMES_HOME": str(tmp_path)})
+
+
+def _transport(tmp_path: Path, store: ActiveProfiles | None = None) -> WebTransport:
+    """A transport on a free port for ``_config``'s people, switching in ``store`` (a new one by default)."""
+    config = _config(tmp_path)
+    permissions = PermissionChecker(config)
+    if store is None:
+        store = ActiveProfiles(tmp_path / "active_profiles.json", permissions, config)
+    return WebTransport(
+        WebConfig(enabled=True, port=0), AudioConfig(), permissions, store, tuple(config.profiles)
+    )
 
 
 @pytest.fixture
-async def server(tmp_path: Path) -> AsyncIterator[Server]:
-    transport = WebTransport(WebConfig(enabled=True, port=0), AudioConfig(), _people(tmp_path))
+def store(tmp_path: Path) -> ActiveProfiles:
+    config = _config(tmp_path)
+    return ActiveProfiles(tmp_path / "active_profiles.json", PermissionChecker(config), config)
+
+
+@pytest.fixture
+async def server(tmp_path: Path, store: ActiveProfiles) -> AsyncIterator[Server]:
+    transport = _transport(tmp_path, store)
     server = Server(transport)
     await transport.start(server.on_conversation)
     yield server
@@ -82,12 +104,23 @@ async def http() -> AsyncIterator[aiohttp.ClientSession]:
         yield session
 
 
-async def _connect(server: Server, http: aiohttp.ClientSession) -> aiohttp.ClientWebSocketResponse:
-    return await http.ws_connect(f"{server.base_url}/ws", protocols=("bearer", ENV["TOKEN_ROB"]))
+async def _connect(
+    server: Server, http: aiohttp.ClientSession, token: str = ENV["TOKEN_ROB"]
+) -> aiohttp.ClientWebSocketResponse:
+    """A socket signed in with ``token``, past the profile status every page gets first."""
+    socket = await http.ws_connect(f"{server.base_url}/ws", protocols=("bearer", token))
+    assert "active_profile" in await _receive_json(socket)
+    return socket
 
 
 async def _receive(socket: aiohttp.ClientWebSocketResponse) -> aiohttp.WSMessage:
     return await socket.receive(timeout=RECEIVE_TIMEOUT_S)
+
+
+async def _receive_json(socket: aiohttp.ClientWebSocketResponse) -> dict[str, Any]:
+    message = await _receive(socket)
+    assert message.type == aiohttp.WSMsgType.TEXT
+    return json.loads(message.data)
 
 
 async def _receive_until_interrupt(socket: aiohttp.ClientWebSocketResponse) -> None:
@@ -308,11 +341,12 @@ async def test_failing_consumer_closes_the_socket(tmp_path: Path, http: aiohttp.
     async def fail(conversation: Conversation) -> None:
         raise RuntimeError("boom")
 
-    transport = WebTransport(WebConfig(port=0), AudioConfig(), _people(tmp_path))
+    transport = _transport(tmp_path)
     await transport.start(fail)
     try:
         url = f"http://127.0.0.1:{transport.port}/ws"
         async with http.ws_connect(url, protocols=("bearer", ENV["TOKEN_ROB"])) as socket:
+            await _receive_json(socket)  # the profile status
             message = await _receive(socket)
     finally:
         await transport.stop()
@@ -340,3 +374,93 @@ async def test_page_has_token_entry_and_loads_only_its_own_scripts(
     assert response.headers["Content-Security-Policy"].startswith("default-src 'self'")
     assert 'id="token"' in page and 'id="connect"' in page and 'id="disconnect"' in page
     assert "http://" not in page and "https://" not in page
+
+
+async def test_connect_shows_the_active_profile_and_only_the_permitted_ones(
+    server: Server, http: aiohttp.ClientSession, store: ActiveProfiles
+) -> None:
+    await store.switch("rob", "stock-picker")
+    async with (
+        http.ws_connect(f"{server.base_url}/ws", protocols=("bearer", ENV["TOKEN_ROB"])) as rob,
+        http.ws_connect(f"{server.base_url}/ws", protocols=("bearer", ENV["TOKEN_ALEX"])) as alex,
+    ):
+        assert await _receive_json(rob) == {
+            "type": "status",
+            "active_profile": "stock-picker",
+            "profiles": ["general", "stock-picker"],
+        }
+        assert await _receive_json(alex) == {
+            "type": "status",
+            "active_profile": "general",
+            "profiles": ["general"],
+        }
+
+
+async def test_profile_frame_switches_and_every_page_of_that_person_follows(
+    server: Server, http: aiohttp.ClientSession, store: ActiveProfiles
+) -> None:
+    async with await _connect(server, http) as page, await _connect(server, http) as other_page:
+        await page.send_str(json.dumps({"type": "profile", "name": "stock-picker"}))
+
+        for socket in (page, other_page):
+            assert await _receive_json(socket) == {
+                "type": "status",
+                "active_profile": "stock-picker",
+                "profiles": ["general", "stock-picker"],
+            }
+    assert store.get("rob") == "stock-picker"
+
+
+async def test_a_switch_from_elsewhere_moves_the_picker(
+    server: Server, http: aiohttp.ClientSession, store: ActiveProfiles
+) -> None:
+    async with await _connect(server, http) as page:
+        result = await store.switch("rob", "stock-picker")
+
+        assert result.notified_live
+        assert (await _receive_json(page))["active_profile"] == "stock-picker"
+
+
+@pytest.mark.parametrize(
+    ("token", "name", "reply"),
+    [
+        (ENV["TOKEN_ALEX"], "stock-picker", switch_refused("stock-picker")),
+        (ENV["TOKEN_ALEX"], "finance", which_profile(["general"])),
+        (ENV["TOKEN_ROB"], "general", already_active("general")),
+    ],
+    ids=["refused", "unknown", "already-active"],
+)
+async def test_a_profile_frame_that_changes_nothing_says_why_and_resets_the_picker(
+    server: Server, http: aiohttp.ClientSession, store: ActiveProfiles, token: str, name: str, reply: str
+) -> None:
+    async with await _connect(server, http, token) as page:
+        await page.send_str(json.dumps({"type": "profile", "name": name}))
+
+        assert await _receive_json(page) == {"type": "status", "message": reply}
+        assert (await _receive_json(page))["active_profile"] == "general"
+    assert (store.get("rob"), store.get("alex")) == ("general", "general")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["not json", "[1, 2]", '{"type": "profile"}', '{"type": "profile", "name": 3}', '{"type": "other"}'],
+    ids=["not-json", "not-an-object", "no-name", "name-not-text", "unknown-type"],
+)
+async def test_malformed_text_frames_are_logged_and_ignored(
+    server: Server,
+    http: aiohttp.ClientSession,
+    store: ActiveProfiles,
+    caplog: pytest.LogCaptureFixture,
+    text: str,
+) -> None:
+    async with await _connect(server, http) as page:
+        conversation = await server.next_conversation()
+        await page.send_str(text)
+        await page.send_bytes(_sine(20))
+
+        # The socket keeps working: audio sent after the bad frame still arrives.
+        assert len(await asyncio.wait_for(_collect(conversation, 1), RECEIVE_TIMEOUT_S)) == 1
+        with pytest.raises(TimeoutError):
+            await page.receive(timeout=0.1)
+    assert store.get("rob") == "general"
+    assert "ignoring an unrecognised text message" in caplog.text

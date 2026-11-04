@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import functools
+import json
 import logging
 import socket
 from collections.abc import Callable
@@ -171,6 +172,24 @@ async def test_adapter_connect_starts_the_service_and_disconnect_stops_it(
         await adapter.disconnect()
 
     assert "not running" in _status_text(ctx)
+
+
+async def test_status_lists_each_persons_active_profile(
+    hermes_home: Path, monkeypatch: pytest.MonkeyPatch, fake_embedding: None
+) -> None:
+    _write_config(hermes_home, monkeypatch, profiles={"general": {}, "notes": {}})
+    saved = hermes_home / "duplex" / "active_profiles.json"
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    saved.write_text(json.dumps({"rob": "notes"}), encoding="utf-8")
+    ctx = RecordingContext()
+    register(ctx)
+    adapter = _adapter(ctx)
+
+    assert await adapter.connect() is True
+    try:
+        assert _status_text(ctx).endswith("Active profiles:\n- rob: notes")
+    finally:
+        await adapter.disconnect()
 
 
 async def test_unload_from_another_thread_stops_the_service(

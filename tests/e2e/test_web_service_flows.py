@@ -1,6 +1,6 @@
 """The whole service as ``build_service`` wires it, driven from a browser socket: routing across
-profiles, the model table, voice status and cancel, Hermes refusals and outages, long results,
-uncredited requests, and shutdown.
+profiles, the model table, the page's profile picker, voice status and cancel, Hermes refusals and
+outages, long results, uncredited requests, and shutdown.
 
 Only the embedding model (a deterministic fake), the voice provider (the scripted fake), and the
 Hermes API server (an aiohttp fake) stand in; config loading, the web transport, the voice session,
@@ -25,7 +25,7 @@ import yaml
 
 from hermes_duplex.config import load_config
 from hermes_duplex.prompts.base import TRUNCATION_MARKER
-from hermes_duplex.prompts.notices import WHO_IS_ASKING
+from hermes_duplex.prompts.notices import WHO_IS_ASKING, switched_to
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.service import STOP_TIMEOUT_S, DuplexService, build_service
 from hermes_duplex.session import RESULT_CAP_TOKENS
@@ -142,8 +142,16 @@ class Browser:
         wave = amplitude * np.sin(2 * np.pi * 440 * np.arange(samples) / RATE)
         await self._socket.send_bytes(wave.astype("<i2").tobytes())
 
+    async def choose_profile(self, name: str) -> None:
+        """Pick ``name`` in the page's profile picker."""
+        await self._socket.send_str(json.dumps({"type": "profile", "name": name}))
+
     def task_lists(self) -> list[list[dict[str, Any]]]:
         return [frame["tasks"] for frame in self.status_frames if "tasks" in frame]
+
+    def active_profiles(self) -> list[str]:
+        """The active profile of each profile status the page got, oldest first."""
+        return [frame["active_profile"] for frame in self.status_frames if "active_profile" in frame]
 
     async def _read(self) -> None:
         async for message in self._socket:
@@ -168,7 +176,8 @@ def _write_config(home: Path, api_base: str, script: Sequence[Mapping[str, Any]]
     """A duplex.yaml for the fake provider replaying ``script``, the knn router over the phrase
     fixture's profiles, Hermes at ``api_base``, and the web transport on a free port. stock-picker
     has a model only for effort ``high`` plus a default model; general has none. rob may use every
-    profile and starts on ``stock-picker``; alex may use only ``general``."""
+    profile and starts on ``stock-picker``; alex may use only ``general``. The router suggests no
+    switches."""
     script_path = home / "script.jsonl"
     script_path.write_text("".join(json.dumps(step) + "\n" for step in script), encoding="utf-8")
     profiles = yaml.safe_load(PHRASES.read_text(encoding="utf-8"))["profiles"]
@@ -179,7 +188,8 @@ def _write_config(home: Path, api_base: str, script: Sequence[Mapping[str, Any]]
             "profile_keys_env": {"general": "KEY_GENERAL", "stock-picker": "KEY_STOCKS"},
         },
         "provider": {"name": "fake", "script": str(script_path), "record_path": "provider-calls.jsonl"},
-        "router": {"backend": "knn"},
+        # These flows dispatch at once; held requests and the switch question have their own tests.
+        "router": {"backend": "knn", "suggest_switch": False},
         "profiles": profiles,
         "people": {
             "rob": {"web_token_env": "TOKEN_ROB", "profiles": ["*"], "default_profile": "stock-picker"},
@@ -451,6 +461,30 @@ async def test_stop_with_a_running_task_closes_the_browser_and_the_provider_with
         async with aiohttp.ClientSession() as http:
             with pytest.raises(aiohttp.ClientConnectionError):
                 await http.ws_connect(stack.ws_url, protocols=("bearer", ROB))
+
+
+async def test_the_page_picker_switches_the_live_conversation_and_the_next_request(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts = [_completed("sunny, 21 degrees")]
+    script = [_delegate(1500, "c1", "what's the weather tomorrow")]
+    async with running(tmp_path, script, api) as stack, browser(stack, ROB) as page:
+        await stack.wait_for("connect", 1)  # the session listens for rob's switches from here on
+        await page.choose_profile("general")
+        await stack.wait_for("say", 1)
+        await page.speak(2000)
+        await stack.wait_for("deliver_result", 1)
+        profiles_shown = page.active_profiles()
+
+    assert stack.said()[0] == switched_to("general")
+    [instructions] = stack.recorded("update_instructions")
+    assert "general" in instructions["text"]
+    [start] = api.requests_to("POST", "/runs")
+    assert start.path == "/p/general/v1/runs"
+    assert start.body["session_id"] == "duplex-rob-general"
+    assert profiles_shown == ["stock-picker", "general"]
+    saved = json.loads((tmp_path / "duplex" / "active_profiles.json").read_text(encoding="utf-8"))
+    assert saved == {"rob": "general"}
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

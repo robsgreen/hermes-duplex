@@ -1,8 +1,9 @@
 """The Discord transport: the plugin's own bot, and one conversation per voice channel it joins.
 
 The bot logs in with its own token (never Hermes's). Allowlisted people bring it into their voice
-channel with ``/duplex join`` or by typing ``join`` in a server channel, and send it away with
-``/duplex leave``; everyone else is refused. While joined, the conversation mixes the allowlisted
+channel with ``/duplex join`` or by typing ``join`` in a server channel, send it away with
+``/duplex leave``, and switch their active profile with ``/duplex profile <name>``; everyone else is
+refused. While joined, the conversation mixes the allowlisted
 voices every 20 ms for the provider and plays the provider's audio back into the channel.
 """
 
@@ -12,7 +13,7 @@ import itertools
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 import discord
@@ -24,6 +25,9 @@ from ...audio.mixer import MIX_CHANNELS, MIX_RATE, mix_allowed
 from ...audio.resample import StreamResampler
 from ...config import AudioConfig, ConfigError
 from ...people import PermissionChecker
+from ...profiles import ActiveProfiles
+from ...prompts.notices import already_active, switch_refused, switched_to, which_profile
+from ...switching import parse_switch_request
 from ..base import Conversation, InputFrame
 from .playback import DuplexAudioSource
 from .receiver import VoiceReceiver
@@ -46,6 +50,15 @@ MAX_TICK_LAG_S = 0.1
 """When the tick loop falls this far behind real time, it skips ahead instead of catching up in a burst."""
 
 REFUSAL = "Sorry, you are not on this voice assistant's list of people."
+
+MAX_AUTOCOMPLETE_CHOICES = 25
+"""The most suggestions Discord accepts for one command option."""
+
+
+def switched_for_next_time(profile: str) -> str:
+    """Reply to a switch to ``profile`` that no live conversation heard, so it applies from the
+    person's next one."""
+    return f"{switched_to(profile)} You're not in a voice conversation, so it applies the next time you talk to me."
 
 
 class Receiver(Protocol):
@@ -295,6 +308,8 @@ class DiscordTransport:
         audio: AudioConfig,
         permissions: PermissionChecker,
         *,
+        active_profiles: ActiveProfiles,
+        profile_aliases: Mapping[str, Sequence[str]],
         input_rate: int,
         output_rate: int,
         receiver_factory: ReceiverFactory = VoiceReceiver,
@@ -302,10 +317,14 @@ class DiscordTransport:
     ) -> None:
         """``token`` is the bot's token; the rates are the provider's, in Hz.
 
+        ``/duplex profile`` switches in ``active_profiles``; ``profile_aliases`` maps every configured
+        profile, in config order, to its spoken aliases, which the command also accepts.
         ``receiver_factory`` and ``rejoin_delays_s`` are passed to each conversation.
         """
         self._token = token
         self._permissions = permissions
+        self._active_profiles = active_profiles
+        self._profile_aliases = profile_aliases
         self._new_conversation = functools.partial(
             DiscordConversation,
             permissions=permissions,
@@ -404,6 +423,39 @@ class DiscordTransport:
         await conversation.close(f"{member.display_name} asked me to leave")
         return f"Left {conversation.channel.mention}."
 
+    async def switch_profile(self, member: discord.Member | discord.User, name: str) -> str:
+        """Make the profile ``name`` (a profile name or one of its aliases) ``member``'s active profile;
+        returns the reply for ``member``.
+
+        Every live conversation that has heard ``member`` confirms the switch aloud. With none, the
+        switch is saved and the reply says it applies from their next conversation. A name that
+        fits no single profile is answered with the profiles they may use.
+        """
+        person = self._permissions.by_discord_id(member.id)
+        if person is None:
+            return REFUSAL
+        target = parse_switch_request(f"switch to {name}", self._profile_aliases)
+        if target is not None and target != "ambiguous":
+            result = await self._active_profiles.switch(person.name, target)
+            logger.info("Discord switch of %s to profile %s: %s", person.name, target, result.outcome)
+            match result.outcome:
+                case "switched":
+                    return switched_to(target) if result.notified_live else switched_for_next_time(target)
+                case "already_active":
+                    return already_active(target)
+                case "refused":
+                    return switch_refused(target)
+                case "unknown":
+                    pass
+        return which_profile(self.permitted_profiles(member))
+
+    def permitted_profiles(self, member: discord.Member | discord.User) -> list[str]:
+        """The profiles ``member`` may switch to, in config order; empty when they are not allowlisted."""
+        person = self._permissions.by_discord_id(member.id)
+        if person is None:
+            return []
+        return [profile for profile in self._profile_aliases if self._permissions.allowed(person, profile)]
+
     async def on_message(self, message: discord.Message) -> None:
         """discord.py event: a server message reading ``join`` from an allowlisted person joins their
         channel. Anyone else's ``join`` is ignored, since a plain message cannot be refused privately."""
@@ -447,6 +499,24 @@ class DiscordTransport:
         async def leave(interaction: discord.Interaction) -> None:
             await interaction.response.defer(ephemeral=True, thinking=True)
             await interaction.followup.send(await self.leave(interaction.user), ephemeral=True)
+
+        @duplex.command(name="profile", description="Switch the Hermes profile your requests run on")
+        @app_commands.describe(name="The profile to switch to")
+        async def profile(interaction: discord.Interaction, name: str) -> None:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.followup.send(await self.switch_profile(interaction.user, name), ephemeral=True)
+
+        @profile.autocomplete("name")
+        async def profile_choices(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
+            typed = current.casefold()
+            matching = [
+                name for name in self.permitted_profiles(interaction.user) if typed in name.casefold()
+            ]
+            return [
+                app_commands.Choice(name=name, value=name) for name in matching[:MAX_AUTOCOMPLETE_CHOICES]
+            ]
 
         return duplex
 

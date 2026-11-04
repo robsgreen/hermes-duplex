@@ -1,4 +1,5 @@
-"""DiscordTransport: who may bring the bot in and out, the commands, voice state events, start and stop."""
+"""DiscordTransport: who may bring the bot in and out, the commands, profile switches, voice state
+events, start and stop."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -9,13 +10,53 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+import yaml
 
-from hermes_duplex.config import AudioConfig, ConfigError
+from hermes_duplex.config import AudioConfig, Config, ConfigError, load_config
+from hermes_duplex.people import PermissionChecker
+from hermes_duplex.profiles import ActiveProfiles
+from hermes_duplex.prompts.notices import already_active, switch_refused, switched_to, which_profile
 from hermes_duplex.transports.base import Conversation
-from hermes_duplex.transports.discord.bot import REFUSAL, DiscordConversation, DiscordTransport
-from tests.fakes.fake_discord import ROB_ID, STRANGER_ID, FakeVoiceChannel, ReceiverRecorder, allowlist
+from hermes_duplex.transports.discord.bot import (
+    REFUSAL,
+    DiscordConversation,
+    DiscordTransport,
+    switched_for_next_time,
+)
+from tests.fakes.fake_discord import ALEX_ID, ROB_ID, STRANGER_ID, FakeVoiceChannel, ReceiverRecorder
 
 BOT_ID = 1
+
+
+def _config(tmp_path: Path) -> Config:
+    """Three profiles; ``rob`` (``ROB_ID``) may use every one, ``alex`` (``ALEX_ID``) general and notes."""
+    raw = {
+        "hermes": {"api_base": "http://127.0.0.1:8642"},
+        "provider": {"name": "fake"},
+        "router": {"backend": "knn"},
+        "profiles": {"general": {}, "stock-picker": {"aliases": ["the stock picker", "stocks"]}, "notes": {}},
+        "people": {
+            "rob": {"discord_id": str(ROB_ID), "profiles": ["*"]},
+            "alex": {"discord_id": str(ALEX_ID), "profiles": ["general", "notes"]},
+        },
+    }
+    path = tmp_path / "duplex.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return load_config(path, env={"HERMES_HOME": str(tmp_path)})
+
+
+def _transport(tmp_path: Path, **overrides: Any) -> DiscordTransport:
+    """A bot for ``_config``'s people, switching profiles in a store under ``tmp_path``."""
+    config = _config(tmp_path)
+    permissions = PermissionChecker(config)
+    arguments: dict[str, Any] = {
+        "active_profiles": ActiveProfiles(tmp_path / "active_profiles.json", permissions, config),
+        "profile_aliases": {name: profile.aliases for name, profile in config.profiles.items()},
+        "input_rate": 24000,
+        "output_rate": 24000,
+        **overrides,
+    }
+    return DiscordTransport("bot-token", AudioConfig(), permissions, **arguments)
 
 
 def _member(user_id: int, channel: FakeVoiceChannel | None = None) -> discord.Member:
@@ -38,11 +79,15 @@ def _message(author: discord.Member, content: str) -> Any:
     return SimpleNamespace(author=author, content=content, guild=discord.Object(900), reply=AsyncMock())
 
 
-def _callback(group: discord.app_commands.Group, name: str) -> Callable[[Any], Awaitable[None]]:
-    """The function a subcommand of ``group`` runs, called with just the interaction."""
+def _callback(group: discord.app_commands.Group, name: str) -> Callable[..., Awaitable[None]]:
+    """The function a subcommand of ``group`` runs, called with the interaction and its options."""
     command = group.get_command(name)
     assert isinstance(command, discord.app_commands.Command)
-    return cast(Callable[[Any], Awaitable[None]], command.callback)
+    return cast(Callable[..., Awaitable[None]], command.callback)
+
+
+def _duplex(transport: DiscordTransport) -> discord.app_commands.Group:
+    return cast(discord.app_commands.Group, transport.commands.get_command("duplex"))
 
 
 class Consumer:
@@ -73,17 +118,21 @@ def receivers() -> ReceiverRecorder:
 
 
 @pytest.fixture
+def store(tmp_path: Path) -> ActiveProfiles:
+    config = _config(tmp_path)
+    return ActiveProfiles(tmp_path / "active_profiles.json", PermissionChecker(config), config)
+
+
+@pytest.fixture
 async def transport(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, consumer: Consumer, receivers: ReceiverRecorder
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    consumer: Consumer,
+    receivers: ReceiverRecorder,
+    store: ActiveProfiles,
 ) -> AsyncIterator[DiscordTransport]:
-    bot = DiscordTransport(
-        "bot-token",
-        AudioConfig(),
-        allowlist(tmp_path),
-        input_rate=24000,
-        output_rate=24000,
-        receiver_factory=receivers,
-        rejoin_delays_s=(0.0, 0.0, 0.0),
+    bot = _transport(
+        tmp_path, active_profiles=store, receiver_factory=receivers, rejoin_delays_s=(0.0, 0.0, 0.0)
     )
     monkeypatch.setattr(bot.client, "login", AsyncMock())
     monkeypatch.setattr(bot.client, "connect", AsyncMock())
@@ -96,9 +145,7 @@ async def transport(
 
 
 def test_uses_its_own_token_and_the_intents_it_needs(tmp_path: Path) -> None:
-    bot = DiscordTransport(
-        "bot-token", AudioConfig(), allowlist(tmp_path), input_rate=24000, output_rate=24000
-    )
+    bot = _transport(tmp_path)
 
     intents = bot.client.intents
     assert intents.guilds and intents.voice_states and intents.guild_messages and intents.message_content
@@ -112,13 +159,13 @@ async def test_start_logs_in_registers_the_commands_and_connects(transport: Disc
     cast(AsyncMock, transport.client.connect).assert_awaited_once()
     duplex = transport.commands.get_command("duplex")
     assert isinstance(duplex, discord.app_commands.Group)
-    assert sorted(command.name for command in duplex.commands) == ["join", "leave"]
+    assert sorted(command.name for command in duplex.commands) == ["join", "leave", "profile"]
 
 
 async def test_start_reports_a_rejected_token_as_a_config_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bot = DiscordTransport("bad", AudioConfig(), allowlist(tmp_path), input_rate=24000, output_rate=24000)
+    bot = _transport(tmp_path)
     monkeypatch.setattr(bot.client, "login", AsyncMock(side_effect=discord.LoginFailure("Improper token")))
 
     with pytest.raises(ConfigError, match="transports.discord.bot_token_env"):
@@ -173,8 +220,7 @@ async def test_leave_ends_the_conversation(
 
 
 async def test_slash_commands_reply_privately(transport: DiscordTransport, channel: FakeVoiceChannel) -> None:
-    duplex = cast(discord.app_commands.Group, transport.commands.get_command("duplex"))
-    join, leave = (_callback(duplex, name) for name in ("join", "leave"))
+    join, leave = (_callback(_duplex(transport), name) for name in ("join", "leave"))
 
     refused = _interaction(_member(STRANGER_ID, channel))
     await join(refused)
@@ -189,6 +235,79 @@ async def test_slash_commands_reply_privately(transport: DiscordTransport, chann
     left = _interaction(_member(ROB_ID, channel))
     await leave(left)
     left.followup.send.assert_awaited_once_with(f"Left {channel.mention}.", ephemeral=True)
+
+
+async def test_profile_switch_heard_by_a_live_conversation_is_confirmed_there(
+    transport: DiscordTransport, store: ActiveProfiles
+) -> None:
+    heard: list[str] = []
+
+    async def live_conversation(profile: str) -> None:
+        heard.append(profile)
+
+    store.subscribe("rob", live_conversation)
+    interaction = _interaction(_member(ROB_ID))
+
+    await _callback(_duplex(transport), "profile")(interaction, name="stock-picker")
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    interaction.followup.send.assert_awaited_once_with(switched_to("stock-picker"), ephemeral=True)
+    assert heard == ["stock-picker"]
+    assert store.get("rob") == "stock-picker"
+
+
+async def test_profile_switch_with_no_live_conversation_is_saved_for_next_time(
+    transport: DiscordTransport, store: ActiveProfiles
+) -> None:
+    reply = await transport.switch_profile(_member(ROB_ID), "the stock picker")
+
+    assert reply == switched_for_next_time("stock-picker")
+    assert "next time" in reply
+    assert store.get("rob") == "stock-picker"
+
+
+@pytest.mark.parametrize(
+    ("user_id", "name", "reply"),
+    [
+        (ALEX_ID, "stock-picker", switch_refused("stock-picker")),
+        (ALEX_ID, "finance", which_profile(["general", "notes"])),
+        (ROB_ID, "general", already_active("general")),
+        (STRANGER_ID, "general", REFUSAL),
+    ],
+    ids=["refused", "unknown", "already-active", "not-allowlisted"],
+)
+async def test_profile_switch_that_changes_nothing_says_why(
+    transport: DiscordTransport, store: ActiveProfiles, user_id: int, name: str, reply: str
+) -> None:
+    assert await transport.switch_profile(_member(user_id), name) == reply
+    assert (store.get("rob"), store.get("alex")) == ("general", "general")
+
+
+@pytest.mark.parametrize(
+    ("user_id", "typed", "choices"),
+    [
+        (ROB_ID, "", ["general", "notes", "stock-picker"]),
+        (ALEX_ID, "", ["general", "notes"]),
+        (ALEX_ID, "NO", ["notes"]),
+        (STRANGER_ID, "", []),
+    ],
+    ids=["everything", "permitted-only", "filtered", "not-allowlisted"],
+)
+async def test_profile_autocomplete_offers_only_the_permitted_profiles(
+    transport: DiscordTransport, user_id: int, typed: str, choices: list[str]
+) -> None:
+    command = _duplex(transport).get_command("profile")
+    assert isinstance(command, discord.app_commands.Command)
+    response = SimpleNamespace(is_done=lambda: False, autocomplete=AsyncMock())
+    interaction = cast(discord.Interaction, SimpleNamespace(user=_member(user_id), response=response))
+
+    # Discord sends what the member has typed so far as the option's value.
+    typing = cast(discord.app_commands.Namespace, SimpleNamespace(name=typed))
+
+    await command._invoke_autocomplete(interaction, "name", typing)
+
+    [offered] = response.autocomplete.await_args.args
+    assert [(choice.name, choice.value) for choice in offered] == [(name, name) for name in choices]
 
 
 async def test_text_join_from_an_allowlisted_person_joins(

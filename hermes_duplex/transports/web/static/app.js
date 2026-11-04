@@ -2,8 +2,9 @@
 //
 // The socket carries PCM16 24 kHz mono audio both ways as binary messages. The server also sends
 // JSON: {type: "interrupt"} flushes queued playback; {type: "status", ...} updates the transcript
-// ({transcript: {speaker, text}}), the task list ({tasks: [{number, profile, state, text}]}), or
-// the status line ({message}).
+// ({transcript: {speaker, text}}), the task list ({tasks: [{number, profile, state, text}]}), the
+// status line ({message}), or the profile picker ({active_profile, profiles: [name]}). Choosing a
+// profile in the picker sends {type: "profile", name}.
 "use strict";
 
 const TOKEN_KEY = "hermes-duplex-token";
@@ -16,6 +17,7 @@ const disconnectButton = document.getElementById("disconnect");
 const statusLine = document.getElementById("status");
 const transcript = document.getElementById("transcript");
 const tasks = document.getElementById("tasks");
+const profilePicker = document.getElementById("profile");
 
 let session = null; // {socket, context, microphone} while connected
 
@@ -39,6 +41,8 @@ function setConnected(connected) {
   connectButton.disabled = connected;
   disconnectButton.disabled = !connected;
   tokenInput.disabled = connected;
+  if (!connected) profilePicker.replaceChildren();
+  profilePicker.disabled = !connected || profilePicker.options.length === 0;
 }
 
 function socketUrl() {
@@ -106,7 +110,23 @@ function handleControl(message, node) {
     if (message.transcript) addTranscriptLine(message.transcript);
     if (Array.isArray(message.tasks)) showTasks(message.tasks);
     if (typeof message.message === "string") statusLine.textContent = message.message;
+    if (typeof message.active_profile === "string" && Array.isArray(message.profiles)) {
+      showProfiles(message.active_profile, message.profiles);
+    }
   }
+}
+
+function showProfiles(active, names) {
+  profilePicker.replaceChildren(
+    ...names.map((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      return option;
+    }),
+  );
+  profilePicker.value = active;
+  profilePicker.disabled = names.length === 0;
 }
 
 function addTranscriptLine({ speaker, text }) {
@@ -152,5 +172,13 @@ form.addEventListener("submit", (event) => {
 });
 
 disconnectButton.addEventListener("click", () => teardown("Not connected."));
+
+// The server answers with a status message: the new active profile, or, when the switch did not
+// happen, the reason and the profile still active, which puts the picker back.
+profilePicker.addEventListener("change", () => {
+  if (session && session.socket.readyState === WebSocket.OPEN) {
+    session.socket.send(JSON.stringify({ type: "profile", name: profilePicker.value }));
+  }
+});
 
 tokenInput.value = readStoredToken();
