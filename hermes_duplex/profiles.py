@@ -1,0 +1,171 @@
+"""Each person's active profile: the Hermes profile their requests run on until they switch.
+
+The store resolves a default for everyone from config, remembers explicit switches in
+``$HERMES_HOME/duplex/active_profiles.json`` across conversations and restarts, and tells the
+conversations listening for a person when that person switches.
+"""
+
+import json
+import logging
+import os
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import Literal, NamedTuple
+
+from .config import Config
+from .people import PermissionChecker
+
+logger = logging.getLogger(__name__)
+
+SwitchOutcome = Literal["switched", "already_active", "refused", "unknown"]
+"""``unknown``: no profile by that name in config. ``refused``: the person may not use it."""
+
+SwitchListener = Callable[[str], Awaitable[None]]
+"""Called with the person's new active profile after they switch."""
+
+
+class SwitchResult(NamedTuple):
+    """What ``ActiveProfiles.switch`` did."""
+
+    outcome: SwitchOutcome
+
+    notified_live: bool
+    """Whether at least one listener for the person was told, i.e. a live conversation now uses the
+    new profile; False means the switch only takes effect from the person's next conversation."""
+
+
+class ActiveProfiles:
+    """One active profile per person, persisted to ``path`` and announced to subscribed listeners.
+
+    A person's default profile is ``people.<p>.default_profile``, else ``router.default_profile`` when
+    the person may use it, else the first profile in the person's ``profiles`` list. Every method takes
+    a person's name from config's ``people`` table; ``get`` raises ``KeyError`` for any other name.
+
+    Methods are meant to be called from one event loop thread.
+    """
+
+    def __init__(self, path: Path, permissions: PermissionChecker, config: Config) -> None:
+        """``path`` is the file switches persist to (normally ``$HERMES_HOME/duplex/active_profiles.json``);
+        nothing is read until ``load``, so until then everyone is on their default."""
+        self._path = path
+        self._permissions = permissions
+        self._profiles = frozenset(config.profiles)
+        self._defaults = {name: _default_profile(config, name, permissions) for name in config.people}
+        self._saved: dict[str, str] = {}
+        self._fallbacks: dict[str, str] = {}
+        self._listeners: dict[str, list[SwitchListener]] = {}
+
+    def load(self) -> None:
+        """Replace the saved profiles with those in the file.
+
+        Never raises: a missing file (nobody has switched yet) is normal, and an unreadable or corrupt
+        one is logged as an error; either leaves everyone on their default until the next switch
+        writes the file. A saved profile that config no longer
+        defines, or that the person may no longer use, is dropped, and the person's default becomes
+        their ``fallback_pending``. Entries for people no longer in config are dropped.
+        """
+        self._saved = {}
+        self._fallbacks = {}
+        try:
+            saved = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            logger.info("no %s yet, so everyone starts on their default profile", self._path)
+            return
+        except (OSError, ValueError) as error:  # UnicodeDecodeError is a ValueError
+            logger.error(
+                "could not read %s, so everyone starts on their default profile: %r", self._path, error
+            )
+            return
+        if not isinstance(saved, dict) or not all(isinstance(value, str) for value in saved.values()):
+            logger.error(
+                "%s is not a map of person to profile, so everyone starts on their default profile",
+                self._path,
+            )
+            return
+
+        for person, profile in saved.items():
+            if person not in self._defaults:
+                continue
+            if self._may_use(person, profile):
+                self._saved[person] = profile
+            else:
+                default = self._defaults[person]
+                logger.warning(
+                    "%s's saved profile '%s' is no longer usable; back to '%s'", person, profile, default
+                )
+                self._fallbacks[person] = default
+
+    def get(self, person: str) -> str:
+        """The profile ``person``'s requests run on: their last switch, else their default."""
+        return self._saved.get(person) or self._defaults[person]
+
+    def fallback_pending(self, person: str) -> str | None:
+        """The default ``person`` was moved back to by ``load`` because their saved profile became
+        unusable, returned once so it can be announced; None on every later call and for everyone else.
+        """
+        return self._fallbacks.pop(person, None)
+
+    async def switch(self, person: str, profile: str) -> SwitchResult:
+        """Make ``profile`` ``person``'s active profile, save it, and await every listener for them.
+
+        Changes nothing for an ``unknown`` profile, one the person may not use (``refused``, also the
+        answer for a person not in config), or the one already active (``already_active``). On
+        ``switched``, a file that cannot be written is logged as an error and the switch still holds
+        until restart; a listener that raises is logged and does not stop the others.
+        """
+        if profile not in self._profiles:
+            return SwitchResult("unknown", notified_live=False)
+        if person not in self._defaults or not self._may_use(person, profile):
+            return SwitchResult("refused", notified_live=False)
+        if profile == self.get(person):
+            return SwitchResult("already_active", notified_live=False)
+
+        self._saved[person] = profile
+        self._fallbacks.pop(person, None)
+        self._save()
+        listeners = list(self._listeners.get(person, ()))
+        for listener in listeners:
+            try:
+                await listener(profile)
+            except Exception:
+                logger.exception("a listener for %s's switch to '%s' failed", person, profile)
+        return SwitchResult("switched", notified_live=bool(listeners))
+
+    def subscribe(self, person: str, listener: SwitchListener) -> Callable[[], None]:
+        """Call ``listener`` with ``person``'s new profile on each of their switches, until the returned
+        function is called. A person may have several listeners; unsubscribing twice is harmless."""
+        listeners = self._listeners.setdefault(person, [])
+        listeners.append(listener)
+
+        def unsubscribe() -> None:
+            if listener in listeners:
+                listeners.remove(listener)
+
+        return unsubscribe
+
+    def _may_use(self, person: str, profile: str) -> bool:
+        entry = self._permissions.by_name(person)
+        return entry is not None and profile in self._profiles and self._permissions.allowed(entry, profile)
+
+    def _save(self) -> None:
+        """Write the saved profiles atomically: a reader sees the old file or the new one, never part."""
+        temporary = self._path.with_name(self._path.name + ".tmp")
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(self._saved, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            os.replace(temporary, self._path)
+        except OSError as error:
+            logger.error(
+                "could not save active profiles to %s; they last until restart: %r", self._path, error
+            )
+
+
+def _default_profile(config: Config, person: str, permissions: PermissionChecker) -> str:
+    entry = config.people[person]
+    if entry.default_profile is not None:
+        return entry.default_profile
+    allowed = permissions.by_name(person)
+    if allowed is not None and permissions.allowed(allowed, config.router.default_profile):
+        return config.router.default_profile
+    # Config rejects an empty list, and "*" grants the router default, so this is a profile name.
+    return entry.profiles[0]
