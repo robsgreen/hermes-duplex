@@ -1,7 +1,7 @@
 # Master Plan Amendment: Active Profile and Profile Voice Context
 
 Created: 2026-11-04
-Status: draft (revised after plan review)
+Status: confirmed (2026-11-04)
 Amends: master-plan.md (spec voice-router-discord); lands as a revision to draft PR robsgreen/hermes-duplex#1
 
 ---
@@ -70,7 +70,7 @@ Our session decides what a voice switch request means, never the router.
 - **Where it runs:** before routing, so a switch is never handed to Hermes as a task.
 - **GPT-Live:** has no tools, so its prompt tells it to hand off any request to change who you talk to.
 
-A switch to a profile you may not use is refused with the same notice as today.
+A switch to a profile you may not use is refused with the same notice as today. Name resolution follows Hermes Bot Mode's order: an exact profile name first, then aliases; an alias that fits two profiles is refused with a short list (`which_profile`) instead of a guess.
 
 ```mermaid
 sequenceDiagram
@@ -238,7 +238,7 @@ Files to modify:
 - hermes_duplex/transports/web/{server.py, static/*} — inbound JSON control frame {"type":"profile","name":...} → store; status frame carries active profile; page picker of permitted profiles
 - hermes_duplex/transports/base.py — Conversation.person (the signed-in person, web) or None (Discord) for initial prompt context
 - hermes_duplex/service.py, plugin.py — wire ActiveProfiles (load before transports; subscribe sessions); /duplex status shows active profile per person
-- duplex.example.yaml, README.md, AGENTS.md, docs/system/architecture.md, docs/live-checklist.md
+- duplex.example.yaml, README.md, AGENTS.md, docs/system/architecture.md, docs/live-checklist.md — docs also say: a duplex "profile" is what Hermes Desktop calls a "Bot"; voice conversations are not Desktop Bot Chats; aliases may mirror Bot titles (copied by hand); the plugin's Discord bot must use its own token, never a profile gateway bot's token
 - tests/** — unit, contract, e2e, goldens (golden context includes an active profile with voice_context); fixtures: drop profile_hint (tests/fixtures/provider_scripts/realtime_delegation.jsonl), router_eval phrases gain `active`
 
 Off-limits: Hermes internals; tasks.jsonl format.
@@ -427,5 +427,6 @@ Commands: as in master-plan Test Strategy (`uv run pytest -m "not live and not e
 - OpenAI Realtime: `session.update` can change `instructions` during a session. Source: https://developers.openai.com/api/docs/guides/realtime-conversations (local copy oa/realtime-conversations.md).
 - xAI Grok: `session.update` configures the session after creation; the prompting guide asks to phrase sound-related guidance as rules about words. Sources: https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech and https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech/prompting-guide (local copies xai/s2s.md line 148, r2/xai-pg.md line 5).
 - Existing code: Decisions/Jev cannot distinguish control intents (router/decisions.py:47, router/jev.py:74; composite defaults to "status"); PromptContext is built once per deployment (service.prompt_context) and rendered on every connect (session._connect); Conversation has no inbound control channel (transports/base.py; web/server.py handles binary only); delegate carries profile_hint (providers/realtime/adapter.py:100) passed to route(hint=…) (session.py:710).
+- Hermes Bot Mode (2026-11-04, research-bot-mode.md): Desktop-only UI over profiles, no per-person state or switching API; supports this design; name-resolution order adopted. https://hermes-agent.nousresearch.com/docs/user-guide/bot-mode
 - Plan review (2026-11-04): 5 critical, 3 high, 4 medium, 3 low findings — all incorporated in this revision.
 - User decisions: research-decisions.md (architecture A; voice context included).

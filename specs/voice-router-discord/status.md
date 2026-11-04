@@ -132,3 +132,6 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-04 16:42 - User chose architecture A (active profile) + per-profile voice context; writing plan amendment (Planning re-opened for this change)
 - 2026-11-04 16:43 - amendment-active-profile.md written; plan review dispatched
 - 2026-11-04 16:48 - Plan review (amendment): 15 findings (5 critical, 3 high, 4 medium, 3 low), 15 incorporated, 0 rebutted. Key changes: answer channel (confirm_switch tool / live yes-no hand-off), deterministic switch matching in session, per-conversation prompt context, GPT-Live restart on switch (appends dropped by engine replacement), receipt {status: received}, profile_hint removed, round-7 test cases explicit, diagrams + URLs added. Stop: amendment confirmation.
+- 2026-11-04 17:06 - User asked to research Hermes bot mode before confirming the amendment; researcher dispatched
+- 2026-11-04 17:10 - Bot mode research returned (research-bot-mode.md): Desktop-only UI over profiles; no overlap; supports amendment
+- 2026-11-04 17:13 - User confirmed amendment-active-profile.md. Phase -> Task Generation (amendment)
