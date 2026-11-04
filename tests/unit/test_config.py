@@ -88,6 +88,8 @@ def test_valid_config_round_trips_into_dataclasses() -> None:
         deadline_ms=250,
         default_profile="general",
         sticky_idle_s=300,
+        suggest_switch=False,
+        suggest_threshold=0.9,
         control_examples=ControlExamples(status=("where are we",), cancel=("forget it",)),
         decisions=DecisionsConfig(
             api_key_env="OPENAI_API_KEY", model="gpt-6-luna-preview", base_url="https://decisions.example/v1"
@@ -103,11 +105,15 @@ def test_valid_config_round_trips_into_dataclasses() -> None:
                 "high": ModelChoice(provider="anthropic", model="claude-x"),
             },
             default_model=ModelChoice(provider="openai", model="gpt-x"),
+            aliases=("stocks", "The  Stock Picker"),
+            voice_context="Always hand off prices.\nSay tickers letter by letter.\n",
         ),
         "general": ProfileConfig(description="Anything else", examples=("what's the weather",)),
     }
     assert config.people == {
-        "rob": PersonConfig(discord_id=123, web_token_env="DUPLEX_TOKEN_ROB", profiles=("*",)),
+        "rob": PersonConfig(
+            discord_id=123, web_token_env="DUPLEX_TOKEN_ROB", profiles=("*",), default_profile="stock-picker"
+        ),
         "alex": PersonConfig(discord_id=456, web_token_env="DUPLEX_TOKEN_ALEX", profiles=("general",)),
     }
     assert config.transports == TransportsConfig(
@@ -138,6 +144,8 @@ def test_minimal_config_takes_defaults() -> None:
     assert config.router.deadline_ms == 300
     assert config.router.default_profile == "general"
     assert config.router.sticky_idle_s == 600
+    assert config.router.suggest_switch is True
+    assert config.router.suggest_threshold == 0.85
     assert config.profiles == {"general": ProfileConfig()}
     assert config.people == {}
     assert config.transports == TransportsConfig()
@@ -155,6 +163,11 @@ def test_example_config_loads_when_its_env_vars_are_set() -> None:
     assert config.profiles["stock-picker"].models["high"].provider == "anthropic"
     assert config.router.decisions == DecisionsConfig(api_key_env="OPENAI_API_KEY")
     assert config.router.jev is None
+    assert config.router.suggest_switch is True
+    assert config.router.suggest_threshold == 0.85
+    assert config.profiles["stock-picker"].aliases == ("stocks", "the stock picker", "portfolio")
+    assert config.profiles["stock-picker"].voice_context is not None
+    assert config.people["rob"].default_profile == "general"
 
 
 def test_example_config_names_first_missing_env_var() -> None:
@@ -392,8 +405,136 @@ def test_profile_key_for_undefined_profile_is_rejected(tmp_path: Path) -> None:
     )
 
 
-def test_reserved_control_profile_name_is_rejected(tmp_path: Path) -> None:
-    _assert_error(tmp_path, lambda raw: raw["profiles"].update(_control={}), "profiles._control")
+def test_new_profile_and_person_keys_default_to_none_or_empty(tmp_path: Path) -> None:
+    raw = _valid_raw()
+    del raw["profiles"]["stock-picker"]["aliases"], raw["profiles"]["stock-picker"]["voice_context"]
+    del raw["people"]["rob"]["default_profile"]
+    path = tmp_path / "duplex.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_config(path, env=ENV)
+
+    assert config.profiles["stock-picker"].aliases == ()
+    assert config.profiles["stock-picker"].voice_context is None
+    assert config.people["rob"].default_profile is None
+
+
+def test_voice_context_of_2000_characters_is_accepted(tmp_path: Path) -> None:
+    _load_mutated(tmp_path, lambda raw: raw["profiles"]["general"].update(voice_context="x" * 2000))
+
+
+def test_voice_context_over_2000_characters_is_rejected(tmp_path: Path) -> None:
+    error = _assert_error(
+        tmp_path,
+        lambda raw: raw["profiles"]["general"].update(voice_context="x" * 2001),
+        "profiles.general.voice_context",
+    )
+    assert "2001" in str(error)
+
+
+@pytest.mark.parametrize("value", ["  \n", ["one"], 7])
+def test_voice_context_that_is_not_text_is_rejected(tmp_path: Path, value: object) -> None:
+    _assert_error(
+        tmp_path,
+        lambda raw: raw["profiles"]["general"].update(voice_context=value),
+        "profiles.general.voice_context",
+    )
+
+
+@pytest.mark.parametrize("alias", ["stocks", "STOCKS", " the   stock picker "])
+def test_alias_used_by_two_profiles_is_rejected(tmp_path: Path, alias: str) -> None:
+    # The fixture is written with sorted keys, so "weather" is read after "stock-picker".
+    error = _assert_error(
+        tmp_path, lambda raw: raw["profiles"].update(weather={"aliases": [alias]}), "profiles.weather.aliases"
+    )
+    assert f"'{alias}'" in str(error)
+    assert "'stock-picker'" in str(error) and "'weather'" in str(error)
+
+
+def test_alias_repeated_within_one_profile_is_accepted(tmp_path: Path) -> None:
+    _load_mutated(tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=["chat", "Chat"]))
+
+
+def test_alias_may_equal_another_profiles_name(tmp_path: Path) -> None:
+    _load_mutated(tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=["stock-picker"]))
+
+
+@pytest.mark.parametrize("aliases", [["   "], [""], "stocks", [7]])
+def test_invalid_aliases_are_rejected(tmp_path: Path, aliases: object) -> None:
+    _assert_error(
+        tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=aliases), "profiles.general.aliases"
+    )
+
+
+def test_undefined_person_default_profile_is_rejected(tmp_path: Path) -> None:
+    error = _assert_error(
+        tmp_path,
+        lambda raw: raw["people"]["rob"].update(default_profile="home"),
+        "people.rob.default_profile",
+    )
+    assert "'home'" in str(error)
+
+
+def test_person_default_profile_they_may_not_use_is_rejected(tmp_path: Path) -> None:
+    error = _assert_error(
+        tmp_path,
+        lambda raw: raw["people"]["alex"].update(default_profile="stock-picker"),
+        "people.alex.default_profile",
+    )
+    assert "'stock-picker'" in str(error)
+
+
+def test_person_default_profile_from_their_list_is_accepted(tmp_path: Path) -> None:
+    _load_mutated(tmp_path, lambda raw: raw["people"]["alex"].update(default_profile="general"))
+
+
+@pytest.mark.parametrize("profiles", [[], None])  # null counts as a missing key
+def test_person_without_profiles_is_rejected(tmp_path: Path, profiles: list[str] | None) -> None:
+    _assert_error(
+        tmp_path, lambda raw: raw["people"]["alex"].update(profiles=profiles), "people.alex.profiles"
+    )
+
+
+@pytest.mark.parametrize("value", [0, 1.5, -0.1, "0.9", True])
+def test_suggest_threshold_outside_zero_to_one_is_rejected(tmp_path: Path, value: object) -> None:
+    _assert_error(
+        tmp_path, lambda raw: raw["router"].update(suggest_threshold=value), "router.suggest_threshold"
+    )
+
+
+def test_suggest_threshold_of_one_is_accepted(tmp_path: Path) -> None:
+    _load_mutated(tmp_path, lambda raw: raw["router"].update(suggest_threshold=1.0))
+
+
+def test_suggest_switch_that_is_not_a_boolean_is_rejected(tmp_path: Path) -> None:
+    _assert_error(tmp_path, lambda raw: raw["router"].update(suggest_switch="yes"), "router.suggest_switch")
+
+
+@pytest.mark.parametrize(
+    ("path", "key"),
+    [
+        (("profiles", "stock-picker"), "alias"),
+        (("profiles", "stock-picker"), "voice"),
+        (("people", "rob"), "default"),
+        (("router",), "suggest"),
+    ],
+)
+def test_unknown_key_next_to_the_new_keys_is_rejected(
+    tmp_path: Path, path: tuple[str, ...], key: str
+) -> None:
+    def mutate(raw: dict[str, Any]) -> None:
+        section = raw
+        for name in path:
+            section = section[name]
+        section[key] = "x"
+
+    _assert_error(tmp_path, mutate, ".".join((*path, key)))
+
+
+@pytest.mark.parametrize("name", ["_control", "ambiguous"])
+def test_reserved_profile_name_is_rejected(tmp_path: Path, name: str) -> None:
+    error = _assert_error(tmp_path, lambda raw: raw["profiles"].update({name: {}}), f"profiles.{name}")
+    assert "reserved" in str(error)
 
 
 @pytest.mark.parametrize(

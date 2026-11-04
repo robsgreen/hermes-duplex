@@ -33,6 +33,15 @@ ALL_PROFILES = "*"
 CONTROL_PROFILE = "_control"
 """The router's reserved choice for status and cancel requests; no profile may use this name."""
 
+_RESERVED_PROFILE_NAMES = {
+    CONTROL_PROFILE: "is reserved for the router",
+    "ambiguous": "is reserved: the switch-request parser returns it when a name fits two profiles",
+}
+"""Names no profile may use, each with why."""
+
+VOICE_CONTEXT_MAX_CHARS = 2000
+"""Longest ``profiles.<p>.voice_context`` allowed; it goes into every voice prompt for that profile."""
+
 CONFIG_ENV = "HERMES_DUPLEX_CONFIG"
 HERMES_HOME_ENV = "HERMES_HOME"
 CONFIG_FILE_NAME = "duplex.yaml"
@@ -194,6 +203,12 @@ class RouterConfig:
     sticky_idle_s: int = 600
     """Seconds of idle after which a speaker's active profile expires."""
 
+    suggest_switch: bool = True
+    """Whether the router may suggest switching to another profile the speaker may use."""
+
+    suggest_threshold: float = 0.85
+    """Least probability, in (0, 1], another profile needs before the router suggests it."""
+
     control_examples: ControlExamples = ControlExamples()
 
     decisions: DecisionsConfig | None = None
@@ -220,6 +235,14 @@ class ProfileConfig:
     default_model: ModelChoice | None = None
     """Model for efforts missing from ``models``; None means the Hermes profile's own default."""
 
+    aliases: tuple[str, ...] = ()
+    """Other names people say for the profile, e.g. "the stock picker". No two profiles share an
+    alias, compared ignoring case and extra whitespace."""
+
+    voice_context: str | None = None
+    """Text, at most ``VOICE_CONTEXT_MAX_CHARS`` long, that the voice prompt carries while this is the
+    active profile: what it covers, what to always hand off, how to say its words. None for none."""
+
 
 @dataclass(frozen=True)
 class PersonConfig:
@@ -232,7 +255,12 @@ class PersonConfig:
     """Env var holding the person's web sign-in token, or None if the person does not use the web."""
 
     profiles: tuple[str, ...]
-    """Profiles the person may use: names defined under ``profiles``, or ``"*"`` for all of them."""
+    """Profiles the person may use, never empty: names defined under ``profiles``, or ``"*"`` for all
+    of them."""
+
+    default_profile: str | None = None
+    """The profile the person starts on, one they may use; None leaves it to the router's
+    ``default_profile`` or their first permitted profile."""
 
 
 @dataclass(frozen=True)
@@ -347,9 +375,10 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
     ``env`` (default ``os.environ``) supplies ``HERMES_HOME``, ``HERMES_DUPLEX_CONFIG``, and every
     secret. Raises ``ConfigError`` naming the offending key when the file is missing or unreadable,
     a key is unknown or has the wrong type, a name is not one of the allowed values, a person or the
-    router names an undefined profile, a secret is written literally, or a named env var is unset or
-    empty. Unset env vars are checked last: when only they are wrong, the error is a
-    ``MissingEnvError`` that reports the first one, in file order, and lists them all.
+    router names an undefined profile, a person may use no profile or starts on one they may not use,
+    two profiles share an alias, a secret is written literally, or a named env var is unset or empty.
+    Unset env vars are checked last: when only they are wrong, the error is a ``MissingEnvError`` that
+    reports the first one, in file order, and lists them all.
     """
     env = os.environ if env is None else env
     config_path = resolve_config_path(path, env)
@@ -401,9 +430,10 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
 
 def _profiles(section: _Section) -> Mapping[str, ProfileConfig]:
     profiles: dict[str, ProfileConfig] = {}
+    alias_owners: dict[str, str] = {}  # spoken form of an alias -> the profile that claimed it first
     for name in section.names():
-        if name == CONTROL_PROFILE:
-            raise ConfigError(section.child(name), f"'{CONTROL_PROFILE}' is reserved for the router")
+        if name in _RESERVED_PROFILE_NAMES:
+            raise ConfigError(section.child(name), f"'{name}' {_RESERVED_PROFILE_NAMES[name]}")
         profile = section.section(name, required=True)
         models_section = profile.section("models", by_name=True)
         models: dict[str, ModelChoice] = {}
@@ -415,17 +445,48 @@ def _profiles(section: _Section) -> Mapping[str, ProfileConfig]:
             models[effort] = _model_choice(models_section.section(effort, required=True))
         models_section.done()
         default_model = profile.optional_section("default_model")
+        aliases = profile.texts("aliases")
+        for alias in aliases:
+            spoken = _spoken_form(alias)
+            if not spoken:
+                raise ConfigError(profile.child("aliases"), "aliases must contain more than whitespace")
+            owner = alias_owners.setdefault(spoken, name)
+            if owner != name:
+                raise ConfigError(
+                    profile.child("aliases"), f"alias '{alias}' is used by both '{owner}' and '{name}'"
+                )
         profiles[name] = ProfileConfig(
             description=profile.text("description") or "",
             examples=profile.texts("examples"),
             models=MappingProxyType(models),
             default_model=_model_choice(default_model) if default_model is not None else None,
+            aliases=aliases,
+            voice_context=_voice_context(profile),
         )
         profile.done()
     section.done()
     if not profiles:
         raise ConfigError(section.key, "at least one profile is required")
     return MappingProxyType(profiles)
+
+
+def _spoken_form(alias: str) -> str:
+    """``alias`` as people say it: lower case, with runs of whitespace collapsed to one space."""
+    return " ".join(alias.casefold().split())
+
+
+def _voice_context(profile: _Section) -> str | None:
+    value = profile.text("voice_context")
+    if value is None:
+        return None
+    if not value.strip():
+        raise ConfigError(profile.child("voice_context"), "must contain more than whitespace")
+    if len(value) > VOICE_CONTEXT_MAX_CHARS:
+        raise ConfigError(
+            profile.child("voice_context"),
+            f"is {len(value)} characters; at most {VOICE_CONTEXT_MAX_CHARS} are allowed",
+        )
+    return value
 
 
 def _model_choice(section: _Section) -> ModelChoice:
@@ -532,6 +593,9 @@ def _router(section: _Section, profiles: Mapping[str, ProfileConfig]) -> RouterC
         raise ConfigError(
             section.child("default_profile"), f"profile '{default_profile}' is not defined under profiles"
         )
+    suggest_threshold = section.number("suggest_threshold", RouterConfig.suggest_threshold)
+    if not 0 < suggest_threshold <= 1:
+        raise ConfigError(section.child("suggest_threshold"), "must be greater than 0 and at most 1")
     control = section.section("control_examples")
     control_examples = ControlExamples(status=control.texts("status"), cancel=control.texts("cancel"))
     control.done()
@@ -544,6 +608,8 @@ def _router(section: _Section, profiles: Mapping[str, ProfileConfig]) -> RouterC
         deadline_ms=section.positive_int("deadline_ms", RouterConfig.deadline_ms),
         default_profile=default_profile,
         sticky_idle_s=section.positive_int("sticky_idle_s", RouterConfig.sticky_idle_s),
+        suggest_switch=section.flag("suggest_switch", RouterConfig.suggest_switch),
+        suggest_threshold=suggest_threshold,
         control_examples=control_examples,
         decisions=decisions,
         jev=jev,
@@ -578,15 +644,30 @@ def _people(section: _Section, profiles: Mapping[str, ProfileConfig]) -> Mapping
     for name in section.names():
         person = section.section(name, required=True)
         allowed = person.texts("profiles")
+        if not allowed:
+            raise ConfigError(person.child("profiles"), 'must list at least one profile (or "*" for all)')
         for profile in allowed:
             if profile != ALL_PROFILES and profile not in profiles:
                 raise ConfigError(
                     person.child("profiles"), f"profile '{profile}' is not defined under profiles"
                 )
+        default_profile = person.text("default_profile")
+        if default_profile is not None:
+            if default_profile not in profiles:
+                raise ConfigError(
+                    person.child("default_profile"),
+                    f"profile '{default_profile}' is not defined under profiles",
+                )
+            if ALL_PROFILES not in allowed and default_profile not in allowed:
+                raise ConfigError(
+                    person.child("default_profile"),
+                    f"profile '{default_profile}' is not one of the person's profiles",
+                )
         people[name] = PersonConfig(
             discord_id=person.discord_id("discord_id"),
             web_token_env=person.env_name("web_token_env"),
             profiles=allowed,
+            default_profile=default_profile,
         )
         person.done()
     section.done()

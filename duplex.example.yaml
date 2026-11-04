@@ -45,6 +45,13 @@ router:
   default_profile: general
   # Seconds of idle after which a speaker's active profile expires.
   sticky_idle_s: 600
+  # Whether the router may ask "That sounds like a <profile> question. Want me to switch?" when a
+  # request clearly belongs to another profile the speaker may use (default true). Nothing switches
+  # without a yes.
+  suggest_switch: true
+  # How sure the router must be of the other profile before it asks: greater than 0, at most 1
+  # (default 0.85).
+  suggest_threshold: 0.85
   # Extra phrases for status and cancel requests, added to the built-in ones.
   control_examples:
     status: ["where are we with that"]
@@ -63,6 +70,10 @@ router:
 # `models` is the profile-by-effort table (low | medium | high); each cell needs both `provider`
 # and `model`. Fill in your own models: the <fill> values below are placeholders. An effort missing
 # from `models` uses `default_model`; with neither, Hermes uses the profile's own default model.
+# `aliases` are other names people say for a profile ("switch to the stock picker"); matching ignores
+# case and extra spaces, and no two profiles may share one. `voice_context` (optional, at most 2000
+# characters) goes into the voice prompt while the profile is active: what it covers, what to always
+# hand off, how to say its words, and rules to follow.
 profiles:
   stock-picker:
     description: Portfolio, holdings, stock research, trades
@@ -72,16 +83,24 @@ profiles:
       medium: {provider: openai, model: <fill>}
       high:   {provider: anthropic, model: <fill>}
     default_model: {provider: openai, model: <fill>}
+    aliases: [stocks, the stock picker, portfolio]
+    voice_context: |
+      Covers the user's portfolio, holdings, market data and trades.
+      Always hand off prices, positions, and anything time-sensitive; never quote a number from memory.
+      Say tickers letter by letter (NVDA as N-V-D-A).
+      Confirm before handing off any request to buy or sell.
   general:
     description: Anything else
     examples: ["what's the weather", "set a reminder"]
 
 # Who may talk to the service. `discord_id` is the Discord user id (quote it); `web_token_env`
 # names the env var holding the person's web sign-in token (each token must be unique). `profiles`
-# lists the profiles the person may use; "*" means all. Everyone else is ignored. Either way of
-# connecting is optional per person.
+# lists the profiles the person may use (at least one); "*" means all. `default_profile` (optional)
+# is the profile the person starts on and must be one they may use; without it they start on the
+# router's `default_profile` if they may use it, else their first profile. Everyone else is ignored.
+# Either way of connecting is optional per person.
 people:
-  rob:  {discord_id: "123", web_token_env: DUPLEX_TOKEN_ROB, profiles: ["*"]}
+  rob:  {discord_id: "123", web_token_env: DUPLEX_TOKEN_ROB, profiles: ["*"], default_profile: general}
   alex: {discord_id: "456", web_token_env: DUPLEX_TOKEN_ALEX, profiles: [general]}
 
 transports:

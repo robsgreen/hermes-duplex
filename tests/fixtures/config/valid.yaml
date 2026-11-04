@@ -14,6 +14,8 @@ router:
   deadline_ms: 250
   default_profile: general
   sticky_idle_s: 300
+  suggest_switch: false
+  suggest_threshold: 0.9
   control_examples:
     status: ["where are we"]
     cancel: ["forget it"]
@@ -33,11 +35,15 @@ profiles:
       medium: {provider: openai, model: gpt-x-mini}
       high: {provider: anthropic, model: claude-x}
     default_model: {provider: openai, model: gpt-x}
+    aliases: [stocks, The  Stock Picker]
+    voice_context: |
+      Always hand off prices.
+      Say tickers letter by letter.
   general:
     description: Anything else
     examples: ["what's the weather"]
 people:
-  rob: {discord_id: "123", web_token_env: DUPLEX_TOKEN_ROB, profiles: ["*"]}
+  rob: {discord_id: "123", web_token_env: DUPLEX_TOKEN_ROB, profiles: ["*"], default_profile: stock-picker}
   alex: {discord_id: 456, web_token_env: DUPLEX_TOKEN_ALEX, profiles: [general]}
 transports:
   discord: {enabled: true, bot_token_env: DUPLEX_DISCORD_TOKEN}

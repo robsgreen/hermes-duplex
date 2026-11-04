@@ -18,7 +18,7 @@ ENV = {
 PEOPLE: dict[str, dict[str, Any]] = {
     "rob": {"discord_id": "123", "web_token_env": "TOKEN_ROB", "profiles": ["*"]},
     "alex": {"discord_id": "456", "web_token_env": "TOKEN_ALEX", "profiles": ["general"]},
-    "sam": {"web_token_env": "TOKEN_SAM", "profiles": []},
+    "sam": {"web_token_env": "TOKEN_SAM", "profiles": ["home"]},
 }
 
 
@@ -96,7 +96,7 @@ def test_duplicate_web_token_is_a_config_error(tmp_path: Path) -> None:
 
 
 def test_shared_web_token_env_var_is_a_config_error(tmp_path: Path) -> None:
-    people = PEOPLE | {"sam": {"web_token_env": "TOKEN_ALEX", "profiles": []}}
+    people = PEOPLE | {"sam": {"web_token_env": "TOKEN_ALEX", "profiles": ["home"]}}
 
     with pytest.raises(ConfigError) as caught:
         PermissionChecker(_config(tmp_path, people=people))
@@ -105,7 +105,7 @@ def test_shared_web_token_env_var_is_a_config_error(tmp_path: Path) -> None:
 
 
 def test_duplicate_discord_id_is_a_config_error(tmp_path: Path) -> None:
-    people = PEOPLE | {"sam": {"discord_id": 456, "profiles": []}}
+    people = PEOPLE | {"sam": {"discord_id": 456, "profiles": ["home"]}}
 
     with pytest.raises(ConfigError) as caught:
         PermissionChecker(_config(tmp_path, people=people))

@@ -131,9 +131,9 @@ a literal `api_key`, `token`, `bot_token`, `key`, `web_token`, or `secret` key i
 |---|---|
 | `hermes` | `api_base` of the API server, and `profile_keys_env`: profile → env var holding that profile's `API_SERVER_KEY`. A profile without a key cannot run tasks; the voice says it is not configured. |
 | `provider` | `name` (required, never inferred), `model`, `voice`, `api_key_env`, and `turn_detection` for the Realtime family. |
-| `router` | `backend` (`decisions`, `jev`, or `knn`), optional `fast_path: knn`, `deadline_ms` (300), `default_profile` (`general`), `sticky_idle_s` (600), extra `control_examples`, and the `decisions` or `jev` settings (`api_key_env`, optional `model` and `base_url`). |
-| `profiles` | Each Hermes profile the router chooses between: `description` and `examples` steer routing; `models` and `default_model` pick the model. |
-| `people` | Each person: `discord_id`, `web_token_env`, and the `profiles` they may use (`"*"` for all). |
+| `router` | `backend` (`decisions`, `jev`, or `knn`), optional `fast_path: knn`, `deadline_ms` (300), `default_profile` (`general`), `sticky_idle_s` (600), `suggest_switch` (true: may ask to switch when a request clearly fits another profile the speaker may use), `suggest_threshold` (0.85, greater than 0 and at most 1: how sure it must be before asking), extra `control_examples`, and the `decisions` or `jev` settings (`api_key_env`, optional `model` and `base_url`). |
+| `profiles` | Each Hermes profile the router chooses between: `description` and `examples` steer routing; `models` and `default_model` pick the model; `aliases` are other names people say for it (no two profiles share one, ignoring case and extra spaces); `voice_context` (optional, at most 2000 characters) goes into the voice prompt while the profile is active. |
+| `people` | Each person: `discord_id`, `web_token_env`, the `profiles` they may use (at least one; `"*"` for all), and an optional `default_profile` they start on, which must be one of those. |
 | `transports` | `discord: {enabled, bot_token_env}` and `web: {enabled, host, port}`; both off unless enabled. |
 | `audio` | `pacer_lead_ms` (200), `gate_threshold_dbfs` (-35.0), and `playback_queue_s` (5). |
 | `tasks` | `restore_max_age_h` (24): after a restart, open tasks created longer ago than this are marked unknown silently instead of being followed again. |
