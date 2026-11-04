@@ -158,3 +158,12 @@ Known issues carried to the PR:
 - K4 low (Seat B) — session.py:883-884 _end: result lost if the session ends during the transition awaits (ms window).
 - Earlier accepted lows recorded above (P10, P17, P18, P20, P21, P22) and the README known limitations.
 Final checks (fea792e): uv sync, ruff check, ruff format --check, pyright pass; pytest -m "not live and not e2e" 785 passed ×2; real-Hermes e2e 4 passed. Final checks: pass
+
+## Review round 7 — topic names (9cf9bc3..f09eeb8), revision to PR #1
+Both seats: spoken paths carry no task numbers; privacy holds; no critical/high. Contract tier 3.
+- V1 medium (B) — session._resolve_task: one shared word wins; ordinal/recency words ("latest", "new"; "news"→"new") pick a task → wrong cancel (ran).
+- V2 medium (A; B low) — notices.topic 40-char prefix: shared polite lead-ins make different tasks identical in which_to_cancel/start/status (ran).
+- V3 low (A) — _cancel answers NOTHING_TO_CANCEL for a resolved but non-open task even when others run.
+- V4 low (A) — contraction/never-mind words count as topic words ("don", "won", "never", "mind").
+- V5 low mechanical (B) — adapter docstring "only one running" → "only one open".
+- Needs user decision V6 (both): single-open-task fallback cancels it even when the words name a different topic.

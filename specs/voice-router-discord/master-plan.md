@@ -622,6 +622,10 @@ transports:
 
 - Voice prompts move to a strategy per provider family (`hermes_duplex/prompts/`: GPT-Live template with `<|SpawnThinking|>`; OpenAI Realtime 2.x labeled sections; xAI Grok `##` sections in xAI's order), each owning instructions, result formatting and re-seed text, bound via the provider/dialect; shared rule blocks and spoken notices stay common. New optional `assistant:` config (name, persona, backchannel). Golden-file tests per prompter. Brief: change-prompts.md; research: research-prompting.md.
 
+#### Amendment (2026-11-04): active profile + profile voice context
+
+Per-request profile routing is replaced by an explicit, persisted active profile per person with suggest-only switching; the router keeps effort/model and switch suggestions; per-profile voice_context updates the voice prompt on switch. Full plan: amendment-active-profile.md.
+
 ### Error Handling & Edge Cases
 
 | Scenario | Expected Behavior | Recovery |

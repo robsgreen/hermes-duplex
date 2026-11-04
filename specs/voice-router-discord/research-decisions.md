@@ -13,3 +13,4 @@
 - 2026-11-03: Round-5 decision U1 (privacy): C — always read full adopted results wherever the person is next heard (current behavior; documented).
 - 2026-11-03: Round-5 decision U2: A — restore only tasks younger than 24 h (configurable); older ones marked unknown silently.
 - 2026-11-03: Round-5 decision 3: A — fix S1–S8 + U1 doc + U2 cutoff, one review; if no critical/high, push (squash, draft PR) with any remaining minor items listed as known issues; no further fix round.
+- 2026-11-03: Architecture decision A: explicit active profile per person (persisted, default profile), switch by voice/Discord/web, router demoted to effort/model + suggest-only switching; per-profile voice_context updates the voice prompt on switch (included in plan).

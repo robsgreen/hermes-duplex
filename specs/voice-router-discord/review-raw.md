@@ -48,3 +48,9 @@
 - R5 low mechanical: tasks.py _unattended comment wrong (holds ended tasks).
 - R6 low logic: session._follow_adopted — unreadable status falls to live wording, not "while you were away".
 - Needs user decision: (U1) privacy — adopted results announced in whatever conversation hears the person first (e.g. private web task spoken in shared Discord channel); (U2) restore has no age cutoff (stale/pre-upgrade tasks).
+
+## Topic-names review (9cf9bc3..f09eeb8) — Seat B
+- T1 medium logic: session.py:711-714 _resolve_task — one shared word wins; ordinal/recency words ("latest", "new", "news"→"new") pick a task → wrong cancel (ran). Fix: more filler words; don't strip "news"; tests expecting None.
+- T2 low logic: notices.py TOPIC_MAX_CHARS=40 — tasks sharing a long opening get identical topics in which_to_cancel (ran).
+- T3 low mechanical: adapter.py:264-265 docstring says "only one running" (it's only one open).
+- Needs user decision: single-open-task fallback returns that task even when the words name a different topic ("cancel the Tesla question" → cancels portfolio).

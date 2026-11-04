@@ -87,3 +87,6 @@
 {"event":"dispatch","ts":"2026-11-03 23:59","agent":"sdlc-coder"}
 {"event":"dispatch","ts":"2026-11-04 00:20","agent":"sdlc-reviewer"}
 {"event":"dispatch","ts":"2026-11-04 00:20","agent":"sdlc-reviewer"}
+{"ts":"2026-11-04 00:25","event":"review_round","round":7,"critical":0,"high":0,"medium":2,"low":3,"crossLens":2}
+{"event":"user_intervention","ts":"2026-11-04 16:43","reason":"architecture-active-profile"}
+{"event":"dispatch","ts":"2026-11-04 16:43","agent":"sdlc-plan-reviewer"}

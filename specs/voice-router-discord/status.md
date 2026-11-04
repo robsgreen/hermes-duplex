@@ -128,3 +128,6 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-03 17:53 - Squashed to 9cf9bc3 (tree identical; backup branch backup/pre-squash-voice-router-discord local), pushed to origin/claude/upbeat-clarke-1vcz7v, draft PR robsgreen/hermes-duplex#1 created. Next: Archive gate after merge.
 - 2026-11-03 23:59 - User: refer to tasks by topic, numbers internal (PR revision). change-topic-names.md; coder dispatched
 - 2026-11-04 00:20 - Topic-names revision verified (gate green, 794 default, 4 e2e) and committed locally (not pushed); scoped review dispatched
+- 2026-11-04 00:25 - Round 7 review of topic change: 2 medium, 3 low, 1 user decision (single-task fallback). Not pushed; asking user.
+- 2026-11-04 16:42 - User chose architecture A (active profile) + per-profile voice context; writing plan amendment (Planning re-opened for this change)
+- 2026-11-04 16:43 - amendment-active-profile.md written; plan review dispatched
