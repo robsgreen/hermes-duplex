@@ -143,3 +143,5 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-04 17:37 - Amendment task 2.2 verified (gate clean, 920 passed) and committed; Dialect.instructions_config added; switch_profile omitted when no profiles
 - 2026-11-04 17:44 - Amendment task 2.3 verified (gate clean, 943 passed, goldens reviewed) and committed; no_profiles_allowed dropped per note 4
 - 2026-11-04 18:00 - Amendment task 3.1 verified (gate clean, 939 passed; coder ran real-Hermes e2e 4 passed) and committed; ProfileConfig.model_for(effort) added for note 2; followup question in Decisions/Jev now unused -> folded into 3.2
+- 2026-11-04 18:10 - Amendment task 3.2 verified and committed (eval knn: choice 0.825, suggestion precision 1.000, recall 0.526, effort 0.306 = medium share); followup question removed from Decisions/Jev; eval route-log quieted
+- 2026-11-04 18:12 - Amendment task 3.3 verified (gate clean, default tests pass) and committed
