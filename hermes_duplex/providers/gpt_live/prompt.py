@@ -27,11 +27,10 @@ _BACKCHANNEL_POLICIES: dict[Backchannel, str] = {
 
 TASKS_CAPABILITY = (
     "Tasks: report how the user's running tasks are going, or cancel one. "
-    f"{blocks.CANCEL_POLICY} When the user means one task, say its number as you hand the request off, "
-    'such as "Cancelling task 2." Each task\'s start note gives its number and request.'
+    f"{blocks.CANCEL_POLICY} {blocks.TASKS_BY_TOPIC} Each task's start note says what it is about."
 )
 """The backend capability this app answers itself: the status of a person's tasks, and cancelling.
-GPT-Live hands work off without arguments, so the task's number reaches the app in what was said."""
+GPT-Live hands work off without arguments, so the app tells which task is meant from the user's words."""
 
 
 class GptLivePrompter:

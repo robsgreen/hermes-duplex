@@ -22,7 +22,7 @@ from hermes_duplex.audio.frames import FRAME_MS
 from hermes_duplex.config import AudioConfig, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
-from hermes_duplex.prompts.notices import refusal, task_started
+from hermes_duplex.prompts.notices import refusal
 from hermes_duplex.providers.fake.adapter import FakeProvider
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.router.composite import CompositeRouter
@@ -181,7 +181,7 @@ async def test_request_is_credited_to_who_talked_most_and_a_stranger_is_never_he
     [result] = provider.said("deliver_result")
     assert result["text"] == frame_result("general", "sunny", RESULT_CAP_TOKENS)
     assert [call["text"] for call in provider.said("say")] == [
-        task_started(1, "general", "what's the weather tomorrow"),
+        'Started "what\'s the weather tomorrow" on the general agent.',
         refusal("stock-picker"),
     ]
 

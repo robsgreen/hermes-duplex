@@ -59,7 +59,7 @@ when one conversation ends. Your unfinished tasks stay yours: they still count i
 cancelled by voice, and hold later tasks on the same agent "queued behind" them. The next time you
 talk in any conversation, even after a restart (open tasks younger than `tasks.restore_max_age_h`,
 24 hours by default, are read back from `$HERMES_HOME/duplex/tasks.jsonl`), the assistant picks them
-up again and tells you what finished while you were away ("While you were away, task 3 finished: …"),
+up again and tells you what finished while you were away ("While you were away, "how is my portfolio doing" finished: …"),
 including a result that was due but not yet spoken when your conversation ended. A conversation you
 are already in picks them up as soon as another one of yours ends. The result is read in full in
 that conversation, whoever else can hear it (see Known limitations).
@@ -245,10 +245,13 @@ sounds, not who it is; the rest of each prompt stays. A blank `name` or `persona
 **On Discord.** Join a voice channel and run `/duplex join`, or type `join` in a text channel of
 that server. Talk. Ask for something that needs Hermes ("how's my portfolio doing?"); the model says
 it is on it, keeps talking with you, and speaks the result when the task finishes. Ask "what are you
-working on?" for the status of your tasks, or "cancel that" to stop your task. Each task's start
-notice says its number and what it is about, so you can name a task either way ("cancel task 2",
-"cancel the weather one"); with several running and none clearly meant, the model asks which one
-first, and if it does not, the assistant asks you rather than guessing. `/duplex leave` ends the conversation. The bot joins one channel per server.
+working on?" for the status of your tasks, or "cancel that" to stop your task. The assistant
+names each task by its topic, a short quote of what you asked ("Started "how is my portfolio doing"
+on the stock-picker agent."), and never by a number: task numbers are internal ids that appear only
+in logs, `tasks.jsonl`, `/duplex`, and what the model reads. Name a task the same way ("cancel the
+portfolio one", "how's the Tesla thing going?"); with several running and none clearly meant, the
+model asks which one first, and if it does not, the assistant asks you by topic rather than
+guessing. `/duplex leave` ends the conversation. The bot joins one channel per server.
 
 **On the web.** With `transports.web.enabled: true`, open `http://127.0.0.1:8765/` (the configured
 host and port), enter your token (the value of your `web_token_env` variable), and press

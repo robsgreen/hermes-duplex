@@ -54,10 +54,22 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
 
-_TASK_NUMBER_SCHEMA = {
-    "type": "integer",
-    "description": "The task's number, if the user named one; omit it to mean all of their tasks.",
+_TASK_CHOICE_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "task_id": {
+            "type": "integer",
+            "description": "The task's id from an earlier task_status result; an internal id, never said aloud.",
+        },
+        "about": {
+            "type": "string",
+            "description": 'The user\'s words for which task they mean, such as "the Tesla question".',
+        },
+    },
+    "required": [],
 }
+"""Parameters of ``task_status`` and ``cancel_task``: which of the user's tasks is meant, by id or by
+the user's words; neither means all of their tasks, or for a cancel the only one running."""
 
 
 def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
@@ -69,7 +81,7 @@ def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
     agents = agent_list(ctx.profiles)
     delegate = (
         f"Hand a request to Hermes. Returns at once with only {json.dumps(DELEGATE_RECEIPT)}; the task's "
-        "number and result are announced later, so keep talking with the user meanwhile."
+        "start and result are announced later, so keep talking with the user meanwhile."
     )
     if agents:
         delegate += f" Hermes agents: {agents}."
@@ -96,14 +108,17 @@ def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
         {
             "type": "function",
             "name": TASK_STATUS_TOOL,
-            "description": "Report how the user's delegated tasks are going.",
-            "parameters": {"type": "object", "properties": {"task_id": _TASK_NUMBER_SCHEMA}, "required": []},
+            "description": (
+                "Report how the user's delegated tasks are going: a spoken summary, and each task's id, "
+                "topic, agent, and state."
+            ),
+            "parameters": _TASK_CHOICE_PARAMETERS,
         },
         {
             "type": "function",
             "name": CANCEL_TASK_TOOL,
             "description": "Stop one of the user's delegated tasks.",
-            "parameters": {"type": "object", "properties": {"task_id": _TASK_NUMBER_SCHEMA}, "required": []},
+            "parameters": _TASK_CHOICE_PARAMETERS,
         },
     )
 

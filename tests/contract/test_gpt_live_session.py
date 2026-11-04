@@ -17,7 +17,6 @@ from hermes_duplex.audio.frames import bytes_to_ms, frame_samples, silent_frame
 from hermes_duplex.config import load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
-from hermes_duplex.prompts.notices import task_started
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.gpt_live.adapter import GptLiveProvider
 from hermes_duplex.providers.gpt_live.prompt import frame_result
@@ -267,7 +266,7 @@ async def test_gpt_live_delegation_is_worded_from_the_transcript(tmp_path: Path,
         assert harness.sent("session.thinking.append") == [
             {"type": "session.thinking.append", "content": text, "delegation_id": "del_1"}
             for text in (
-                task_started(1, "stock-picker", "how is my portfolio doing"),
+                'Started "how is my portfolio doing" on the stock-picker agent.',
                 "portfolio: step 1",
                 "portfolio: step 3",
             )
@@ -296,7 +295,7 @@ async def test_failed_gpt_live_task_is_a_short_apology_with_the_reason(
 
         assert commentary == {
             "type": "session.commentary.append",
-            "content": "Sorry, task 1 failed: model overloaded.",
+            "content": 'Sorry, "how is my portfolio doing" failed: model overloaded.',
             "delegation_id": "del_1",
         }
 

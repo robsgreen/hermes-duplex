@@ -34,10 +34,16 @@ UNCLEAR_AUDIO = "If you are unsure what someone said, ask them to repeat it inst
 
 SPOKEN_STYLE = "Speak one or two short sentences at a time, with no lists, links, or code read aloud."
 
+TASKS_BY_TOPIC = (
+    "Refer to each task by what it is about, such as the portfolio check or the Tesla question, not by "
+    "a number; any task numbers you see are internal ids, not for saying aloud."
+)
+"""How the model names tasks to people: by topic, since task numbers are internal."""
+
 CANCEL_POLICY = (
-    "Cancel right away when it is clear which task the user means, by its number or by what it was "
-    "about, or when only one is running; their request is the confirmation. If several are running and "
-    "you cannot tell which one they mean, ask which one first."
+    "Cancel right away when it is clear which task the user means by what it is about, or when only one "
+    "is running; their request is the confirmation. If several are running and you cannot tell which one "
+    "they mean, ask which one first, naming each by what it is about."
 )
 """When to cancel without asking. Each prompter adds how its model names the task to cancel."""
 

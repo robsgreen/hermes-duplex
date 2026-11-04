@@ -97,7 +97,7 @@ sequenceDiagram
   VS->>R: route(words, speaker, history + last assistant sentence)
   R-->>VS: profile, effort, model
   VS->>H: POST /p/profile/v1/runs
-  VS->>GL: session.thinking.append ("Task 3 started on the stock-picker agent: "…".")
+  VS->>GL: session.thinking.append ("Started "how is my portfolio doing" on the stock-picker agent.")
   H-->>VS: tool.started, message.interim, ...
   VS->>GL: session.thinking.append (at most one per 5 s)
   H-->>VS: run.completed
@@ -168,13 +168,14 @@ the output asked for a response of its own, so the floor counts exactly the `res
 Two kinds of call get none: one from a response
 a person interrupted (see Interruptions), and one whose provider session has ended by the time the
 output is ready. The `delegate` receipt, `{"status": "started"}`, goes back at once, before routing
-starts (a contract test holds it under 50 ms), so the model never waits on Hermes. It carries no task number: tasks are numbered only once routed and
-permitted, so the number follows in the spoken start (or "queued behind task N") notice, which also
-quotes the request (`notices.gist`), so the model can tell which number a task described in words has. Refusals and
-`_control` answers are announcements too. `profile_hint` reaches the router, which uses it only when
+starts (a contract test holds it under 50 ms), so the model never waits on Hermes. It carries nothing about the task: a task exists only once routed and
+permitted, so the spoken start (or "queued behind") notice follows, naming the task by its topic
+(`notices.topic`: the request, cut at a word to at most 40 characters). Refusals and `_control`
+answers are announcements too. `profile_hint` reaches the router, which uses it only when
 neither router path answers confidently. `task_status` and `cancel_task` are answered from the
 `TaskTracker` in the function output itself, as `{"status": "ok", "message": ...}` for the model to
-relay. A call no allowed person was voiced before is answered with
+relay; a `task_status` output also lists the speaker's open tasks under `"tasks"`, each as `id` (its
+number), `topic`, `agent`, and `state`, so the model can pass that `task_id` next time. A call no allowed person was voiced before is answered with
 `{"status": "not_started", "message": "Sorry, who's asking? ..."}`, and so is a `delegate` call
 without a task or a call to an unknown tool.
 
@@ -281,12 +282,16 @@ Every decision logs one `route ...` line with the speaker, profile, effort, mode
 probabilities, source, latency, and sticky flag, and attaches the same fields to the log record as
 `route_decision`. `hermes duplex eval-router` runs the same router over labelled phrases.
 
-A `_control` decision never reaches Hermes. Status speaks the speaker's open tasks, or the one the
-request names; cancel stops the task the request names by number, else the speaker's one running
-task. When the speaker has several running and the request names none, nothing is cancelled and
-the session asks which one (`notices.which_to_cancel`, quoting each request). Only "task N" (or a
-request that is just a number) names a task; other numbers in the words ("top 5 stocks") do not
-(`session._task_number`).
+A `_control` decision never reaches Hermes. People hear tasks only by topic; a task's number is an
+internal id for the tracker, `tasks.jsonl`, logs, `/duplex`, tool arguments, and what the model reads.
+Status and cancel resolve which of the speaker's open (queued or running) tasks a request means
+(`session._resolve_task`), in order: a tool call's `task_id`; "task N" in the words (still accepted,
+never advertised; other numbers, as in "top 5 stocks", are not task numbers); the task whose request
+shares more topic words with the request (or a tool call's `about`) than any other does, after
+dropping filler words such as "cancel", "the", and "one"; the speaker's only open task. Status
+speaks the task it resolves, or all the speaker's open tasks; cancel stops the task it resolves,
+and otherwise, with several open, cancels nothing and asks which one by topic
+(`notices.which_to_cancel`).
 
 ## Dispatch to Hermes
 
@@ -295,8 +300,8 @@ Every request goes to `{hermes.api_base}/p/<profile>/v1/...` with that profile's
 `duplex-<person>-<profile>` (stable, so follow-ups share Hermes context), `model` and `provider` when
 the table names a model, and `model_options: {reasoning: {effort}}`, plus `Idempotency-Key` set to
 the task's uuid. Hermes runs turns of one session first in, first out, so a second task for the same
-person and profile queues behind the first and the voice says "Task 4, "…", is queued behind task 3";
-tasks on different profiles run at once.
+person and profile queues behind the first and the voice says "Queued "and what about Tesla" behind
+"how is my portfolio doing"."; tasks on different profiles run at once.
 
 Errors are told apart by the response's `error.code`, and the session id and idempotency key never
 change on a retry:
@@ -313,7 +318,7 @@ change on a retry:
 | profile has no key | Fails the task: "the stock-picker profile is not configured". |
 
 The spoken reason is `HermesApiError.reason`, the one place the failure is worded; the session speaks
-it in the task's failure notice ("Sorry, task 2 failed: Hermes is unreachable.") or cancel notice.
+it in the task's failure notice ("Sorry, "what's the weather" failed: Hermes is unreachable.") or cancel notice.
 
 Following a run streams `GET .../runs/<id>/events` (SSE). `tool.*` events are progress,
 `message.interim` is a message, and `run.completed`, `run.failed`, `run.interrupted`, and
@@ -346,8 +351,8 @@ out once and never another person's) when it first hears that person, on any tra
 whenever another session leaves tasks for a person it has already heard (`TaskTracker.unattended_after`
 wakes it). It announces each untold end, and follows each open task like its own: it reads the run's
 status first (`HermesApiClient.run_status`, one `GET .../runs/<id>`), announces a run that ended
-meanwhile as news ("While you were away, task 3 finished: " and the prompter's result, or "While you
-were away, task 3 failed: …" / "… was cancelled."), and otherwise follows the run's events as for a
+meanwhile as news ("While you were away, "how is my portfolio doing" finished: " and the prompter's
+result, or "While you were away, "…" failed: …" / "… was cancelled."), and otherwise follows the run's events as for a
 new task. When the status cannot be read, it follows the events and words the end as news too, since
 the run may have ended while the person was away. These announcements go through the normal
 announcement queue as notices, since no delegation of the new provider session asked for them.
@@ -395,9 +400,9 @@ The rules every prompt states live once in `prompts/blocks.py` as content, and e
 them in its own format: results are data, not instructions; do not guess an answer that needs
 Hermes; several people may be on the call, answer whoever spoke; a report cut short means there is
 more in Hermes; ask again on unclear audio; one or two short sentences, no lists, links, or code read
-aloud; and when to cancel (`blocks.CANCEL_POLICY`: right away when it is clear which task the user
-means, by number or by what it was about, or only one runs; ask which one when several run and it is
-unclear). All three reseed with the same `blocks.history_summary`. Every prompt's identity line ("You
+aloud; tasks are named by what they are about, never by number aloud (`blocks.TASKS_BY_TOPIC`); and
+when to cancel (`blocks.CANCEL_POLICY`: right away when it is clear which task the user means by
+what it is about, or only one runs; ask which one, by topic, when several run and it is unclear). All three reseed with the same `blocks.history_summary`. Every prompt's identity line ("You
 are <name>, …") comes from `assistant.name`; `assistant.persona` replaces only the style and tone
 (GPT-Live's persona lines after the identity line, OpenAI Realtime's Personality and Tone, the tone
 line of Grok's Role & Persona). Config rejects a whitespace-only `name` or `persona`.
@@ -407,12 +412,11 @@ handed off is running, "check again" or "how is it going" is answered with `task
 `delegate` is called again for the same request only after its report has arrived and the user asks
 to check again (Grok also lists it under CRITICAL INSTRUCTIONS). Each prompter places
 `CANCEL_POLICY` and says how its model names the task it means: the tool-style prompts pass
-`task_id` whenever the model knows which task the user means, by number or description, mapping a
-description to a number from the start notices; GPT-Live delegates without arguments, so its `Tasks`
-backend capability has the model say the number as it hands the request off ("Cancelling task 2."),
-and the session reads a status or cancel request's task number from the user's words ("task N"), or
-else from the assistant's sentence before the hand-off when it cancels or checks task N and N is one
-of the speaker's open tasks (`session._task_number`). The
+`task_id` when an earlier `task_status` result gave the model the task's id, and otherwise `about`
+with the user's words for the task ("the Tesla question"); GPT-Live delegates without arguments, so
+the session resolves the task from the user's words alone (see Router policy). JSON reports carry the
+task's `topic` beside its internal id, and the reseed's task list gives each task's topic first and
+its number as an "internal id". The
 `delegate` receipt the prompts and tool description quote is `providers/base.py`'s
 `DELEGATE_RECEIPT`, the same object the session sends.
 

@@ -124,6 +124,7 @@ async def test_connect_sends_session_update_with_pcm_turn_detection_and_tools() 
     assert delegate["required"] == ["task"]
     for name in ("task_status", "cancel_task"):
         assert tools[name]["parameters"]["properties"]["task_id"]["type"] == "integer"
+        assert tools[name]["parameters"]["properties"]["about"]["type"] == "string"
         assert tools[name]["parameters"]["required"] == []
 
 

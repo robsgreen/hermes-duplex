@@ -18,7 +18,7 @@ from hermes_duplex.config import CONTROL_PROFILE, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.prompts.base import TaskReport, json_report
-from hermes_duplex.prompts.notices import task_started, task_summary
+from hermes_duplex.prompts.notices import NO_SUCH_TASK, task_summary, which_to_cancel
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.realtime.adapter import RealtimeApiProvider
 from hermes_duplex.providers.realtime.openai.dialect import OPENAI
@@ -41,6 +41,8 @@ TRUNCATE_TOLERANCE_MS = 20
 
 # A run that starts and never ends on its own, so it stays open for status and cancel.
 OPEN_RUN = RunScript(events=[{"event": "run.started"}])
+
+STARTED_WEATHER = 'Started "what\'s the weather" on the general agent.'
 
 
 def _decision(profile: str, control_intent: ControlIntent | None = None) -> RouteDecision:
@@ -299,7 +301,7 @@ async def _delegate_portfolio(harness: _Harness) -> None:
     await harness.wait_for(lambda: "call_1" in harness.outputs())
     await harness.answer_requests()
     await harness.wait_for(
-        lambda: harness.announcements() == [task_started(1, "stock-picker", "how is my portfolio doing")]
+        lambda: harness.announcements() == ['Started "how is my portfolio doing" on the stock-picker agent.']
     )
     await harness.answer_requests()
 
@@ -380,7 +382,7 @@ async def test_announcement_waits_for_speech_stopped_the_model_and_playback(
         assert waited_s >= 0.25, "held until playback drained"
         assert harness.conversation.played_ms == 300
         assert harness.announcements()[1] == json_report(
-            TaskReport(1, "stock-picker", "completed", "Up 2% today."), 500
+            TaskReport(1, "how is my portfolio doing", "stock-picker", "completed", "Up 2% today."), 500
         )
         [announcement] = [
             event for event in harness.sent("response.create") if event.get("response", {}).get("input")
@@ -409,7 +411,7 @@ async def test_announcement_is_spoken_anyway_after_the_wait_cap(tmp_path: Path, 
         await harness.wait_for(lambda: len(harness.announcements()) == 2)
 
         assert harness.announcements()[1] == json_report(
-            TaskReport(1, "stock-picker", "completed", "Up 2% today."), 500
+            TaskReport(1, "how is my portfolio doing", "stock-picker", "completed", "Up 2% today."), 500
         )
 
 
@@ -423,7 +425,10 @@ async def test_cancel_task_tool_stops_the_run_and_answers_in_the_function_output
         await harness.server.send(*_responding("call_2", "cancel_task", {}))
         await harness.wait_for(lambda: "call_2" in harness.outputs())
 
-        assert harness.outputs()["call_2"] == {"status": "ok", "message": "Task 1 was cancelled."}
+        assert harness.outputs()["call_2"] == {
+            "status": "ok",
+            "message": 'Cancelled "how is my portfolio doing".',
+        }
         task = harness.tracker.get(1)
         assert task is not None and task.state == "cancelled"
         [stop] = api.requests_to("POST", "/stop")
@@ -444,7 +449,7 @@ async def test_control_intent_cancel_routed_from_delegate_stops_the_run_and_is_c
         await harness.wait_for(lambda: len(harness.announcements()) == 2)
 
         assert harness.outputs()["call_2"] == {"status": "started"}
-        assert harness.announcements()[1] == "Task 1 was cancelled."
+        assert harness.announcements()[1] == 'Cancelled "how is my portfolio doing".'
         task = harness.tracker.get(1)
         assert task is not None and task.state == "cancelled"
         assert len(api.requests_to("POST", "/stop")) == 1
@@ -462,8 +467,46 @@ async def test_task_status_tool_answers_from_the_tracker(tmp_path: Path, api: Fa
 
         running = harness.tracker.get(1)
         assert running is not None
-        assert harness.outputs()["call_2"] == {"status": "ok", "message": task_summary([running])}
-        assert harness.outputs()["call_3"] == {"status": "ok", "message": "You have no task 4."}
+        listed = [
+            {"id": 1, "topic": "how is my portfolio doing", "agent": "stock-picker", "state": "running"}
+        ]
+        assert harness.outputs()["call_2"] == {
+            "status": "ok",
+            "message": task_summary([running]),
+            "tasks": listed,
+        }
+        assert harness.outputs()["call_3"] == {"status": "ok", "message": NO_SUCH_TASK, "tasks": listed}
+
+
+async def test_status_and_cancel_tools_find_the_task_the_users_words_are_about(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    async with _session(tmp_path, api) as harness:
+        await _delegate_portfolio(harness)
+        await harness.server.send(*_responding("call_2", "delegate", {"task": "what's the weather"}))
+        await harness.wait_for(
+            lambda: (task := harness.tracker.get(2)) is not None and task.state == "running"
+        )
+
+        await harness.server.send(*_responding("call_3", "task_status", {"about": "the weather"}))
+        await harness.wait_for(lambda: "call_3" in harness.outputs())
+        await harness.server.send(*_responding("call_4", "cancel_task", {}))
+        await harness.wait_for(lambda: "call_4" in harness.outputs())
+        await harness.server.send(*_responding("call_5", "cancel_task", {"about": "my portfolio"}))
+        await harness.wait_for(lambda: "call_5" in harness.outputs())
+
+        portfolio, weather = harness.tracker.get(1), harness.tracker.get(2)
+        assert portfolio is not None and weather is not None
+        assert harness.outputs()["call_3"]["message"] == task_summary([weather])
+        assert [entry["topic"] for entry in harness.outputs()["call_3"]["tasks"]] == [
+            "how is my portfolio doing",
+            "what's the weather",
+        ]
+        assert harness.outputs()["call_4"]["message"] == which_to_cancel([portfolio, weather])
+        assert harness.outputs()["call_5"]["message"] == 'Cancelled "how is my portfolio doing".'
+        assert portfolio.state == "cancelled" and weather.state == "running"
+        assert len(api.requests_to("POST", "/stop")) == 1
 
 
 async def test_delegate_receipt_comes_at_once_and_the_profile_hint_reaches_the_router(
@@ -534,9 +577,7 @@ async def test_outputs_of_one_response_share_one_reply_and_the_floor_frees_after
 
         # Once the one reply is done the floor is free, so the start notice is spoken without waiting.
         await harness.answer_requests()
-        await harness.wait_for(
-            lambda: harness.announcements() == [task_started(1, "general", "what's the weather")], timeout_s=1
-        )
+        await harness.wait_for(lambda: harness.announcements() == [STARTED_WEATHER], timeout_s=1)
 
 
 async def test_reply_to_a_call_whose_response_a_person_cut_off_is_dropped_and_frees_the_floor(
@@ -561,6 +602,4 @@ async def test_reply_to_a_call_whose_response_a_person_cut_off_is_dropped_and_fr
             _created("resp_turn"),
             _done("resp_turn"),
         )
-        await harness.wait_for(
-            lambda: harness.announcements() == [task_started(1, "general", "what's the weather")], timeout_s=1
-        )
+        await harness.wait_for(lambda: harness.announcements() == [STARTED_WEATHER], timeout_s=1)

@@ -25,13 +25,7 @@ import yaml
 
 from hermes_duplex.config import load_config
 from hermes_duplex.prompts.base import TRUNCATION_MARKER
-from hermes_duplex.prompts.notices import (
-    WHO_IS_ASKING,
-    queued_behind,
-    task_cancelled,
-    task_failed,
-    task_started,
-)
+from hermes_duplex.prompts.notices import WHO_IS_ASKING
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.service import STOP_TIMEOUT_S, DuplexService, build_service
 from hermes_duplex.session import RESULT_CAP_TOKENS
@@ -284,14 +278,14 @@ async def test_queue_status_and_cancel_by_voice(tmp_path: Path, api: FakeHermesA
         tasks_seen = page.task_lists()
 
     assert stack.said() == [
-        task_started(1, "stock-picker", "how is my portfolio doing"),
-        queued_behind(2, "and what about Tesla", 1),
+        'Started "how is my portfolio doing" on the stock-picker agent.',
+        'Queued "and what about Tesla" behind "how is my portfolio doing".',
         (
-            'Task 1 on the stock-picker agent, "how is my portfolio doing", is running, and I\'ll tell you '
-            'when it finishes. Task 2 on the stock-picker agent, "and what about Tesla", is running, and '
-            "I'll tell you when it finishes."
+            '"how is my portfolio doing" on the stock-picker agent is running, and I\'ll tell you when it '
+            'finishes. "and what about Tesla" on the stock-picker agent is running, and I\'ll tell you when '
+            "it finishes."
         ),
-        task_cancelled(2),
+        'Cancelled "and what about Tesla".',
     ]
     # Every call got exactly one receipt; status and cancel were answered without a Hermes run.
     assert [args["payload"] for args in stack.recorded("send_function_output")] == [{"status": "started"}] * 4
@@ -365,7 +359,7 @@ async def test_hermes_refusal_fails_the_task_with_a_spoken_reason(
         await page.speak(2000)
         [failure] = await stack.wait_for("deliver_result", 1)
 
-    assert failure["text"] == task_failed(1, reason)
+    assert failure["text"] == f'Sorry, "how is my portfolio doing" failed: {reason}.'
     assert failure["ref"] == {"delegation_id": None, "call_id": "c1", "task_id": 1}
     assert len(api.requests_to("POST", "/runs")) == attempts
     assert api.runs == {}
@@ -388,7 +382,7 @@ async def test_hermes_down_fails_the_task_and_the_next_one_runs_once_it_is_back(
     ):
         await page.speak(2000)
         [failure] = await stack.wait_for("deliver_result", 1)
-        assert failure["text"] == task_failed(1, "Hermes is unreachable")
+        assert failure["text"] == 'Sorry, "how is my portfolio doing" failed: Hermes is unreachable.'
 
         async with FakeHermesApi(KEYS, port=port) as api:
             api.run_scripts = [_completed("portfolio up 2%")]

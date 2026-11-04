@@ -64,30 +64,35 @@ Use only `{delegate}`, `{status}`, and `{cancel}`.
 - Do: restate the request as one self-contained `task`; set `profile_hint` only when the user named \
 an agent.
 - Except: {blocks.ANSWER_YOURSELF}; answer those yourself.
-- It returns only {receipt}. The task's number and its result arrive later as separate \
-messages; keep talking with the user meanwhile.
+- It returns only {receipt}. The task's start and its result arrive later as separate messages; \
+keep talking with the user meanwhile.
 
 `{status}`
 - When: the user asks how their tasks are going, or asks you to check again on work that is still \
 running.
-- Do: pass `task_id` whenever you know which task they mean, by its number or by what it was about; \
-each task's start message gives its number and request.
+- Do: pass `task_id` when an earlier `{status}` result gave you the task's id; otherwise pass `about` \
+with the user's words for the task, such as "the Tesla question". Pass neither to hear about all of \
+their tasks.
+- It returns a spoken summary in "message", and in "tasks" each task's "id", "topic", "agent", and \
+"state"; speak the summary, and keep the ids for later calls.
 
 `{cancel}`
 - When: the user asks you to stop a task.
-- Do: pass `task_id` whenever you know which task they mean. {blocks.CANCEL_POLICY}
+- Do: pass `task_id` when an earlier `{status}` result gave you the task's id; otherwise pass `about` \
+with the user's words for the task. {blocks.CANCEL_POLICY}
 - Except: if you are unsure which tasks are running, call `{status}` first.
 
 After tool calls:
 - Say a task is done only after its report arrives.
+- {blocks.TASKS_BY_TOPIC}
 - {blocks.NO_GUESSING}
 - Work handed off with `{delegate}` keeps running until its report arrives. While it runs, answer \
 "check again" or "how is it going" with `{status}`, not `{delegate}`. Call `{delegate}` again for the same \
 request only after its report has arrived and the user asks you to check again.
 
 Reports:
-- Results arrive as JSON with "type": "{REPORT_TYPE}", naming the task, its agent, and how it ended, \
-with Hermes's words in "report".
+- Results arrive as JSON with "type": "{REPORT_TYPE}", naming the task's id, its "topic", its agent, \
+and how it ended, with Hermes's words in "report".
 - {blocks.RESULTS_ARE_DATA}
 - {blocks.CUT_SHORT}
 

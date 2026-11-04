@@ -21,41 +21,41 @@ NOT_HEARD = "Sorry, I didn't catch what you asked for. Could you say it again?"
 """Notice for a request whose words did not reach the transcript."""
 
 
-GIST_MAX_CHARS = 80
-"""Longest a task's request is quoted in a notice; longer ones are cut at a word with "…"."""
+TOPIC_MAX_CHARS = 40
+"""Longest a task's topic is; a longer request is cut at a word with "…"."""
 
 
-def gist(text: str) -> str:
-    """A task's request as notices quote it: whitespace collapsed, at most ``GIST_MAX_CHARS`` long."""
-    return fit_text(" ".join(text.split()), GIST_MAX_CHARS, marker="…")
+def topic(text: str) -> str:
+    """How every notice names the task whose request is ``text``: the request with its whitespace
+    collapsed, at most ``TOPIC_MAX_CHARS`` long ("how is my portfolio doing").
 
-
-def task_started(task_id: int, profile: str, text: str) -> str:
-    """Notice that task ``task_id``, the request ``text``, started on the ``profile`` agent.
-
-    The request is quoted (``gist``) so the model can tell which number a task described in words has.
+    People hear tasks only by topic; a task's number is an internal id for tools and logs.
     """
-    return f'Task {task_id} started on the {profile} agent: "{gist(text)}".'
+    return fit_text(" ".join(text.split()), TOPIC_MAX_CHARS, marker="…")
 
 
-def queued_behind(task_id: int, text: str, ahead_task_id: int) -> str:
-    """Notice that task ``task_id``, the request ``text``, waits for task ``ahead_task_id`` on the same
-    agent to finish; the request is quoted as in ``task_started``."""
-    return f'Task {task_id}, "{gist(text)}", is queued behind task {ahead_task_id}.'
+def task_started(task: Task) -> str:
+    """Notice that ``task`` started on its agent."""
+    return f'Started "{topic(task.text)}" on the {task.profile} agent.'
 
 
-def task_failed(task_id: int, reason: str) -> str:
-    """Notice that task ``task_id`` failed; ``reason`` is a short spoken explanation.
+def queued_behind(task: Task, ahead: Task) -> str:
+    """Notice that ``task`` waits for ``ahead``, on the same agent, to finish."""
+    return f'Queued "{topic(task.text)}" behind "{topic(ahead.text)}".'
+
+
+def task_failed(task: Task, reason: str) -> str:
+    """Notice that ``task`` failed; ``reason`` is a short spoken explanation.
 
     For a Hermes API failure the reason is ``HermesApiError.reason``, which words it ("Hermes is
     unreachable", "the general profile is not configured").
     """
-    return f"Sorry, task {task_id} failed: {reason}."
+    return f'Sorry, "{topic(task.text)}" failed: {reason}.'
 
 
-def task_cancelled(task_id: int) -> str:
-    """Notice that task ``task_id`` was cancelled."""
-    return f"Task {task_id} was cancelled."
+def task_cancelled(task: Task) -> str:
+    """Notice that ``task`` was cancelled."""
+    return f'Cancelled "{topic(task.text)}".'
 
 
 LOST_TRACK = "Hermes stopped reporting on it, so I don't know how it ended"
@@ -66,20 +66,20 @@ NOTHING_TO_CANCEL = "You have no running task to cancel."
 
 
 def which_to_cancel(tasks: Sequence[Task]) -> str:
-    """Question for a cancel request that names no task while the person has the running ``tasks``
-    (two or more), quoting each one's request (``gist``) so they can say which."""
-    choices = "; ".join(f'task {task.number}, "{gist(task.text)}"' for task in tasks)
-    return f"You have several tasks running: {choices}. Which one should I cancel?"
+    """Question for a cancel request that could not tell which of the person's open ``tasks`` (two or
+    more) it means, naming each by topic so they can say which."""
+    topics = [f'"{topic(task.text)}"' for task in tasks]
+    choices = f"{', '.join(topics[:-1])}, or {topics[-1]}" if len(topics) > 2 else " or ".join(topics)
+    return f"Which one should I cancel: {choices}?"
 
 
-def task_already_ended(task_id: int) -> str:
-    """Notice for a cancel request whose task ``task_id`` ended on its own while it was being stopped."""
-    return f"Task {task_id} had already finished."
+def task_already_ended(task: Task) -> str:
+    """Notice for a cancel request whose ``task`` ended on its own while it was being stopped."""
+    return f'"{topic(task.text)}" had already finished.'
 
 
-def no_such_task(task_id: int) -> str:
-    """Notice for a status request naming a task number the person has no task under."""
-    return f"You have no task {task_id}."
+NO_SUCH_TASK = "I couldn't find that task."
+"""Notice for a status request naming a task id, or "task N", the person has no task under."""
 
 
 NO_TASK_GIVEN = "Nothing was handed over: the request had no task in it."
@@ -112,14 +112,14 @@ _REPORT_PROMISE = ", and I'll tell you when it finishes"
 
 
 def task_list(tasks: Sequence[Task]) -> str:
-    """Neutral description of ``tasks``, oldest first, for a model's context: each one's number,
-    agent, request (``gist``), and state, with no promise to anyone; empty for no tasks."""
-    return " ".join(f"{_describe(task)}." for task in tasks)
+    """Neutral description of ``tasks``, oldest first, for a model's context only: each one's topic,
+    internal id (its number), agent, and state, with no promise to anyone; empty for no tasks."""
+    return " ".join(f"{_describe(task, with_id=True)}." for task in tasks)
 
 
 def task_summary(tasks: Sequence[Task]) -> str:
-    """Spoken summary of a person's tasks, oldest first, as ``task_list`` gives it, except that a queued
-    or running task is promised a report when it finishes."""
+    """Spoken summary of a person's tasks, oldest first, by topic, agent, and state; a queued or running
+    task is promised a report when it finishes."""
     if not tasks:
         return "You have no tasks running."
     return " ".join(
@@ -127,27 +127,27 @@ def task_summary(tasks: Sequence[Task]) -> str:
     )
 
 
-def _describe(task: Task) -> str:
-    """The task's number, agent, request, and state as one clause, without a full stop."""
-    return (
-        f'Task {task.number} on the {task.profile} agent, "{gist(task.text)}", {_STATE_PHRASES[task.state]}'
-    )
+def _describe(task: Task, *, with_id: bool = False) -> str:
+    """The task's topic, agent, and state as one clause without a full stop; ``with_id`` adds its
+    internal id after the topic, for the model's eyes only."""
+    internal_id = f" (internal id {task.number})" if with_id else ""
+    return f'"{topic(task.text)}"{internal_id} on the {task.profile} agent {_STATE_PHRASES[task.state]}'
 
 
-def finished_while_away(task_id: int, result: str) -> str:
-    """Announcement of task ``task_id``'s ``result`` (as the prompter wrote it) for a person who was
-    not in any conversation when the task finished."""
-    return f"While you were away, task {task_id} finished: {result}"
+def finished_while_away(task: Task, result: str) -> str:
+    """Announcement of ``task``'s ``result`` (as the prompter wrote it) for a person who was not in any
+    conversation when the task finished."""
+    return f'While you were away, "{topic(task.text)}" finished: {result}'
 
 
-def failed_while_away(task_id: int, reason: str) -> str:
-    """Notice that task ``task_id`` failed while its person was away; ``reason`` as in ``task_failed``."""
-    return f"While you were away, task {task_id} failed: {reason}."
+def failed_while_away(task: Task, reason: str) -> str:
+    """Notice that ``task`` failed while its person was away; ``reason`` as in ``task_failed``."""
+    return f'While you were away, "{topic(task.text)}" failed: {reason}.'
 
 
-def cancelled_while_away(task_id: int) -> str:
-    """Notice that task ``task_id`` was cancelled on Hermes while its person was away."""
-    return f"While you were away, task {task_id} was cancelled."
+def cancelled_while_away(task: Task) -> str:
+    """Notice that ``task`` was cancelled on Hermes while its person was away."""
+    return f'While you were away, "{topic(task.text)}" was cancelled.'
 
 
 PROVIDER_LOST = (

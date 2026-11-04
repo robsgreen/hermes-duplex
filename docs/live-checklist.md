@@ -78,9 +78,9 @@ model relays the result in its own words. The Tesla follow-up logs `profile=stoc
 2. Ask "what are you working on?"
 3. Say "cancel that".
 
-Expected: the status answer names the task's number, agent, request, and state, and for a running
-task says it will tell you when it finishes. The cancel stops the run in
-Hermes (its status turns cancelled) and the model confirms `Task <n> was cancelled`. Neither request
+Expected: the status answer names the task by its topic (what you asked), its agent, and its state,
+never by a number, and for a running task says it will tell you when it finishes. The cancel stops
+the run in Hermes (its status turns cancelled) and the model confirms `Cancelled "<topic>"`. Neither request
 creates a Hermes run of its own. With GPT-Live both route to `_control` (the log shows
 `profile=_control`); Realtime models call the `task_status` and `cancel_task` tools instead.
 
@@ -238,11 +238,12 @@ connection to the voice service..." and the conversation ends; Hermes tasks keep
 7. Stop the service, set `tasks: {restore_max_age_h: 0.01}`, start a slow task, stop the service
    while it runs, wait a minute, start it again, and join.
 
-Expected: in steps 2 and 3 the model tells you "While you were away, task <n> finished: …" and
+Expected: in steps 2 and 3 the model tells you "While you were away, "<topic>" finished: …" and
 relays the result, shortly after you first speak; nobody else's tasks are announced to you. In step 4
 the status names the old task as running and the cancel stops its Hermes run. In step 5 the Discord
 conversation reports the web task's result when it finishes, read in full in the channel. In step 6
-the answer is the summary of your tasks, not "You have no task 5". In step 7 nothing is announced,
+the answer is the summary of your tasks by topic, not "I couldn't find that task", and no task number
+is spoken. In step 7 nothing is announced,
 the status names no old task, and the log says the task was marked unknown without restoring it.
 
 ## Prompts
@@ -256,7 +257,7 @@ prompts"; the exact text is in `tests/fixtures/prompts/<provider>/instructions.t
 1. Ask "how's my portfolio doing?", then ask a small question while it runs.
 2. Ask "what are you working on?", then "cancel that" on a slow task. Then start two slow tasks and
    say "cancel that" without naming either. Start two more and cancel one by what it is about
-   ("cancel the weather one"). While a task runs, say "check again".
+   ("cancel the weather one"), then ask "how's the other one going?". While a task runs, say "check again".
 3. Set `assistant: {name: Iris, persona: "Be dry-witted.", backchannel: frequent}`, restart, and ask
    "what's your name?"; with `gpt-live`, tell a long story and listen for listening sounds.
 4. On `gpt-live`, ask for something with a long, number-heavy answer (for example "list the closing
@@ -266,10 +267,11 @@ Expected: in step 1 the model says one short line, hands the request off, keeps 
 the result in its own words, summary first, without saying the task is done before the result
 arrives. On `openai-realtime` and `xai-realtime` it never reads the JSON report aloud as JSON. In
 step 2 status and the first cancel (one task running) answer without a preamble or a confirmation
-question; with two tasks running and none named, the model asks which one first, then cancels the
-one you name without asking again. "Cancel the weather one" cancels that task, not the latest:
-on `openai-realtime` and `xai-realtime` the `cancel_task` call carries its `task_id`; on `gpt-live`
-the model says "Cancelling task <n>" first. "Check again" gets a status answer and starts no second
+question; with two tasks running and none named, the model asks which one first, naming each by its
+topic, then cancels the one you name without asking again. "Cancel the weather one" cancels that
+task, not the latest: on `openai-realtime` and `xai-realtime` the `cancel_task` call carries `about`
+(or the `task_id` an earlier `task_status` result gave it); on `gpt-live` the session matches your
+words to the task's topic. Throughout step 2 no task number is spoken, by the model or by a notice. "Check again" gets a status answer and starts no second
 Hermes run. In step 3 the model answers "Iris" in a dry-witted tone; `gpt-live` backchannels more often than with the default `moderate`. In step 4 the whole report is
 spoken (the log shows no GPT-Live error for the commentary appends, which it splits into parts of at
 most 500 characters), ending with "…more in Hermes" when it was cut to 1250 characters.

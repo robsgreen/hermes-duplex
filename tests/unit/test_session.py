@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,22 +17,15 @@ from hermes_duplex.config import CONTROL_PROFILE, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.prompts.base import PromptContext, TaskReport, VoicePrompter
-from hermes_duplex.prompts.notices import (
-    WHO_IS_ASKING,
-    finished_while_away,
-    queued_behind,
-    task_started,
-    task_summary,
-    which_to_cancel,
-)
+from hermes_duplex.prompts.notices import WHO_IS_ASKING, task_summary, which_to_cancel
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.router.base import ControlIntent, RouteDecision
 from hermes_duplex.router.composite import CompositeRouter
 from hermes_duplex.router.knn import KnnBackend
-from hermes_duplex.session import Router, VoiceSession, _task_number
-from hermes_duplex.tasks import TaskTracker
+from hermes_duplex.session import Router, VoiceSession, _resolve_task
+from hermes_duplex.tasks import Task, TaskTracker
 from hermes_duplex.transports.base import InputFrame
 from tests.fakes.fake_embedder import fake_embed
 from tests.fakes.fake_hermes_api import FakeHermesApi, RunScript, admission_queued
@@ -40,7 +34,12 @@ RATE = 24000
 KEYS = {"general": "general-key-0123456789", "stock-picker": "stocks-key-0123456789"}
 STOCKS_MODEL = ModelChoice(provider="openai", model="gpt-x")
 
-STARTED_1 = task_started(1, "stock-picker", "how is my portfolio doing")
+STARTED_1 = 'Started "how is my portfolio doing" on the stock-picker agent.'
+
+QUEUED_TESLA = 'Queued "and what about Tesla" behind "how is my portfolio doing".'
+STARTED_WEATHER = 'Started "what\'s the weather" on the general agent.'
+CANCELLED_1 = 'Cancelled "how is my portfolio doing".'
+AWAY_1 = 'While you were away, "how is my portfolio doing" finished: '
 
 # A run that starts and never ends on its own, so it stays open for status, cancel, and queueing.
 OPEN_RUN = RunScript(events=[{"event": "run.started"}])
@@ -144,6 +143,8 @@ ROUTES = {
     "what are you working on": _decision(CONTROL_PROFILE, "status"),
     "cancel that": _decision(CONTROL_PROFILE, "cancel"),
     "cancel task 1": _decision(CONTROL_PROFILE, "cancel"),
+    "cancel the portfolio one": _decision(CONTROL_PROFILE, "cancel"),
+    "how's the Tesla thing": _decision(CONTROL_PROFILE, "status"),
 }
 
 
@@ -316,7 +317,9 @@ async def test_instructions_and_results_come_from_the_providers_prompter(harness
     [connect] = harness.sent("connect")
     assert connect.args["instructions"] == "instructions for Iris"
     assert prompter.contexts == [context]
-    assert prompter.reports == [(TaskReport(1, "stock-picker", "completed", "done"), 500)]
+    assert prompter.reports == [
+        (TaskReport(1, "how is my portfolio doing", "stock-picker", "completed", "done"), 500)
+    ]
     assert harness.texts("deliver_result") == ["result of task 1"]
 
 
@@ -447,7 +450,7 @@ async def test_a_new_session_adopts_the_open_task_and_queues_behind_it(
         old, new = second.tracker.get(1), second.tracker.get(2)
         assert old is not None and old.state == "running", "its Hermes run goes on"
         assert new is not None
-        assert second.texts("say") == [queued_behind(2, "and what about Tesla", 1), task_summary([old, new])]
+        assert second.texts("say") == [QUEUED_TESLA, task_summary([old, new])]
     finally:
         await _close(first, second)
 
@@ -463,10 +466,7 @@ async def test_a_result_that_finished_while_the_person_was_away_is_announced_in_
         second.start([], _frames(200, _voiced("rob")))
         await second.wait_for(lambda: bool(second.sent("say")))
 
-        assert second.texts("say") == [
-            finished_while_away(1, frame_result("stock-picker", "Up 2% today.", 500))
-        ]
-        assert second.texts("say")[0].startswith("While you were away, task 1 finished: Report from")
+        assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
         task = second.tracker.get(1)
         assert task is not None and task.state == "completed"
         assert api.requests_to("GET", f"/runs/{task.run_id}"), "the ended run was read by its status"
@@ -492,10 +492,10 @@ async def test_status_and_cancel_reach_an_adopted_task(tmp_path: Path, api: Fake
         await second.wait_for(lambda: len(second.sent("say")) >= 2)
 
         assert second.texts("say")[0] == (
-            'Task 1 on the stock-picker agent, "how is my portfolio doing", is running, and I\'ll tell you '
-            "when it finishes."
+            '"how is my portfolio doing" on the stock-picker agent is running, and I\'ll tell you when it '
+            "finishes."
         )
-        assert second.texts("say")[1] == "Task 1 was cancelled."
+        assert second.texts("say")[1] == CANCELLED_1
         assert len(api.requests_to("POST", "/stop")) == 1
         await asyncio.sleep(0.1)
         assert len(second.sent("say")) == 2, "the run's own cancelled event is not announced again"
@@ -537,9 +537,7 @@ async def test_a_restarted_service_announces_what_its_previous_run_left_open(
         second.start([], _frames(200, _voiced("rob")))
         await second.wait_for(lambda: bool(second.sent("say")))
 
-        assert second.texts("say") == [
-            finished_while_away(1, frame_result("stock-picker", "Up 2% today.", 500))
-        ]
+        assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
     finally:
         await second.stop()
 
@@ -620,7 +618,7 @@ async def test_control_cancel_stops_the_most_recent_running_task(
     assert task is not None and task.state == "cancelled"
     [stop] = api.requests_to("POST", "/stop")
     assert stop.path == f"/p/stock-picker/v1/runs/{task.run_id}/stop"
-    assert harness.texts("say") == [STARTED_1, "Task 1 was cancelled."]
+    assert harness.texts("say") == [STARTED_1, CANCELLED_1]
     assert harness.sent("deliver_result") == [], "the cancel is confirmed once, by say"
 
 
@@ -652,7 +650,7 @@ async def test_cancel_is_confirmed_once_when_the_run_reports_cancelled_before_st
     await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
     await asyncio.sleep(0.2)
 
-    assert harness.texts("say") == [STARTED_1, "Task 1 was cancelled."]
+    assert harness.texts("say") == [STARTED_1, CANCELLED_1]
     assert harness.sent("deliver_result") == [], "the cancel is confirmed once, by say"
 
 
@@ -677,8 +675,8 @@ async def test_control_cancel_by_number(harness: _Harness, api: FakeHermesApi) -
 
     assert harness.texts("say") == [
         STARTED_1,
-        task_started(2, "general", "what's the weather"),
-        "Task 1 was cancelled.",
+        STARTED_WEATHER,
+        CANCELLED_1,
     ]
     second = harness.tracker.get(2)
     assert second is not None and second.state == "running"
@@ -701,7 +699,7 @@ async def test_second_task_on_the_same_profile_is_queued_behind_the_first(
 
     await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
 
-    assert harness.texts("say")[1] == queued_behind(2, "and what about Tesla", 1)
+    assert harness.texts("say")[1] == QUEUED_TESLA
     sessions = [request.body["session_id"] for request in api.requests_to("POST", "/runs")]
     assert sessions == ["duplex-rob-stock-picker", "duplex-rob-stock-picker"]
 
@@ -721,7 +719,7 @@ async def test_tasks_on_different_profiles_run_concurrently(harness: _Harness, a
 
     await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
 
-    assert harness.texts("say")[1] == task_started(2, "general", "what's the weather")
+    assert harness.texts("say")[1] == STARTED_WEATHER
     [delivered] = harness.sent("deliver_result")
     assert delivered.args["ref"]["task_id"] == 2
     first = harness.tracker.get(1)
@@ -779,7 +777,7 @@ async def test_failed_run_delivers_a_short_failure_notice(harness: _Harness, api
 
     await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
 
-    assert harness.texts("deliver_result") == ["Sorry, task 1 failed: model overloaded."]
+    assert harness.texts("deliver_result") == ['Sorry, "how is my portfolio doing" failed: model overloaded.']
     task = harness.tracker.get(1)
     assert task is not None and task.state == "failed"
 
@@ -821,27 +819,91 @@ async def test_audio_flows_both_ways_and_the_ui_hears_about_it(harness: _Harness
     assert transcript == [{"speaker": "user", "text": "hello"}, {"speaker": "assistant", "text": "Hi there."}]
 
 
+def _open_task(number: int, text: str) -> Task:
+    moment = datetime(2026, 11, 3, tzinfo=UTC)
+    return Task(
+        number=number,
+        uuid=f"u{number}",
+        person="rob",
+        profile="stock-picker",
+        effort="medium",
+        model=None,
+        text=text,
+        state="running",
+        run_id=f"run_{number}",
+        created_at=moment,
+        updated_at=moment,
+    )
+
+
+PORTFOLIO = _open_task(1, "how is my portfolio doing")
+TESLA = _open_task(2, "and what about Tesla")
+
+
 @pytest.mark.parametrize(
-    ("text", "context", "number"),
+    ("words", "task_id", "number"),
     [
-        ("cancel task 2", "Cancelling task 3.", 2),
-        ("cancel task number 2", None, 2),
-        ("2", None, 2),
-        ("cancel the weather one", "Cancelling task 3.", 3),
-        ("how is the weather one going", "Checking on task 3.", 3),
-        ("cancel the weather one", "Cancelling task 7.", None),  # not one of the speaker's open tasks
-        ("cancel the weather one", "Your portfolio is up 2 percent.", None),
-        ("cancel it", None, None),
-        ("cancel the top 5 stocks", None, None),
-        ("how is the 30 day report going", None, None),
-        ("cancel it", "Task 3 on the general agent is running.", None),
-        ("what about the other one", "Task 1 has finished.", None),
+        ("cancel the portfolio one", None, 1),
+        ("how's the Tesla thing", None, 2),
+        ("what about Tesla's stock", None, 2),
+        ("cancel that", None, None),  # names no topic, and two are running
+        ("cancel the weather one", None, None),  # unrelated words
+        ("", None, None),
+        ("cancel task 2", None, 2),
+        ("cancel task number 1", None, 1),
+        ("stop task #7", None, 7),  # named outright, though not open: the caller says it is not found
+        ("cancel the top 5 stocks", None, None),  # a number that is not a task number
+        ("the portfolio one", 2, 2),  # a tool call's task_id comes first
+        ("about tesla and my portfolio", None, None),  # a tie is no clear winner
     ],
 )
-def test_the_task_a_request_names_comes_from_its_words_then_from_what_the_assistant_said(
-    text: str, context: str | None, number: int | None
+def test_resolve_task_by_id_then_named_number_then_topic(
+    words: str, task_id: int | None, number: int | None
 ) -> None:
-    assert _task_number(text, context, active={1, 2, 3}) == number
+    assert _resolve_task([PORTFOLIO, TESLA], words, task_id) == number
+
+
+@pytest.mark.parametrize("words", ["cancel that", "cancel the weather one", ""])
+def test_resolve_task_with_one_open_task_means_that_one(words: str) -> None:
+    assert _resolve_task([TESLA], words) == 2
+    assert _resolve_task([], words) is None
+
+
+async def test_status_and_cancel_find_the_task_by_its_topic(harness: _Harness, api: FakeHermesApi) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "and what about Tesla"}},
+            },
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c3", "tool_args": {"task": "how's the Tesla thing"}},
+            },
+            {
+                "on_sent": "say",
+                "event": {
+                    "type": "delegation",
+                    "id": "c4",
+                    "tool_args": {"task": "cancel the portfolio one"},
+                },
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 4)
+
+    portfolio, tesla = harness.tracker.get(1), harness.tracker.get(2)
+    assert portfolio is not None and tesla is not None
+    assert harness.texts("say")[2].startswith('"and what about Tesla" on the stock-picker agent is ')
+    assert "portfolio" not in harness.texts("say")[2]
+    assert harness.texts("say")[3] == CANCELLED_1
+    assert portfolio.state == "cancelled" and tesla.state in ("queued", "running")
+    [stop] = api.requests_to("POST", "/stop")
+    assert stop.path.endswith(f"/runs/{portfolio.run_id}/stop")
 
 
 async def test_cancel_naming_no_task_asks_which_when_several_are_running(
@@ -930,9 +992,7 @@ async def test_a_result_not_yet_spoken_when_the_session_ends_is_told_in_the_next
         second.start([], _frames(200, _voiced("rob")))
         await second.wait_for(lambda: bool(second.sent("say")))
 
-        assert second.texts("say") == [
-            finished_while_away(1, frame_result("stock-picker", "Up 2% today.", 500))
-        ]
+        assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
     finally:
         await _close(first, second)
 
@@ -950,8 +1010,6 @@ async def test_an_adopted_run_whose_status_cannot_be_read_ends_as_news(
         second.start([], _frames(200, _voiced("rob")))
         await second.wait_for(lambda: bool(second.sent("say")))
 
-        assert second.texts("say") == [
-            finished_while_away(1, frame_result("stock-picker", "Up 2% today.", 500))
-        ]
+        assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
     finally:
         await _close(first, second)

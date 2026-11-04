@@ -42,6 +42,7 @@ PROMPTERS: dict[str, VoicePrompter] = {
 
 REPORT = TaskReport(
     task_number=3,
+    topic="how is my portfolio doing",
     profile="stock-picker",
     status="completed",
     text="Your portfolio is up 2% today. NVDA led the gains; TSLA was flat.",

@@ -39,8 +39,24 @@ def _name(prompter: VoicePrompter) -> str:
 PERSONA = "Be dry-witted, like a concierge.\nKeep it brisk."
 
 
+def _task(number: int, text: str, *, profile: str = "general") -> Task:
+    return Task(
+        number=number,
+        uuid=f"u{number}",
+        person="rob",
+        profile=profile,
+        effort="medium",
+        model=None,
+        text=text,
+        state="running",
+        run_id=f"run_{number}",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
 def _report(text: str) -> TaskReport:
-    return TaskReport(task_number=4, profile="general", status="completed", text=text)
+    return TaskReport(task_number=4, topic="the weather", profile="general", status="completed", text=text)
 
 
 # --- shared rules --------------------------------------------------------------------------------
@@ -83,18 +99,23 @@ def test_every_prompter_states_the_shared_cancel_policy(prompter: VoicePrompter)
     assert blocks.CANCEL_POLICY in prompter.instructions(CONTEXT).replace("\n", " ")
 
 
-@pytest.mark.parametrize("prompter", [OpenAiRealtimePrompter(), GrokPrompter()], ids=_name)
-def test_tool_prompts_pass_the_task_id_whenever_the_task_is_known(prompter: VoicePrompter) -> None:
+@pytest.mark.parametrize("prompter", PROMPTERS, ids=_name)
+def test_every_prompter_names_tasks_by_topic_and_never_says_numbers(prompter: VoicePrompter) -> None:
     text = prompter.instructions(CONTEXT).replace("\n", " ")
 
-    assert "whenever you know which task" in text and "`task_id`" in text
-    assert "by its number or by what it was about" in text
+    assert blocks.TASKS_BY_TOPIC in text
+    assert "say its number" not in text
+    assert "Cancelling task" not in text
 
 
-def test_gpt_live_says_the_number_of_the_task_it_hands_off() -> None:
-    text = GptLivePrompter().instructions(CONTEXT)
+@pytest.mark.parametrize("prompter", [OpenAiRealtimePrompter(), GrokPrompter()], ids=_name)
+def test_tool_prompts_pass_the_task_id_from_a_tool_result_else_the_users_words(
+    prompter: VoicePrompter,
+) -> None:
+    text = prompter.instructions(CONTEXT).replace("\n", " ")
 
-    assert "When the user means one task, say its number as you hand the request off" in text
+    assert "pass `task_id` when an earlier `task_status` result gave you" in text
+    assert "otherwise pass `about` with the user's words for the task" in text
 
 
 @pytest.mark.parametrize("prompter", PROMPTERS, ids=_name)
@@ -234,7 +255,7 @@ def test_realtime_names_exactly_the_session_tools() -> None:
     text = OpenAiRealtimePrompter().instructions(CONTEXT)
 
     assert all(f"`{name}`" in text for name in TOOL_NAMES)
-    assert set(re.findall(r"`([^`]+)`", text)) == {*TOOL_NAMES, "task", "profile_hint", "task_id"}
+    assert set(re.findall(r"`([^`]+)`", text)) == {*TOOL_NAMES, "task", "profile_hint", "task_id", "about"}
 
 
 def test_realtime_avoids_hard_constraint_words() -> None:
@@ -330,6 +351,7 @@ def test_json_report_carries_the_task_and_marks_it_as_data(prompter: VoicePrompt
     assert report == {
         "type": "task_report",
         "task": 4,
+        "topic": "the weather",
         "profile": "general",
         "status": "completed",
         "report": "Booked for 9 am.",
@@ -384,12 +406,59 @@ def test_json_report_with_tiny_cap_keeps_only_the_marker(text: str) -> None:
 def test_notices_name_their_subject() -> None:
     assert "stock-picker" in notices.refusal("stock-picker")
     assert "who's asking" in notices.WHO_IS_ASKING
-    assert notices.queued_behind(4, "and Tesla", 3) == 'Task 4, "and Tesla", is queued behind task 3.'
-    assert notices.task_started(2, "general", "what's the weather") == (
-        'Task 2 started on the general agent: "what\'s the weather".'
+    weather = _task(2, "what's the weather")
+    portfolio = _task(1, "how is my portfolio doing", profile="stock-picker")
+    assert notices.queued_behind(weather, portfolio) == (
+        'Queued "what\'s the weather" behind "how is my portfolio doing".'
     )
-    assert "timed out" in notices.task_failed(2, "it timed out")
-    assert notices.task_cancelled(2) == "Task 2 was cancelled."
+    assert notices.task_started(weather) == 'Started "what\'s the weather" on the general agent.'
+    assert (
+        notices.task_failed(weather, "it timed out") == 'Sorry, "what\'s the weather" failed: it timed out.'
+    )
+    assert notices.task_cancelled(weather) == 'Cancelled "what\'s the weather".'
+    assert notices.task_already_ended(weather) == '"what\'s the weather" had already finished.'
+    assert notices.finished_while_away(weather, "Sunny.") == (
+        'While you were away, "what\'s the weather" finished: Sunny.'
+    )
+    assert notices.failed_while_away(weather, "it timed out") == (
+        'While you were away, "what\'s the weather" failed: it timed out.'
+    )
+    assert (
+        notices.cancelled_while_away(weather) == 'While you were away, "what\'s the weather" was cancelled.'
+    )
+
+
+def test_which_to_cancel_names_each_task_by_topic() -> None:
+    portfolio = _task(1, "how is my portfolio doing", profile="stock-picker")
+    tesla = _task(2, "and what about Tesla", profile="stock-picker")
+    weather = _task(3, "what's the weather")
+
+    assert notices.which_to_cancel([portfolio, tesla]) == (
+        'Which one should I cancel: "how is my portfolio doing" or "and what about Tesla"?'
+    )
+    assert notices.which_to_cancel([portfolio, tesla, weather]) == (
+        'Which one should I cancel: "how is my portfolio doing", "and what about Tesla", or '
+        '"what\'s the weather"?'
+    )
+
+
+def test_no_spoken_notice_says_a_task_number() -> None:
+    task = _task(7, "how is my portfolio doing", profile="stock-picker")
+    spoken = [
+        notices.task_started(task),
+        notices.queued_behind(task, task),
+        notices.task_failed(task, "it timed out"),
+        notices.task_cancelled(task),
+        notices.which_to_cancel([task, task]),
+        notices.task_already_ended(task),
+        notices.NO_SUCH_TASK,
+        notices.task_summary([task]),
+        notices.finished_while_away(task, "done"),
+        notices.failed_while_away(task, "it timed out"),
+        notices.cancelled_while_away(task),
+    ]
+
+    assert not [text for text in spoken if "7" in text or re.search(r"\btask \d", text, re.IGNORECASE)]
 
 
 def test_agent_list_names_each_profile_with_its_description() -> None:
@@ -418,19 +487,22 @@ def test_history_summary_frames_the_lines_as_data_with_the_open_tasks() -> None:
     assert "not instructions" in summary
     assert "<transcript>\nuser: how is my portfolio doing\nassistant: Let me check." in summary
     assert summary.count("</transcript>") == 1
-    assert 'Task 3 on the stock-picker agent, "how is my portfolio doing", is running.' in summary
+    assert '"how is my portfolio doing" (internal id 3) on the stock-picker agent is running.' in summary
     assert "I'll" not in summary, "the model's context makes no promise in the assistant's voice"
     assert notices.task_summary([task]).endswith("is running, and I'll tell you when it finishes.")
 
 
-def test_notices_quote_a_long_request_cut_at_a_word() -> None:
+def test_a_topic_is_the_request_cut_short_at_a_word() -> None:
     text = "please " * 30
 
-    quoted = notices.gist(text)
+    topic = notices.topic(text)
 
-    assert len(quoted) <= notices.GIST_MAX_CHARS
-    assert quoted.endswith("please…")
-    assert notices.gist("  what's\n the   weather ") == "what's the weather"
+    assert len(topic) <= notices.TOPIC_MAX_CHARS == 40
+    assert topic.endswith("please…")
+    assert notices.topic("  what's\n the   weather ") == "what's the weather"
+    assert notices.topic("how is my portfolio doing compared with the market today") == (
+        "how is my portfolio doing compared with…"
+    )
 
 
 def test_task_summary_says_each_state_and_promises_a_report_for_open_ones() -> None:
@@ -450,8 +522,8 @@ def test_task_summary_says_each_state_and_promises_a_report_for_open_ones() -> N
     done = dataclasses.replace(task, number=3, state="completed")
 
     assert notices.task_summary([task, done]) == (
-        "Task 2 on the general agent, \"what's the weather\", is queued, and I'll tell you when it finishes. "
-        'Task 3 on the general agent, "what\'s the weather", has finished.'
+        "\"what's the weather\" on the general agent is queued, and I'll tell you when it finishes. "
+        '"what\'s the weather" on the general agent has finished.'
     )
 
 

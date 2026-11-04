@@ -49,6 +49,11 @@ class TaskReport:
     """A task's outcome as Hermes reported it, for the model to tell the people on the call."""
 
     task_number: int
+    """The task's internal id, for the model only; people hear the task by ``topic``."""
+
+    topic: str
+    """How the task is named aloud (``notices.topic``)."""
+
     profile: str
     """The Hermes profile (agent) that ran the task."""
 
@@ -139,8 +144,9 @@ def split_text(text: str, max_chars: int) -> list[str]:
 
 
 def json_report(report: TaskReport, cap_tokens: int) -> str:
-    """``report`` as one JSON object: ``type`` (``REPORT_TYPE``), ``task``, ``profile``, ``status``,
-    ``report`` (Hermes's text), and ``note`` (``REPORT_NOTE``), within ``cap_tokens``.
+    """``report`` as one JSON object: ``type`` (``REPORT_TYPE``), ``task`` (its internal id), ``topic``,
+    ``profile``, ``status``, ``report`` (Hermes's text), and ``note`` (``REPORT_NOTE``), within
+    ``cap_tokens``.
 
     When the whole object does not fit, the report text is cut short with ``TRUNCATION_MARKER``
     (``fit_text``) to the longest cut whose escaped JSON fits; a cap too small for the object itself
@@ -152,6 +158,7 @@ def json_report(report: TaskReport, cap_tokens: int) -> str:
         fields = {
             "type": REPORT_TYPE,
             "task": report.task_number,
+            "topic": report.topic,
             "profile": report.profile,
             "status": report.status,
             "report": text,

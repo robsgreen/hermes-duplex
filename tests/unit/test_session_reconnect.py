@@ -244,7 +244,7 @@ async def test_provider_reconnect_reseeds_and_announces_the_running_task(
     summary = second.args["history_summary"]
     assert "user: how is my portfolio doing" in summary
     assert "assistant: Let me check." in summary
-    assert 'Task 1 on the stock-picker agent, "how is my portfolio doing", is running' in summary
+    assert '"how is my portfolio doing" (internal id 1) on the stock-picker agent is running' in summary
     assert second.args["instructions"] == first.args["instructions"]
     assert harness.reconnect_waits_s == [0.5]
     # The new provider session never requested call_1, so the result is spoken as a notice.

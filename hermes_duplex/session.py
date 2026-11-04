@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -25,6 +25,7 @@ from .people import PermissionChecker
 from .prompts.base import SENTENCE_END, TaskReport
 from .prompts.notices import (
     LOST_TRACK,
+    NO_SUCH_TASK,
     NO_TASK_GIVEN,
     NOT_HEARD,
     NOTHING_TO_CANCEL,
@@ -34,7 +35,6 @@ from .prompts.notices import (
     cancelled_while_away,
     failed_while_away,
     finished_while_away,
-    no_such_task,
     queued_behind,
     refusal,
     task_already_ended,
@@ -42,6 +42,7 @@ from .prompts.notices import (
     task_failed,
     task_started,
     task_summary,
+    topic,
     unknown_tool,
     which_to_cancel,
 )
@@ -116,15 +117,73 @@ MAX_SHORT_PROVIDER_SESSIONS = 3
 that accepts the connection and drops it at once would otherwise be reconnected forever."""
 
 _NAMED_TASK = re.compile(r"\btask\s+(?:number\s+|#\s*)?(\d+)\b", re.IGNORECASE)
-"""A task named by its number: "task 2", "task number 2", "task #2"."""
+"""A task named by its number: "task 2", "task number 2", "task #2". Accepted, never advertised."""
 
-_ONLY_A_NUMBER = re.compile(r"\s*(?:number\s+|#\s*)?(\d+)\s*[.!?]?\s*", re.IGNORECASE)
-"""A request that is a task number and nothing else ("2", "number 2.")."""
+_WORD = re.compile(r"[a-z0-9]+")
+"""One word of a request, once lowercased; apostrophes and other punctuation split words."""
 
-_CANCEL_OR_STATUS_SENTENCE = re.compile(
-    r"\b(?:cancel(?:l?ing)?|check(?:ing)?(?:\s+on)?)\s+task\s+(\d+)\b", re.IGNORECASE
+_FILLER_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "all",
+        "an",
+        "and",
+        "any",
+        "are",
+        "be",
+        "can",
+        "cancel",
+        "check",
+        "could",
+        "do",
+        "does",
+        "doing",
+        "for",
+        "going",
+        "has",
+        "hey",
+        "how",
+        "i",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "one",
+        "please",
+        "question",
+        "request",
+        "so",
+        "status",
+        "still",
+        "stop",
+        "task",
+        "tell",
+        "that",
+        "the",
+        "thing",
+        "this",
+        "to",
+        "want",
+        "was",
+        "what",
+        "which",
+        "you",
+        "your",
+        "d",
+        "ll",
+        "m",
+        "re",
+        "s",
+        "t",
+        "ve",
+    }
 )
-"""What the assistant says when it acts on a task by number: "Cancelling task 3", "Checking on task 3"."""
+"""Words that say nothing about a task's topic: the ones status and cancel requests are made of, and
+the ends of contractions ("what's", "don't")."""
 
 
 class Router(Protocol):
@@ -265,11 +324,12 @@ class VoiceSession:
     instructions, each result, and the reconnect summary come from the provider's ``prompter``.
 
     Tool-style providers get exactly one function output per call. A ``delegate`` call is answered
-    at once with ``DELEGATE_RECEIPT``, before routing, so the model can go on talking; the task's
-    number follows in the spoken start notice, since tasks are numbered only once routed and
-    permitted. ``task_status`` and ``cancel_task`` calls are answered from the ``TaskTracker`` in the
-    function output itself. A call nobody can be credited with is answered with ``"not_started"`` and
-    a question for the model to ask.
+    at once with ``DELEGATE_RECEIPT``, before routing, so the model can go on talking; the spoken
+    start notice follows once the task is routed and permitted. ``task_status`` and ``cancel_task``
+    calls are answered from the ``TaskTracker`` in the function output itself, and name the task by
+    ``task_id`` or by the user's words (``about``); see ``_resolve_task``. People hear a task only by
+    its topic (``notices.topic``); its number is an internal id. A call nobody can be credited with is
+    answered with ``"not_started"`` and a question for the model to ask.
 
     Results and notices are announcements, spoken one at a time in the order they arise. When the
     provider emits speech events, each waits for the floor: the model idle, playback drained, and
@@ -299,8 +359,8 @@ class VoiceSession:
     the ``TaskTracker`` (their Hermes runs go on), and each task whose end it had not announced yet is
     left untold. The session adopts a person's unattended and untold tasks when it first hears that
     person and whenever another session leaves some for a person it has heard, and follows each to its
-    end like its own. An end the person missed is announced as news ("While you were away, task 3
-    finished: …"); so is the end of an adopted run whose status could not be read.
+    end like its own. An end the person missed is announced as news ("While you were away, "how is my
+    portfolio doing" finished: …"); so is the end of an adopted run whose status could not be read.
 
     ``clock`` returns seconds and times the progress throttle and the announcements' wait for the
     floor. ``sleep`` is how the session waits between reconnect attempts (tests pass a recorder).
@@ -638,6 +698,8 @@ class VoiceSession:
             return
         task_id = args.get("task_id")
         number = task_id if isinstance(task_id, int) and not isinstance(task_id, bool) else None
+        about = args.get("about")
+        words = about if isinstance(about, str) else ""
         if request.target == DELEGATE_TOOL:
             text = args.get("task")
             if not isinstance(text, str) or not text.strip():
@@ -648,9 +710,13 @@ class VoiceSession:
             hint = args.get("profile_hint")
             await self._delegate(request, text.strip(), speaker, hint if isinstance(hint, str) else None)
         elif request.target == TASK_STATUS_TOOL:
-            await self._answer(request, {"status": "ok", "message": self._status(speaker, number)})
+            message = self._status(speaker, words, number)
+            tasks = [_tool_entry(task) for task in self._tracker.active_for(speaker)]
+            await self._answer(request, {"status": "ok", "message": message, "tasks": tasks})
         elif request.target == CANCEL_TASK_TOOL:
-            await self._answer(request, {"status": "ok", "message": await self._cancel(speaker, number)})
+            await self._answer(
+                request, {"status": "ok", "message": await self._cancel(speaker, words, number)}
+            )
         else:
             logger.warning("call %s is to the unknown tool %r", request.id, request.target)
             await self._answer(request, {"status": "not_started", "message": unknown_tool(request.target)})
@@ -743,12 +809,10 @@ class VoiceSession:
 
         decision = await self._router.route(text, speaker, history=history, hint=hint, permitted=permitted)
         if decision.profile == CONTROL_PROFILE:
-            active = {task.number for task in self._tracker.active_for(speaker)}
-            number = _task_number(text, context, active)
             if decision.control_intent == "cancel":
-                self._announce(await self._cancel(speaker, number))
+                self._announce(await self._cancel(speaker, text))
             else:
-                self._announce(self._status(speaker, number))
+                self._announce(self._status(speaker, text))
             return
 
         if not permitted(decision.profile):
@@ -782,18 +846,14 @@ class VoiceSession:
                 task.uuid,
             )
         except HermesApiError as error:
-            await self._end(task.number, _failure(task.number, error.reason), ref, away=False)
+            await self._end(task.number, _failure(task, error.reason), ref, away=False)
             return
 
         await self._transition(task.number, "queued" if start.queued else "running", run_id=start.run_id)
         ahead = self._tracker.ahead_of(task.number)
-        announcement = (
-            queued_behind(task.number, task.text, ahead.number)
-            if ahead
-            else task_started(task.number, task.profile, task.text)
-        )
+        announcement = queued_behind(task, ahead) if ahead else task_started(task)
         if self._capabilities["delegation_style"] == "tool":
-            self._announce(announcement)  # the call's receipt carried no task number; this does
+            self._announce(announcement)  # the call's receipt said only that it started; this says what
         else:
             await self._report_progress(ref, announcement)
         if start.run_id is None:
@@ -842,26 +902,24 @@ class VoiceSession:
                     case _:
                         pass  # "queued" and empty progress add nothing to what was announced
         except HermesApiError as error:
-            await self._end(task.number, _failure(task.number, error.reason), ref, away=away)
+            await self._end(task.number, _failure(task, error.reason), ref, away=away)
 
     def _ending(self, task: Task, event: RunEvent) -> _Ending:
         """How ``task`` ended, as the terminal ``event`` reports it: the prompter's result, or a
         failure or cancel notice."""
         match event.kind:
             case "completed":
-                report = TaskReport(task.number, task.profile, "completed", event.text or "")
-                result = self._provider.prompter.result(report, self._result_cap_tokens)
-                return _Ending("completed", result, finished_while_away(task.number, result))
-            case "cancelled":
-                return _Ending("cancelled", task_cancelled(task.number), cancelled_while_away(task.number))
-            case "failed":
-                return _failure(task.number, event.text or "Hermes reported an error")
-            case _:
-                return _Ending(
-                    "unknown",
-                    task_failed(task.number, LOST_TRACK),
-                    failed_while_away(task.number, LOST_TRACK),
+                report = TaskReport(
+                    task.number, topic(task.text), task.profile, "completed", event.text or ""
                 )
+                result = self._provider.prompter.result(report, self._result_cap_tokens)
+                return _Ending("completed", result, finished_while_away(task, result))
+            case "cancelled":
+                return _Ending("cancelled", task_cancelled(task), cancelled_while_away(task))
+            case "failed":
+                return _failure(task, event.text or "Hermes reported an error")
+            case _:
+                return _Ending("unknown", task_failed(task, LOST_TRACK), failed_while_away(task, LOST_TRACK))
 
     async def _end(self, number: int, ending: _Ending, ref: DelegationRef, *, away: bool) -> None:
         """Move task ``number`` to ``ending``'s terminal state and announce it for ``ref``: its
@@ -883,22 +941,26 @@ class VoiceSession:
         if not (ending.state == "cancelled" and self._tracker.stopping(number)):
             self._announce_end(number, ending.away_notice if away else ending.notice, ending.away_notice, ref)
 
-    def _status(self, speaker: str, number: int | None) -> str:
-        """The spoken status of ``speaker``'s task ``number``, or of all their open tasks when None."""
+    def _status(self, speaker: str, words: str, task_id: int | None = None) -> str:
+        """The spoken status of the task of ``speaker``'s that ``task_id`` or ``words`` names
+        (``_resolve_task``), or of all their open tasks when they name none."""
+        active = self._tracker.active_for(speaker)
+        number = _resolve_task(active, words, task_id)
         if number is None:
-            return task_summary(self._tracker.active_for(speaker))
+            return task_summary(active)
         task = self._tracker.get(number)
         if task is None or task.person != speaker:
-            return no_such_task(number)
+            return NO_SUCH_TASK
         return task_summary([task])
 
-    async def _cancel(self, speaker: str, number: int | None) -> str:
-        """Cancel ``speaker``'s task ``number``, or when None their one running task, and return the
-        notice that says how it went; with None and several running, cancel nothing and ask which."""
+    async def _cancel(self, speaker: str, words: str, task_id: int | None = None) -> str:
+        """Cancel the task of ``speaker``'s that ``task_id`` or ``words`` names (``_resolve_task``), and
+        return the notice that says how it went; when they name none of several open tasks, cancel
+        nothing and ask which."""
+        active = self._tracker.active_for(speaker)
+        number = _resolve_task(active, words, task_id)
         if number is None:
-            running = [task for task in self._tracker.active_for(speaker) if task.state == "running"]
-            if len(running) > 1:
-                return which_to_cancel(running)
+            return which_to_cancel(active) if active else NOTHING_TO_CANCEL
         try:
             task = await self._tracker.cancel(speaker, self._hermes.stop, number)
         except HermesApiError as error:
@@ -906,7 +968,7 @@ class VoiceSession:
         if task is None:
             return NOTHING_TO_CANCEL
         await self._notify_tasks()
-        return task_cancelled(task.number) if task.state == "cancelled" else task_already_ended(task.number)
+        return task_cancelled(task) if task.state == "cancelled" else task_already_ended(task)
 
     def _announce(self, text: str, ref: DelegationRef | None = None) -> None:
         """Queue ``text`` for the model to speak: ``ref``'s result, or a notice when ``ref`` is None.
@@ -1009,22 +1071,39 @@ def _ref(task: Task) -> DelegationRef:
     return DelegationRef(delegation_id=task.delegation_id, call_id=task.call_id, task_id=task.number)
 
 
-def _failure(number: int, reason: str) -> _Ending:
-    """Task ``number`` failed; ``reason`` is a short spoken explanation."""
-    return _Ending("failed", task_failed(number, reason), failed_while_away(number, reason))
+def _failure(task: Task, reason: str) -> _Ending:
+    """``task`` failed; ``reason`` is a short spoken explanation."""
+    return _Ending("failed", task_failed(task, reason), failed_while_away(task, reason))
 
 
-def _task_number(text: str, context: str | None, active: Collection[int]) -> int | None:
-    """The task number a status or cancel request names, or None when it names none.
+def _tool_entry(task: Task) -> dict[str, Any]:
+    """``task`` as a ``task_status`` function output lists it: its internal ``id`` for later calls,
+    and the ``topic``, ``agent``, and ``state`` the model speaks from."""
+    return {"id": task.number, "topic": topic(task.text), "agent": task.profile, "state": task.state}
 
-    The request ``text`` names one as "task N" ("cancel task 2"), or by being just the number; other
-    numbers in it ("top 5 stocks") are not task numbers. Otherwise ``context``, what the assistant
-    said just before handing the request off, names one when it says it cancels or checks task N
-    ("Cancelling task 3.") and N is one of ``active``, the speaker's queued and running tasks: a live
-    delegation carries no arguments, so the model names the task it means there.
+
+def _resolve_task(active: Sequence[Task], words: str, task_id: int | None = None) -> int | None:
+    """The number of the task a status or cancel request means, or None when it cannot tell.
+
+    ``active`` are the speaker's queued and running tasks; ``words`` are what the request says about
+    the task (the user's request, or a tool call's ``about``), and ``task_id`` a tool call's id. In
+    order: ``task_id``; a "task N" in ``words`` (other numbers, as in "top 5 stocks", are not task
+    numbers); the one task in ``active`` whose request shares more topic words with ``words`` than any
+    other does; the only task in ``active``. The first two may name a task that is not active.
     """
-    match = _NAMED_TASK.search(text) or _ONLY_A_NUMBER.fullmatch(text)
-    if match:
-        return int(match.group(1))
-    said = _CANCEL_OR_STATUS_SENTENCE.search(context) if context else None
-    return int(said.group(1)) if said and int(said.group(1)) in active else None
+    if task_id is not None:
+        return task_id
+    if named := _NAMED_TASK.search(words):
+        return int(named.group(1))
+    wanted = _topic_words(words)
+    scores = sorted(((len(wanted & _topic_words(task.text)), task.number) for task in active), reverse=True)
+    if len(scores) > 1 and scores[0][0] > scores[1][0]:
+        return scores[0][1]  # a clear winner: more shared words than any other task
+    return active[0].number if len(active) == 1 else None
+
+
+def _topic_words(text: str) -> set[str]:
+    """The words of ``text`` that can tell one task's topic from another's: lowercased, without
+    ``_FILLER_WORDS``, and with a plural "s" dropped ("stocks"); "Tesla's" is "tesla" and a filler "s"."""
+    words = (word for word in _WORD.findall(text.lower()) if word not in _FILLER_WORDS)
+    return {word.removesuffix("s") if len(word) > 3 else word for word in words} - _FILLER_WORDS
