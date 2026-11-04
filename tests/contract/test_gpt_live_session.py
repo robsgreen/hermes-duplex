@@ -13,14 +13,16 @@ import numpy as np
 import pytest
 import yaml
 
+from hermes_duplex import session as session_module
 from hermes_duplex.audio.frames import bytes_to_ms, frame_samples, silent_frame
 from hermes_duplex.config import load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.providers.gpt_live.adapter import GptLiveProvider
-from hermes_duplex.providers.gpt_live.prompt import frame_result
+from hermes_duplex.providers.gpt_live.prompt import GptLivePrompter, frame_result
 from hermes_duplex.router.base import ControlIntent, RouteDecision
+from hermes_duplex.service import prompt_context
 from hermes_duplex.session import VoiceSession
 from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.base import InputFrame
@@ -75,6 +77,7 @@ class _QueueConversation:
     """A ``Conversation`` whose input frames the test feeds; it records playback and flushes."""
 
     id = "queue-1"
+    person: str | None = None
 
     def __init__(self) -> None:
         self._frames: asyncio.Queue[InputFrame | None] = asyncio.Queue()
@@ -149,7 +152,8 @@ class _Harness:
         self.tracker = TaskTracker(tmp_path / "home")
         self.conversation = _QueueConversation()
         self._hermes = HermesApiClient(api.api_base, KEYS.get, sleep=lambda _s: asyncio.sleep(0.01))
-        self._permissions = PermissionChecker(_config(tmp_path))
+        self.config = _config(tmp_path)
+        self._permissions = PermissionChecker(self.config)
         self.active_profiles = _active_profiles(tmp_path, self._permissions)
         self._run: asyncio.Task[None] | None = None
 
@@ -163,6 +167,8 @@ class _Harness:
             tracker=self.tracker,
             permissions=self._permissions,
             active_profiles=self.active_profiles,
+            prompt_context_for=lambda profile: prompt_context(self.config, profile),
+            default_profile=self.config.router.default_profile,
             clock=clock,
         )
         self._run = asyncio.create_task(session.run())
@@ -187,7 +193,8 @@ class _Harness:
 
 
 def _active_profiles(tmp_path: Path, permissions: PermissionChecker) -> ActiveProfiles:
-    """Everyone on their default profile: rob on stock-picker, alex on general."""
+    """Everyone on stock-picker, the conversation's default profile too, so hearing someone does not
+    restart the provider session unless a test switches someone first."""
     config = _config(tmp_path)
     return ActiveProfiles(tmp_path / "home" / "duplex" / "active_profiles.json", permissions, config)
 
@@ -196,14 +203,14 @@ def _config(tmp_path: Path) -> Any:
     raw = {
         "hermes": {"api_base": "http://127.0.0.1:8642"},
         "provider": {"name": "fake"},
-        "router": {"backend": "knn"},
+        "router": {"backend": "knn", "default_profile": "stock-picker"},
         "profiles": {
             "general": {"description": "Anything else", "examples": ["what's the weather"]},
             "stock-picker": {"description": "Portfolio and stocks", "examples": ["how's my portfolio"]},
         },
         "people": {
             "rob": {"discord_id": "123", "profiles": ["*"], "default_profile": "stock-picker"},
-            "alex": {"discord_id": "456", "profiles": ["general"]},
+            "alex": {"discord_id": "456", "profiles": ["*"]},
         },
     }
     path = tmp_path / "duplex.yaml"
@@ -356,7 +363,7 @@ async def test_overlapping_speakers_get_their_own_tasks(tmp_path: Path, api: Fak
             ("what's the weather", "alex"),
         ]
         sessions = [request.body["session_id"] for request in api.requests_to("POST", "/runs")]
-        assert sessions == ["duplex-rob-stock-picker", "duplex-alex-general"]
+        assert sessions == ["duplex-rob-stock-picker", "duplex-alex-stock-picker"]
 
 
 async def test_credit_waits_for_input_past_the_offset(tmp_path: Path, api: FakeHermesApi) -> None:
@@ -413,3 +420,55 @@ async def test_gpt_live_barge_in_flushes_within_one_tick(tmp_path: Path, api: Fa
             "session.start",
             "session.input_audio.append",
         }, "GPT-Live gets no truncate or other event for a barge-in"
+
+
+async def test_a_context_change_restarts_gpt_live_with_new_instructions_and_the_task_still_reports(
+    tmp_path: Path, api: FakeHermesApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A single short session would end the call, so the restart must not count as one.
+    monkeypatch.setattr(session_module, "MAX_SHORT_PROVIDER_SESSIONS", 1)
+    run = RunScript(events=[{"event": "run.started"}])  # runs until the test completes it
+    api.run_scripts.append(run)
+    script = [
+        *STARTED,
+        _input("what's the weather", 1000, 1800),
+        _delegation("del_1", 1900),
+        {"wait_for": "session.close"},
+        {"close": {}},
+        {"wait_for": "session.start"},
+        {"type": "session.started", "event_id": "event_2"},
+    ]
+    async with _session(tmp_path, api, script) as harness:
+        # Alex is on stock-picker, as the conversation is; Rob has switched to general.
+        await harness.active_profiles.switch("rob", "general")
+        harness.conversation.feed(4000, _voiced(("alex", 1000, 1800)))
+        harness.start()
+        await harness.wait_for(lambda: bool(harness.sent("session.thinking.append")))
+
+        harness.conversation.feed(200, _voiced(("rob", 0, 1_000_000)))
+        await harness.wait_for(lambda: len(harness.sent("session.start")) == 2)
+        run.events.append({"event": "run.completed", "output": "Sunny."})
+        await harness.wait_for(lambda: bool(harness.sent("session.commentary.append")))
+
+        first, second = harness.server.connections
+        assert [event["type"] for event in first.events if event["type"] != "session.input_audio.append"] == [
+            "session.start",
+            "session.thinking.append",
+            "session.close",
+        ]
+        start = second.events[0]
+        assert start["session"]["instructions"] == GptLivePrompter().instructions(
+            prompt_context(harness.config, "general")
+        )
+        [summary] = start["session"]["input"]
+        assert (
+            '"what\'s the weather" (internal id 1) on the stock-picker agent is running'
+            in (summary["content"][0]["text"])
+        )
+        assert harness.sent("session.commentary.append") == [
+            {
+                "type": "session.commentary.append",
+                "content": frame_result("stock-picker", "Sunny.", 500),
+                "delegation_id": None,
+            }
+        ]

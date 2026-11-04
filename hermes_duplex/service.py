@@ -168,6 +168,8 @@ class DuplexService:
             tracker=self._tracker,
             permissions=self._permissions,
             active_profiles=self._active_profiles,
+            prompt_context_for=lambda profile: prompt_context(self._config, profile),
+            default_profile=self._config.router.default_profile,
             voice=self._config.provider.voice,
             pacer_lead_ms=self._config.audio.pacer_lead_ms,
             gate_threshold_dbfs=self._config.audio.gate_threshold_dbfs,
@@ -247,14 +249,20 @@ def _discord_transport(
     )
 
 
-def prompt_context(config: Config) -> PromptContext:
-    """What every provider's prompt is written from: the ``assistant`` section and the profiles."""
+def prompt_context(config: Config, active_profile: str | None = None) -> PromptContext:
+    """What every provider's prompt is written from: the ``assistant`` section and the profiles, and,
+    when ``active_profile`` names a configured profile, that profile with its description and
+    ``voice_context`` as the one the instructions speak for. Raises ``KeyError`` for any other name."""
     assistant = config.assistant
+    active = config.profiles[active_profile] if active_profile is not None else None
     return PromptContext(
         assistant_name=assistant.name,
         persona=assistant.persona,
         backchannel=assistant.backchannel,
         profiles=tuple((name, profile.description) for name, profile in config.profiles.items()),
+        active_profile=active_profile,
+        active_profile_description=active.description if active is not None else None,
+        voice_context=active.voice_context if active is not None else None,
     )
 
 

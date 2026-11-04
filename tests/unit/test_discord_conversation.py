@@ -87,6 +87,10 @@ def _queued_audio_frames(source: discord.AudioSource) -> int:
     return count
 
 
+async def test_a_channel_conversation_has_no_signed_in_person(conversation: DiscordConversation) -> None:
+    assert conversation.person is None
+
+
 async def test_start_receives_and_plays_on_the_voice_client(
     conversation: DiscordConversation, channel: FakeVoiceChannel, receivers: ReceiverRecorder
 ) -> None:

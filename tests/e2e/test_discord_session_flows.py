@@ -27,6 +27,7 @@ from hermes_duplex.providers.fake.adapter import FakeProvider
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.router.composite import CompositeRouter
 from hermes_duplex.router.factory import build_backends
+from hermes_duplex.service import prompt_context
 from hermes_duplex.session import RESULT_CAP_TOKENS, VoiceSession
 from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.discord.bot import DiscordConversation
@@ -164,6 +165,8 @@ async def test_request_is_credited_to_who_talked_most_and_a_stranger_is_never_he
         tracker=tracker,
         permissions=permissions,
         active_profiles=active_profiles,
+        prompt_context_for=lambda profile: prompt_context(config, profile),
+        default_profile=config.router.default_profile,
     )
     conversation.start()
     running = asyncio.create_task(session.run())

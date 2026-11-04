@@ -48,6 +48,13 @@ class Conversation(Protocol):
 
     id: str
 
+    @property
+    def person(self) -> str | None:
+        """The name of the one person signed in to the conversation (web), whose active profile the
+        voice prompt starts on; None when anyone allowed may join (Discord), and the prompt starts on
+        the default profile."""
+        ...
+
     def frames(self) -> AsyncIterator[InputFrame]:
         """Yield one ``InputFrame`` per 20 ms tick until the conversation ends."""
         ...

@@ -17,9 +17,10 @@ from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.notices import NOT_HEARD, PROVIDER_LOST
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
-from hermes_duplex.providers.gpt_live.prompt import frame_result
+from hermes_duplex.providers.gpt_live.prompt import GptLivePrompter, frame_result
 from hermes_duplex.providers.wire import WireError
 from hermes_duplex.router.base import ControlIntent, RouteDecision
+from hermes_duplex.service import prompt_context
 from hermes_duplex.session import PROVIDER_LOST_REASON, VoiceSession
 from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.base import InputFrame
@@ -69,6 +70,7 @@ class _QueueConversation:
     transport."""
 
     id = "queue-1"
+    person: str | None = None
 
     def __init__(self) -> None:
         self._frames: asyncio.Queue[InputFrame | None] = asyncio.Queue()
@@ -129,7 +131,8 @@ class _Harness:
         self.tracker = TaskTracker(tmp_path / "home")
         self.conversation = _QueueConversation()
         self.reconnect_waits_s: list[float] = []
-        self._permissions = PermissionChecker(_config(tmp_path))
+        self.config = _config(tmp_path)
+        self._permissions = PermissionChecker(self.config)
         self.active_profiles = _active_profiles(tmp_path, self._permissions)
         self._hermes = HermesApiClient(api.api_base, KEYS.get, sleep=lambda _s: asyncio.sleep(0.01))
         self._run: asyncio.Task[None] | None = None
@@ -149,6 +152,8 @@ class _Harness:
             tracker=self.tracker,
             permissions=self._permissions,
             active_profiles=self.active_profiles,
+            prompt_context_for=lambda profile: prompt_context(self.config, profile),
+            default_profile=self.config.router.default_profile,
             sleep=record_wait,
         )
         self._run = asyncio.create_task(session.run())
@@ -175,7 +180,8 @@ class _Harness:
 
 
 def _active_profiles(tmp_path: Path, permissions: PermissionChecker) -> ActiveProfiles:
-    """Everyone on their default profile: rob on stock-picker, alex on general."""
+    """Everyone on their default profile: rob on stock-picker, which the conversation also starts on,
+    and alex on general."""
     config = _config(tmp_path)
     return ActiveProfiles(tmp_path / "home" / "duplex" / "active_profiles.json", permissions, config)
 
@@ -184,7 +190,7 @@ def _config(tmp_path: Path) -> Any:
     raw = {
         "hermes": {"api_base": "http://127.0.0.1:8642"},
         "provider": {"name": "fake"},
-        "router": {"backend": "knn"},
+        "router": {"backend": "knn", "default_profile": "stock-picker"},
         "profiles": {
             "general": {"description": "Anything else", "examples": ["what's the weather"]},
             "stock-picker": {"description": "Portfolio and stocks", "examples": ["how's my portfolio"]},
@@ -192,6 +198,7 @@ def _config(tmp_path: Path) -> Any:
         "people": {
             "rob": {"discord_id": "123", "profiles": ["*"], "default_profile": "stock-picker"},
             "alex": {"discord_id": "456", "profiles": ["general"]},
+            "carol": {"discord_id": "789", "profiles": ["general"]},
         },
     }
     path = tmp_path / "duplex.yaml"
@@ -354,3 +361,38 @@ async def test_a_session_that_lasts_resets_the_count_of_short_ones(
     await asyncio.sleep(0.1)
 
     assert harness.conversation.closed_reason is None
+
+
+async def test_a_reconnect_after_a_context_change_renders_the_new_profile(harness: _Harness) -> None:
+    # The conversation starts on stock-picker; hearing alex moves it to general, then the socket drops.
+    script = [{"on_sent": "update_instructions", "event": {"type": "close", "reason": "connection_lost"}}]
+    harness.conversation.feed(400, _voiced("alex"))
+    harness.start(FakeProvider(script))
+
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    general = GptLivePrompter().instructions(prompt_context(harness.config, "general"))
+    first, second = harness.sent("connect")
+    assert first.args["instructions"] == GptLivePrompter().instructions(
+        prompt_context(harness.config, "stock-picker")
+    )
+    assert [call.args["text"] for call in harness.sent("update_instructions")] == [general]
+    assert second.args["instructions"] == general
+
+
+async def test_restarts_for_new_instructions_never_end_the_conversation_as_short_sessions(
+    harness: _Harness,
+) -> None:
+    # Each newly heard person moves the instructions to another profile, and the provider cannot
+    # replace them in place: three quick restarts in a row, which three short drops would not survive.
+    harness.start(FakeProvider(capabilities={"replaces_instructions": False}))
+    for connects, person in enumerate(("alex", "rob", "carol"), start=2):
+        harness.conversation.feed(100, _voiced(person))
+        await harness.wait_for(lambda connects=connects: len(harness.sent("connect")) == connects)
+
+    await asyncio.sleep(0.1)
+    assert harness.conversation.closed_reason is None
+    profiles = ["stock-picker", "general", "stock-picker", "general"]
+    assert [call.args["instructions"] for call in harness.sent("connect")] == [
+        GptLivePrompter().instructions(prompt_context(harness.config, profile)) for profile in profiles
+    ]

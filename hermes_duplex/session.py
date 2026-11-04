@@ -23,7 +23,7 @@ from .config import AudioConfig
 from .dispatch.hermes_api import HermesApiClient, HermesApiError, RunEvent
 from .people import PermissionChecker
 from .profiles import ActiveProfiles
-from .prompts.base import SENTENCE_END, TaskReport
+from .prompts.base import SENTENCE_END, PromptContext, TaskReport
 from .prompts.notices import (
     LOST_TRACK,
     NO_SUCH_TASK,
@@ -373,6 +373,17 @@ class VoiceSession:
     reach Hermes. The model's instructions, each result, and the reconnect summary come from the
     provider's ``prompter``.
 
+    The instructions speak for one active profile at a time: the session's current prompt context
+    (``prompt_context_for`` that profile), which every connect and reconnect renders. It starts on the
+    active profile of the conversation's signed-in ``person``, or on ``default_profile`` when the
+    conversation has none, and moves to a person's active profile when the session first hears that
+    person and it differs. When the context changes during a provider session, a provider that
+    ``replaces_instructions`` gets the new instructions in place (``update_instructions``); any other,
+    or one whose update fails, is restarted: closed and reconnected like a provider session that
+    ended, re-seeded with the reconnect summary, without counting toward the short-session limit.
+    Hermes tasks keep running through it. Hand-offs always run on the speaker's own active profile,
+    whatever the instructions speak for.
+
     Tool-style providers get exactly one function output per call. A ``delegate`` call is answered
     at once with ``DELEGATE_RECEIPT``, before routing, so the model can go on talking; the spoken
     start notice follows once the task is routed and permitted. ``task_status`` and ``cancel_task``
@@ -426,6 +437,8 @@ class VoiceSession:
         tracker: TaskTracker,
         permissions: PermissionChecker,
         active_profiles: ActiveProfiles,
+        prompt_context_for: Callable[[str], PromptContext],
+        default_profile: str,
         voice: str | None = None,
         pacer_lead_ms: int = 200,
         gate_threshold_dbfs: float = AudioConfig.gate_threshold_dbfs,
@@ -440,6 +453,7 @@ class VoiceSession:
         self._tracker = tracker
         self._permissions = permissions
         self._active_profiles = active_profiles
+        self._prompt_context_for = prompt_context_for
         self._voice = voice
         self._result_cap_tokens = result_cap_tokens
         self._clock = clock
@@ -478,6 +492,17 @@ class VoiceSession:
         self._announcements: asyncio.Queue[_Announcement] = asyncio.Queue()
         self._opened_s = 0.0
         """``time.monotonic()`` when the current provider session opened."""
+        person = conversation.person
+        self._prompt_context = prompt_context_for(
+            active_profiles.get(person) if person is not None else default_profile
+        )
+        """What the instructions should speak for now; its ``active_profile`` is never None."""
+        self._rendered_context: PromptContext | None = None
+        """The prompt context the open provider session's instructions were rendered from."""
+        self._instructions_lock = asyncio.Lock()
+        """Held while a provider session opens or its instructions change, so they never interleave."""
+        self._restarting = False
+        """Set when the session closed the provider itself to restart it with new instructions."""
 
     async def run(self) -> None:
         """Connect the provider and run until the conversation or the provider session ends.
@@ -514,12 +539,14 @@ class VoiceSession:
     async def _connect(self, summary: str | None) -> None:
         """Open a provider session re-seeded with ``summary`` (None: a new call) on a fresh timeline.
 
-        Everything placed on the previous provider session's timeline is forgotten, and work waiting
-        for that timeline to reach a point is woken to find it ended.
+        The instructions are rendered from the current prompt context. Everything placed on the
+        previous provider session's timeline is forgotten, and work waiting for that timeline to reach
+        a point is woken to find it ended.
         """
-        await self._provider.connect(
-            self._provider.prompter.instructions(self._provider.prompt_context), self._voice, summary
-        )
+        async with self._instructions_lock:
+            context = self._prompt_context
+            await self._provider.connect(self._provider.prompter.instructions(context), self._voice, summary)
+            self._rendered_context = context
         async with self._input_advanced:
             self._connection += 1
             self._sent_ms = 0
@@ -567,6 +594,7 @@ class VoiceSession:
                     await self._barge_in()
             for person in frame.voiced_speakers - self._people_heard:
                 self._people_heard.add(person)
+                self._change_prompt_context(self._active_profiles.get(person))
                 self._adopt_tasks(person)
             if not self._provider_open.is_set():
                 continue  # reconnecting: the new provider session starts with the input after it opens
@@ -692,7 +720,10 @@ class VoiceSession:
                         logger.info("voice provider session closed: %s", reason)
                     case _:
                         pass  # SessionReady needs no handling
-            short_sessions = short_sessions + 1 if self._ended_soon() else 0
+            if self._restarting:
+                self._restarting = False  # asked for, so neither short-lived nor a failure
+            else:
+                short_sessions = short_sessions + 1 if self._ended_soon() else 0
             if short_sessions >= MAX_SHORT_PROVIDER_SESSIONS:
                 logger.error(
                     "the voice provider ended %d sessions in a row within %g s of opening; giving up",
@@ -704,6 +735,40 @@ class VoiceSession:
                 break
         # The conversation has no voice of its own to say it with.
         await self._conversation.notify({"transcript": {"speaker": "assistant", "text": PROVIDER_LOST}})
+
+    def _change_prompt_context(self, profile: str) -> None:
+        """Make ``profile`` the one the instructions speak for, and bring the open provider session's
+        instructions up to date in the background; nothing happens when it already is."""
+        if profile == self._prompt_context.active_profile:
+            return
+        logger.info("voice instructions now speak for profile %s", profile)
+        self._prompt_context = self._prompt_context_for(profile)
+        self._spawn(self._apply_prompt_context())
+
+    async def _apply_prompt_context(self) -> None:
+        """Give the open provider session instructions rendered from the current prompt context.
+
+        A provider that ``replaces_instructions`` gets them in place. Any other, or one whose update
+        fails, is closed for ``_handle_events`` to reconnect as a restart. Does nothing when no
+        provider session is open (the next connect renders the current context) or when the open one
+        already has them.
+        """
+        async with self._instructions_lock:
+            context = self._prompt_context
+            if not self._provider_open.is_set() or context == self._rendered_context:
+                return
+            if self._capabilities["replaces_instructions"]:
+                try:
+                    await self._provider.update_instructions(self._provider.prompter.instructions(context))
+                except Exception:
+                    logger.exception("could not update the voice instructions; restarting the provider")
+                else:
+                    self._rendered_context = context
+                    return
+            logger.info("restarting the voice provider for profile %s", context.active_profile)
+            self._restarting = True
+            self._provider_open.clear()
+            await self._provider.close()
 
     def _ended_soon(self) -> bool:
         """Whether the provider session that just ended was short-lived."""

@@ -100,6 +100,8 @@ class DiscordConversation:
         """``voice_client`` must be connected. ``input_rate`` and ``output_rate`` are the provider's
         mono sample rates in Hz; ``play`` accepts only ``output_rate``."""
         self.id = conversation_id
+        self.person: str | None = None
+        """Always None: everyone allowed in the channel shares the conversation."""
         self._voice_client: discord.VoiceClient | None = voice_client
         self._channel: VocalGuildChannel = voice_client.channel
         self._permissions = permissions

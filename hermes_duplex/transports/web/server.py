@@ -62,7 +62,9 @@ class WebConversation:
         self, conversation_id: str, person: Person, socket: web.WebSocketResponse, audio: AudioConfig
     ) -> None:
         self.id = conversation_id
-        self.person = person
+        self.signed_in = person
+        """The signed-in person's entry in config's ``people``."""
+        self.person = person.name
         self._socket = socket
         self._gate_threshold_dbfs = audio.gate_threshold_dbfs
         self._carry = FrameCarry(RATE)
@@ -122,7 +124,7 @@ class WebConversation:
                 InputFrame(
                     pcm16_mono=pcm,
                     rate=RATE,
-                    voiced_speakers=frozenset({self.person.name}) if voiced else frozenset(),
+                    voiced_speakers=frozenset({self.person}) if voiced else frozenset(),
                     t_ms=self._frames_received * FRAME_MS,
                 )
             )

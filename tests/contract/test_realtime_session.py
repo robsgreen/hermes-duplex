@@ -20,9 +20,11 @@ from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.base import TaskReport, json_report
 from hermes_duplex.prompts.notices import NO_SUCH_TASK, task_summary, which_to_cancel
-from hermes_duplex.providers.realtime.adapter import RealtimeApiProvider
+from hermes_duplex.providers.realtime.adapter import Dialect, RealtimeApiProvider
 from hermes_duplex.providers.realtime.openai.dialect import OPENAI
+from hermes_duplex.providers.realtime.xai.dialect import XAI
 from hermes_duplex.router.base import ControlIntent, RouteDecision
+from hermes_duplex.service import prompt_context
 from hermes_duplex.session import ANNOUNCEMENT_MAX_WAIT_S, VoiceSession
 from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.base import InputFrame
@@ -99,6 +101,7 @@ class _QueueConversation:
     """A ``Conversation`` whose input frames the test feeds; it records when playback starts and flushes."""
 
     id = "queue-1"
+    person: str | None = None
 
     def __init__(self) -> None:
         self._frames: asyncio.Queue[InputFrame | None] = asyncio.Queue()
@@ -191,14 +194,17 @@ class _Harness:
         self.tracker = TaskTracker(tmp_path / "home")
         self.conversation = _QueueConversation()
         self._hermes = HermesApiClient(api.api_base, KEYS.get, sleep=lambda _s: asyncio.sleep(0.01))
-        self._permissions = PermissionChecker(_config(tmp_path))
+        self.config = _config(tmp_path)
+        self._permissions = PermissionChecker(self.config)
         self.active_profiles = _active_profiles(tmp_path, self._permissions)
         self._run: asyncio.Task[None] | None = None
         self._answered_requests = 0
+        self.dialect = OPENAI
+        """The Realtime dialect ``start`` speaks."""
 
     async def start(self) -> None:
         provider = RealtimeApiProvider(
-            "sk-test-0123456789abcdef", dialect=OPENAI, url=f"{self.server.url}/v1/realtime"
+            "sk-test-0123456789abcdef", dialect=self.dialect, url=f"{self.server.url}/v1/realtime"
         )
         session = VoiceSession(
             self.conversation,
@@ -208,6 +214,8 @@ class _Harness:
             tracker=self.tracker,
             permissions=self._permissions,
             active_profiles=self.active_profiles,
+            prompt_context_for=lambda profile: prompt_context(self.config, profile),
+            default_profile=self.config.router.default_profile,
             clock=self.clock,
         )
         self._run = asyncio.create_task(session.run())
@@ -608,3 +616,34 @@ async def test_reply_to_a_call_whose_response_a_person_cut_off_is_dropped_and_fr
             _done("resp_turn"),
         )
         await harness.wait_for(lambda: harness.announcements() == [STARTED_WEATHER], timeout_s=1)
+
+
+@pytest.mark.parametrize("dialect", [OPENAI, XAI], ids=["openai", "xai"])
+async def test_a_context_change_replaces_only_the_instructions_in_place(
+    tmp_path: Path, api: FakeHermesApi, dialect: Dialect
+) -> None:
+    # The conversation starts on general, the default profile; hearing Rob moves it to stock-picker.
+    async with FakeWsServer(STARTED) as server:
+        harness = _Harness(tmp_path, api, server)
+        harness.dialect = dialect
+        harness.conversation.feed(200, _rob)
+        try:
+            await harness.start()
+            await harness.wait_for(lambda: len(harness.sent("session.update")) == 2)
+        finally:
+            await harness.stop()
+
+    connect, update = harness.sent("session.update")
+    prompter = dialect.prompter
+    assert connect["session"]["instructions"] == prompter.instructions(
+        prompt_context(harness.config, "general")
+    )
+    assert "tools" in connect["session"]
+    assert update == {
+        "type": "session.update",
+        "session": dialect.instructions_config(
+            prompter.instructions(prompt_context(harness.config, "stock-picker"))
+        ),
+    }
+    assert "tools" not in update["session"]
+    assert len(server.connections) == 1

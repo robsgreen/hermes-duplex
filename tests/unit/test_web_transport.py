@@ -157,7 +157,7 @@ async def test_upgrade_with_query_token_signs_in_that_person(
     async with http.ws_connect(f"{server.base_url}/ws?token={ENV['TOKEN_ALEX']}") as socket:
         conversation = await server.next_conversation()
 
-        assert conversation.person.name == "alex"
+        assert conversation.person == conversation.signed_in.name == "alex"
         assert socket.protocol is None
 
 
@@ -167,7 +167,7 @@ async def test_upgrade_with_bearer_protocol_echoes_bearer(
     async with await _connect(server, http) as socket:
         conversation = await server.next_conversation()
 
-        assert conversation.person.name == "rob"
+        assert conversation.person == conversation.signed_in.name == "rob"
         assert conversation.id.startswith("web-rob-")
         assert socket.protocol == "bearer"
 

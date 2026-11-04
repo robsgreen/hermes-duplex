@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import yaml
 
+from hermes_duplex import service
 from hermes_duplex.audio.frames import silent_frame
 from hermes_duplex.config import Config, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
@@ -57,6 +58,7 @@ class _MemoryConversation:
     """A ``Conversation`` that yields scripted frames, then waits until it is closed."""
 
     id = "memory-1"
+    person: str | None = None
 
     def __init__(self, frames: Sequence[InputFrame]) -> None:
         self._frames = frames
@@ -180,6 +182,7 @@ class _Harness:
         self.router = router or self.stub
         self.tracker = TaskTracker(tmp_path / "home")
         config = _config(tmp_path)
+        self.config = config
         self.permissions = PermissionChecker(config)
         self.active_profiles = _active_profiles(tmp_path, config)
         self.provider: FakeProvider | None = None
@@ -195,12 +198,14 @@ class _Harness:
         capabilities: Mapping[str, object] | None = None,
         clock: Callable[[], float] = time.monotonic,
         prompter: VoicePrompter | None = None,
-        prompt_context: PromptContext | None = None,
+        provider: FakeProvider | None = None,
+        person: str | None = None,
     ) -> None:
-        self.provider = FakeProvider(
-            script, capabilities=capabilities, prompter=prompter, prompt_context=prompt_context
-        )
+        """Run a session on ``provider``, or else a fake provider playing ``script`` with
+        ``capabilities`` and ``prompter``; ``person`` is who is signed in to the conversation."""
+        self.provider = provider or FakeProvider(script, capabilities=capabilities, prompter=prompter)
         self.conversation = _MemoryConversation(frames)
+        self.conversation.person = person
         self._hermes = HermesApiClient(self.api_base, KEYS.get, sleep=lambda _s: asyncio.sleep(0.01))
         session = VoiceSession(
             self.conversation,
@@ -210,6 +215,8 @@ class _Harness:
             tracker=self.tracker,
             permissions=self.permissions,
             active_profiles=self.active_profiles,
+            prompt_context_for=lambda profile: service.prompt_context(self.config, profile),
+            default_profile=self.config.router.default_profile,
             clock=clock,
         )
         self._run = asyncio.create_task(session.run())
@@ -254,6 +261,7 @@ def _config(tmp_path: Path, alex_profiles: Sequence[str] = ("general",)) -> Conf
             "stock-picker": {
                 "description": "Portfolio, holdings, stock research, trades",
                 "examples": ["how's my portfolio", "should I buy NVDA"],
+                "voice_context": "Say tickers letter by letter.",
             },
         },
         "people": {
@@ -320,7 +328,7 @@ class _RecordingPrompter:
 
     def instructions(self, ctx: PromptContext) -> str:
         self.contexts.append(ctx)
-        return f"instructions for {ctx.assistant_name}"
+        return f"instructions for {ctx.active_profile}"
 
     def result(self, report: TaskReport, cap_tokens: int) -> str:
         self.reports.append((report, cap_tokens))
@@ -330,25 +338,113 @@ class _RecordingPrompter:
         return "reseed"
 
 
+class _FailingUpdateProvider(FakeProvider):
+    """A fake provider whose instruction updates fail, as one whose socket broke would."""
+
+    async def update_instructions(self, text: str) -> None:
+        await super().update_instructions(text)
+        raise RuntimeError("the socket broke")
+
+
 async def test_instructions_and_results_come_from_the_providers_prompter(harness: _Harness) -> None:
     prompter = _RecordingPrompter()
-    context = PromptContext(assistant_name="Iris")
     harness.start(
         [_delegation(1500, "call_1", "how is my portfolio doing")],
         _frames(2000, _voiced("rob")),
         prompter=prompter,
-        prompt_context=context,
     )
 
     await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
 
     [connect] = harness.sent("connect")
-    assert connect.args["instructions"] == "instructions for Iris"
-    assert prompter.contexts == [context]
+    assert connect.args["instructions"] == "instructions for general"
+    assert prompter.contexts[0] == service.prompt_context(harness.config, "general")
     assert prompter.reports == [
         (TaskReport(1, "how is my portfolio doing", "stock-picker", "completed", "done"), 500)
     ]
     assert harness.texts("deliver_result") == ["result of task 1"]
+
+
+async def test_a_conversation_without_a_signed_in_person_starts_on_the_default_profile_and_moves_to_the_first_heard_persons(
+    harness: _Harness,
+) -> None:
+    prompter = _RecordingPrompter()
+    harness.start([], _frames(400, _voiced("rob")), prompter=prompter)
+
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))
+
+    [connect] = harness.sent("connect")
+    assert connect.args["instructions"] == "instructions for general"
+    assert harness.texts("update_instructions") == ["instructions for stock-picker"]
+    stock_picker = service.prompt_context(harness.config, "stock-picker")
+    assert prompter.contexts == [service.prompt_context(harness.config, "general"), stock_picker]
+    assert (stock_picker.active_profile_description, stock_picker.voice_context) == (
+        "Portfolio, holdings, stock research, trades",
+        "Say tickers letter by letter.",
+    )
+    assert len(harness.sent("connect")) == 1
+
+
+async def test_a_signed_in_conversation_starts_on_that_persons_active_profile(harness: _Harness) -> None:
+    await harness.active_profiles.switch("rob", "general")
+    prompter = _RecordingPrompter()
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        _frames(2000, _voiced("rob")),
+        prompter=prompter,
+        person="rob",
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    [connect] = harness.sent("connect")
+    assert connect.args["instructions"] == "instructions for general"
+    assert harness.sent("update_instructions") == []  # hearing rob changes nothing
+
+
+async def test_hearing_someone_on_the_profile_already_spoken_for_changes_nothing(harness: _Harness) -> None:
+    harness.start([_delegation(1500, "call_1", "what's the weather")], _frames(2000, _voiced("alex")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    assert harness.sent("update_instructions") == []
+    assert len(harness.sent("connect")) == 1
+
+
+async def test_without_instruction_replacement_a_context_change_restarts_the_provider_with_the_summary(
+    harness: _Harness,
+) -> None:
+    harness.start(
+        [],
+        _frames(400, _voiced("rob")),
+        capabilities={"replaces_instructions": False},
+        prompter=_RecordingPrompter(),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    assert harness.provider is not None
+    assert [call.method for call in harness.provider.calls] == ["connect", "close", "connect"]
+    first, second = harness.sent("connect")
+    assert (first.args["instructions"], first.args["history_summary"]) == ("instructions for general", None)
+    assert (second.args["instructions"], second.args["history_summary"]) == (
+        "instructions for stock-picker",
+        "reseed",
+    )
+    assert harness.conversation is not None and harness.conversation.closed_reason is None
+
+
+async def test_a_failed_instruction_update_falls_back_to_a_restart(
+    harness: _Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = _FailingUpdateProvider(prompter=_RecordingPrompter())
+    harness.start([], _frames(400, _voiced("rob")), provider=provider)
+
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    assert [call.method for call in provider.calls] == ["connect", "update_instructions", "close", "connect"]
+    assert harness.sent("connect")[1].args["instructions"] == "instructions for stock-picker"
+    assert "could not update the voice instructions" in caplog.text
 
 
 async def test_live_style_refs_carry_the_delegation_id(harness: _Harness) -> None:
