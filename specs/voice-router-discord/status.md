@@ -138,3 +138,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-04 17:22 - Task generation (amendment) done: 12 tasks/86 sub-tasks; handoff decisions in task-spec-amendment.md.notes. Phase -> Implementation (amendment); wave 1: 1.1, 1.2, 1.3
 - 2026-11-04 17:25 - Amendment task 1.2 verified (46 tests) and committed. Note for 1.1/config: reject a profile named 'ambiguous' (sentinel collision)
 - 2026-11-04 17:27 - Amendment task 1.3 verified and committed. Docs follow-up for 4.3: architecture.md lines ~286-292 (resolution rules, only_one_running, NO_SUCH_TASK, lead-in stripping). _status keeps reporting own finished task (accepted).
+- 2026-11-04 17:28 - Amendment task 1.1 verified (gate green, 891 default) and committed; wave 1 complete. Docs follow-up for 4.3: README People/Profiles sections.
