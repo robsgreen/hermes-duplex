@@ -147,3 +147,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-04 18:12 - Amendment task 3.3 verified (gate clean, default tests pass) and committed
 - 2026-11-04 18:31 - Amendment task 3.4 verified and committed (gate clean, 972 passed; coder real-Hermes e2e 4 passed). Gap: words after a switch target are dropped ('switch to stock-picker and check NVDA') -> assigned to 3.5: hand the rest to the new profile
 - 2026-11-04 18:48 - Amendment task 3.5 verified (scoped 484 passed, ruff clean) and committed by path while 4.1 runs; web e2e weather test now needs suggest_switch false -> sent to 4.1 coder
+- 2026-11-04 18:58 - Amendment task 4.1 verified (gate clean; 1035 passed x3 in worktree) and committed. Possible flake: test_realtime_session receipt 50 ms budget (coder saw 4/7 in isolated copy) -> assigned to 4.2
