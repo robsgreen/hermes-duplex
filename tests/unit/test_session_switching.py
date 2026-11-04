@@ -255,15 +255,16 @@ async def test_a_switch_request_switches_and_is_confirmed_without_routing_or_a_t
     harness.assert_nothing_ran()
 
 
+@pytest.mark.parametrize(("speaker", "offered"), [("rob", EVERY_PROFILE), ("alex", ["general"])])
 async def test_a_switch_to_a_name_that_fits_no_profile_asks_which_and_changes_nothing(
-    harness: _Harness,
+    harness: _Harness, speaker: str, offered: list[str]
 ) -> None:
-    harness.start([_handoff("call_1", "switch to finance")], _frames(1000, "rob"))
+    harness.start([_handoff("call_1", "switch to finance")], _frames(1000, speaker))
 
     await harness.wait_for(lambda: bool(harness.said()))
 
-    assert harness.said() == [which_profile(EVERY_PROFILE)]
-    assert harness.active_profiles.get("rob") == "general"
+    assert harness.said() == [which_profile(offered)]
+    assert harness.active_profiles.get(speaker) == "general"
     assert harness.sent("update_instructions") == []
     harness.assert_nothing_ran()
 

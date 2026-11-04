@@ -498,6 +498,44 @@ async def test_runs_on_the_speakers_active_profile(harness: _Harness, api: FakeH
     assert harness.stub.requests[0][3] == "general", "the router is told the active profile"
 
 
+async def test_two_people_on_different_profiles_each_run_on_their_own_and_the_prompt_follows_the_last_heard(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    def voiced(t_ms: int) -> Iterable[str]:
+        return ("rob",) if t_ms < 3000 else ("alex",)
+
+    def handoff(at_ms: int, call_id: str, task: str) -> dict[str, Any]:
+        # Anchored at the call's own offset: frames run ahead of the session, so arrival time would not be.
+        call = _delegation(at_ms, call_id, task)
+        call["event"]["offset_ms"] = at_ms
+        return call
+
+    harness.start(
+        [handoff(2000, "call_1", "how is my portfolio doing"), handoff(6500, "call_2", "what's the weather")],
+        _frames(8000, voiced),
+        prompter=_RecordingPrompter(),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("deliver_result")) == 2)
+
+    runs = {(start.path, start.body["session_id"]) for start in api.requests_to("POST", "/runs")}
+    assert runs == {
+        ("/p/stock-picker/v1/runs", "duplex-rob-stock-picker"),
+        ("/p/general/v1/runs", "duplex-alex-general"),
+    }
+    assert sorted((request[1], request[3]) for request in harness.stub.requests) == [
+        ("alex", "general"),
+        ("rob", "stock-picker"),
+    ]
+    connects = [call.args["instructions"] for call in harness.sent("connect")]
+    latest = [*connects, *harness.texts("update_instructions")][-1]
+    assert latest == "instructions for general"
+    assert (harness.active_profiles.get("rob"), harness.active_profiles.get("alex")) == (
+        "stock-picker",
+        "general",
+    )
+
+
 async def test_refuses_an_active_profile_the_person_may_no_longer_use(
     tmp_path: Path, api: FakeHermesApi, caplog: pytest.LogCaptureFixture
 ) -> None:

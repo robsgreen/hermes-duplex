@@ -388,3 +388,12 @@ Expected: in step 1 the log's `voice instructions now speak for profile` lines m
 `stock-picker` and B's on `general`, each in their own Hermes session, whatever the voice prompt
 speaks for. Step 3 is confirmed aloud and changes nothing for B. This is the documented limitation:
 the prompt speaks for one profile at a time, the last one a person was first heard on or switched to.
+
+### 23. A saved profile that is gone
+
+1. Switch to `stock-picker` by voice, then end the call.
+2. Remove `stock-picker` from the person's `profiles` in `duplex.yaml` (or from `profiles:`), then restart.
+3. Start a call and say anything.
+
+Expected: the person hears "You're back on general." once, when first heard, and not again later in
+the call or in the next call. The next request runs on `general`. Restore the config afterwards.
