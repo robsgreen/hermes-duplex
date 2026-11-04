@@ -150,3 +150,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-04 18:58 - Amendment task 4.1 verified (gate clean; 1035 passed x3 in worktree) and committed. Possible flake: test_realtime_session receipt 50 ms budget (coder saw 4/7 in isolated copy) -> assigned to 4.2
 - 2026-11-04 19:05 - Amendment task 4.3 committed (docs). Pending: test counts in README/AGENTS after 4.2. Known: GPT-Live + Decisions/Jev 'cancel that' may settle as status (pre-existing, checklist item 5)
 - 2026-11-04 19:32 - Amendment task 4.2 committed (e2e 5 passed per coder; receipt flake not reproducible, 5-10 ms); test counts updated. All amendment tasks done -> Testing
+- 2026-11-04 19:42 - Testing (amendment) PASS: static clean, 1037 default, 5 real-Hermes e2e, eval ok; tester added D4 + S2 tests; checklist §23 (L9) added. -> Review
