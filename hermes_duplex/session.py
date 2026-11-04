@@ -35,6 +35,7 @@ from .prompts.notices import (
     cancelled_while_away,
     failed_while_away,
     finished_while_away,
+    only_one_running,
     queued_behind,
     refusal,
     task_already_ended,
@@ -180,10 +181,56 @@ _FILLER_WORDS = frozenset(
         "s",
         "t",
         "ve",
+        # starts of negative contractions ("don't", "won't")
+        "aren",
+        "couldn",
+        "didn",
+        "doesn",
+        "don",
+        "isn",
+        "shouldn",
+        "wasn",
+        "won",
+        "wouldn",
+        # order and recency ("the latest one", "the other one")
+        "earlier",
+        "first",
+        "last",
+        "latest",
+        "new",
+        "newer",
+        "newest",
+        "next",
+        "old",
+        "older",
+        "oldest",
+        "other",
+        "previous",
+        "recent",
+        "second",
+        "third",
+        # dismissals and answers ("never mind", "just stop it now", "yes, cancel it")
+        "actually",
+        "just",
+        "mind",
+        "never",
+        "nevermind",
+        "no",
+        "now",
+        "ok",
+        "okay",
+        "sure",
+        "yeah",
+        "yes",
     }
 )
-"""Words that say nothing about a task's topic: the ones status and cancel requests are made of, and
-the ends of contractions ("what's", "don't")."""
+"""Words that say nothing about a task's topic: the ones status and cancel requests are made of, the
+pieces of contractions ("what's", "don't"), words that pick a task by order or age rather than topic,
+and dismissals and answers."""
+
+_NOT_PLURALS = frozenset({"news"})
+"""Words that end in "s" without being plurals, so ``_topic_words`` keeps them whole: "news" is not
+"new"."""
 
 
 class Router(Protocol):
@@ -954,19 +1001,25 @@ class VoiceSession:
         return task_summary([task])
 
     async def _cancel(self, speaker: str, words: str, task_id: int | None = None) -> str:
-        """Cancel the task of ``speaker``'s that ``task_id`` or ``words`` names (``_resolve_task``), and
-        return the notice that says how it went; when they name none of several open tasks, cancel
-        nothing and ask which."""
+        """Cancel the open task of ``speaker``'s that ``task_id`` or ``words`` names (``_resolve_task``),
+        and return the notice that says how it went.
+
+        When they have no open task, nothing is cancelled. When they name no open task, nothing is
+        cancelled and they are asked: which of several, or whether to cancel the only one (their words
+        were about another topic); a named task that is not open is not found.
+        """
         active = self._tracker.active_for(speaker)
+        if not active:
+            return NOTHING_TO_CANCEL
         number = _resolve_task(active, words, task_id)
         if number is None:
-            return which_to_cancel(active) if active else NOTHING_TO_CANCEL
+            return only_one_running(active[0]) if len(active) == 1 else which_to_cancel(active)
         try:
             task = await self._tracker.cancel(speaker, self._hermes.stop, number)
         except HermesApiError as error:
             return cancel_failed(error.reason)
         if task is None:
-            return NOTHING_TO_CANCEL
+            return NO_SUCH_TASK
         await self._notify_tasks()
         return task_cancelled(task) if task.state == "cancelled" else task_already_ended(task)
 
@@ -1088,22 +1141,30 @@ def _resolve_task(active: Sequence[Task], words: str, task_id: int | None = None
     ``active`` are the speaker's queued and running tasks; ``words`` are what the request says about
     the task (the user's request, or a tool call's ``about``), and ``task_id`` a tool call's id. In
     order: ``task_id``; a "task N" in ``words`` (other numbers, as in "top 5 stocks", are not task
-    numbers); the one task in ``active`` whose request shares more topic words with ``words`` than any
-    other does; the only task in ``active``. The first two may name a task that is not active.
+    numbers); when ``words`` carry no topic words (``_topic_words``, as in "cancel that"), the only
+    task in ``active``; otherwise the one task in ``active`` whose request shares more topic words with
+    ``words`` than any other does, so words about another topic name none, even of one open task. The
+    first two may name a task that is not active.
     """
     if task_id is not None:
         return task_id
     if named := _NAMED_TASK.search(words):
         return int(named.group(1))
     wanted = _topic_words(words)
+    if not wanted:
+        return active[0].number if len(active) == 1 else None
     scores = sorted(((len(wanted & _topic_words(task.text)), task.number) for task in active), reverse=True)
-    if len(scores) > 1 and scores[0][0] > scores[1][0]:
+    runner_up = scores[1][0] if len(scores) > 1 else 0
+    if scores and scores[0][0] > runner_up:
         return scores[0][1]  # a clear winner: more shared words than any other task
-    return active[0].number if len(active) == 1 else None
+    return None
 
 
 def _topic_words(text: str) -> set[str]:
     """The words of ``text`` that can tell one task's topic from another's: lowercased, without
-    ``_FILLER_WORDS``, and with a plural "s" dropped ("stocks"); "Tesla's" is "tesla" and a filler "s"."""
+    ``_FILLER_WORDS``, and with a plural "s" dropped ("stocks", but not "news"); "Tesla's" is "tesla"
+    and a filler "s"."""
     words = (word for word in _WORD.findall(text.lower()) if word not in _FILLER_WORDS)
-    return {word.removesuffix("s") if len(word) > 3 else word for word in words} - _FILLER_WORDS
+    return {
+        word.removesuffix("s") if len(word) > 3 and word not in _NOT_PLURALS else word for word in words
+    } - _FILLER_WORDS

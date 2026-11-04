@@ -17,14 +17,21 @@ from hermes_duplex.config import CONTROL_PROFILE, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.prompts.base import PromptContext, TaskReport, VoicePrompter
-from hermes_duplex.prompts.notices import WHO_IS_ASKING, task_summary, which_to_cancel
+from hermes_duplex.prompts.notices import (
+    NO_SUCH_TASK,
+    NOTHING_TO_CANCEL,
+    WHO_IS_ASKING,
+    only_one_running,
+    task_summary,
+    which_to_cancel,
+)
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.router.base import ControlIntent, RouteDecision
 from hermes_duplex.router.composite import CompositeRouter
 from hermes_duplex.router.knn import KnnBackend
-from hermes_duplex.session import Router, VoiceSession, _resolve_task
+from hermes_duplex.session import Router, VoiceSession, _resolve_task, _topic_words
 from hermes_duplex.tasks import Task, TaskTracker
 from hermes_duplex.transports.base import InputFrame
 from tests.fakes.fake_embedder import fake_embed
@@ -144,6 +151,8 @@ ROUTES = {
     "cancel that": _decision(CONTROL_PROFILE, "cancel"),
     "cancel task 1": _decision(CONTROL_PROFILE, "cancel"),
     "cancel the portfolio one": _decision(CONTROL_PROFILE, "cancel"),
+    "cancel the latest one": _decision(CONTROL_PROFILE, "cancel"),
+    "cancel the Tesla question": _decision(CONTROL_PROFILE, "cancel"),
     "how's the Tesla thing": _decision(CONTROL_PROFILE, "status"),
 }
 
@@ -863,10 +872,33 @@ def test_resolve_task_by_id_then_named_number_then_topic(
     assert _resolve_task([PORTFOLIO, TESLA], words, task_id) == number
 
 
-@pytest.mark.parametrize("words", ["cancel that", "cancel the weather one", ""])
-def test_resolve_task_with_one_open_task_means_that_one(words: str) -> None:
+@pytest.mark.parametrize(
+    "words", ["cancel the latest one", "the new one", "the other one", "the first one", "the last one"]
+)
+def test_order_and_recency_words_name_no_task(words: str) -> None:
+    assert _topic_words(words) == set()
+    assert _resolve_task([PORTFOLIO, TESLA], words) is None
+
+
+def test_news_is_a_topic_word_not_a_plural_of_new() -> None:
+    assert _topic_words("any news about Tesla") == {"news", "tesla"}
+    assert _topic_words("my stocks") == {"stock"}, "other plurals still drop their s"
+
+
+@pytest.mark.parametrize("words", ["don't", "won't", "never mind", "now", "just", "no, just stop it now"])
+def test_contractions_and_dismissals_add_no_topic_words(words: str) -> None:
+    assert _topic_words(words) == set()
+
+
+@pytest.mark.parametrize("words", ["cancel that", "", "cancel the latest one", "never mind, don't do it"])
+def test_resolve_task_with_one_open_task_and_no_topic_words_means_that_one(words: str) -> None:
     assert _resolve_task([TESLA], words) == 2
     assert _resolve_task([], words) is None
+
+
+def test_resolve_task_with_one_open_task_and_other_topic_words_names_none() -> None:
+    assert _resolve_task([TESLA], "cancel the weather one") is None
+    assert _resolve_task([TESLA], "cancel the Tesla one") == 2
 
 
 async def test_status_and_cancel_find_the_task_by_its_topic(harness: _Harness, api: FakeHermesApi) -> None:
@@ -930,6 +962,96 @@ async def test_cancel_naming_no_task_asks_which_when_several_are_running(
     running = [task for number in (1, 2) if (task := harness.tracker.get(number))]
     assert harness.texts("say")[2] == which_to_cancel(running)
     assert [task.state for task in running] == ["running", "running"]
+    assert api.requests_to("POST", "/stop") == []
+
+
+def _after_say(call_id: str, task: str) -> dict[str, Any]:
+    """A delegation of ``task`` sent once the session's previous notice is said."""
+    return {"on_sent": "say", "event": {"type": "delegation", "id": call_id, "tool_args": {"task": task}}}
+
+
+async def test_cancel_the_latest_one_asks_which_when_several_are_running(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "what's the weather"),
+            _after_say("c3", "cancel the latest one"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+
+    running = [task for number in (1, 2) if (task := harness.tracker.get(number))]
+    assert harness.texts("say")[2] == which_to_cancel(running)
+    assert [task.state for task in running] == ["running", "running"]
+    assert api.requests_to("POST", "/stop") == []
+
+
+async def test_cancel_naming_a_task_that_is_not_open_while_another_is_finds_none(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "what's the weather"),
+            _after_say("c3", "cancel task 1"),
+            _after_say("c4", "cancel task 1"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 4)
+
+    weather = harness.tracker.get(2)
+    assert harness.texts("say")[2:] == [CANCELLED_1, NO_SUCH_TASK]
+    assert weather is not None and weather.state == "running"
+    assert len(api.requests_to("POST", "/stop")) == 1
+
+
+async def test_cancel_naming_a_task_when_none_is_open_has_nothing_to_cancel(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel task 1"),
+            _after_say("c3", "cancel task 1"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+
+    assert harness.texts("say") == [STARTED_1, CANCELLED_1, NOTHING_TO_CANCEL]
+
+
+async def test_cancel_about_another_topic_asks_about_the_only_open_task(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel the Tesla question"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    portfolio = harness.tracker.get(1)
+    assert portfolio is not None and portfolio.state == "running"
+    assert harness.texts("say") == [
+        STARTED_1,
+        'The only one running is "how is my portfolio doing". Cancel that?',
+    ]
+    assert harness.texts("say")[1] == only_one_running(portfolio)
     assert api.requests_to("POST", "/stop") == []
 
 

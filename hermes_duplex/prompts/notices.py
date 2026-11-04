@@ -3,6 +3,7 @@
 Every provider speaks the same wording; only results and instructions differ by provider.
 """
 
+import re
 from collections.abc import Sequence
 
 from ..tasks import ACTIVE_STATES, Task, TaskState
@@ -25,13 +26,28 @@ TOPIC_MAX_CHARS = 40
 """Longest a task's topic is; a longer request is cut at a word with "…"."""
 
 
+_POLITE_LEAD_IN = re.compile(
+    r"(?:hey|please|(?:could|can|would|will) you|find out|look up|tell me|let me know|for me)\b[\s,]*",
+    re.IGNORECASE,
+)
+"""One polite phrase a request may open with ("could you", "please", "find out", "for me"), and the
+spaces and commas after it; it says nothing about the task."""
+
+
 def topic(text: str) -> str:
     """How every notice names the task whose request is ``text``: the request with its whitespace
-    collapsed, at most ``TOPIC_MAX_CHARS`` long ("how is my portfolio doing").
+    collapsed and its polite lead-ins dropped, at most ``TOPIC_MAX_CHARS`` long ("how is my portfolio
+    doing"; "could you please find out for me what the weather is" is "what the weather is").
 
-    People hear tasks only by topic; a task's number is an internal id for tools and logs.
+    Dropping the lead-ins first keeps requests that open alike from sharing one cut-short topic. A
+    request that is nothing but lead-ins keeps them. People hear tasks only by topic; a task's number
+    is an internal id for tools and logs.
     """
-    return fit_text(" ".join(text.split()), TOPIC_MAX_CHARS, marker="…")
+    request = " ".join(text.split())
+    rest = request
+    while lead_in := _POLITE_LEAD_IN.match(rest):
+        rest = rest[lead_in.end() :]
+    return fit_text(rest or request, TOPIC_MAX_CHARS, marker="…")
 
 
 def task_started(task: Task) -> str:
@@ -62,7 +78,7 @@ LOST_TRACK = "Hermes stopped reporting on it, so I don't know how it ended"
 """Reason for ``task_failed`` when Hermes stopped answering before the task ended."""
 
 NOTHING_TO_CANCEL = "You have no running task to cancel."
-"""Notice for a cancel request when the person has no matching queued or running task."""
+"""Notice for a cancel request when the person has no queued or running task."""
 
 
 def which_to_cancel(tasks: Sequence[Task]) -> str:
@@ -73,13 +89,20 @@ def which_to_cancel(tasks: Sequence[Task]) -> str:
     return f"Which one should I cancel: {choices}?"
 
 
+def only_one_running(task: Task) -> str:
+    """Question for a cancel request whose words name another topic than ``task``'s, the person's
+    only open task, so they can say whether to cancel it."""
+    return f'The only one running is "{topic(task.text)}". Cancel that?'
+
+
 def task_already_ended(task: Task) -> str:
     """Notice for a cancel request whose ``task`` ended on its own while it was being stopped."""
     return f'"{topic(task.text)}" had already finished.'
 
 
 NO_SUCH_TASK = "I couldn't find that task."
-"""Notice for a status request naming a task id, or "task N", the person has no task under."""
+"""Notice for a status request naming a task id, or "task N", the person has no task under, and for a
+cancel request naming one that is not open while others are."""
 
 
 NO_TASK_GIVEN = "Nothing was handed over: the request had no task in it."

@@ -69,7 +69,7 @@ _TASK_CHOICE_PARAMETERS = {
     "required": [],
 }
 """Parameters of ``task_status`` and ``cancel_task``: which of the user's tasks is meant, by id or by
-the user's words; neither means all of their tasks, or for a cancel the only one running."""
+the user's words; neither means all of their tasks, or for a cancel the only open (queued or running) one."""
 
 
 def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:

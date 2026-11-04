@@ -450,6 +450,7 @@ def test_no_spoken_notice_says_a_task_number() -> None:
         notices.task_failed(task, "it timed out"),
         notices.task_cancelled(task),
         notices.which_to_cancel([task, task]),
+        notices.only_one_running(task),
         notices.task_already_ended(task),
         notices.NO_SUCH_TASK,
         notices.task_summary([task]),
@@ -503,6 +504,16 @@ def test_a_topic_is_the_request_cut_short_at_a_word() -> None:
     assert notices.topic("how is my portfolio doing compared with the market today") == (
         "how is my portfolio doing compared with…"
     )
+
+
+def test_a_topic_drops_polite_lead_ins_so_alike_requests_stay_apart() -> None:
+    paris = notices.topic("Could you please find out for me what the weather will be in Paris")
+    london = notices.topic("Could you please find out for me what the weather will be in London")
+
+    assert paris == "what the weather will be in Paris"
+    assert london == "what the weather will be in London"
+    assert notices.topic("Hey, can you tell me how my portfolio is doing") == "how my portfolio is doing"
+    assert notices.topic("please") == "please", "a request that is only a lead-in keeps it"
 
 
 def test_task_summary_says_each_state_and_promises_a_report_for_open_ones() -> None:
