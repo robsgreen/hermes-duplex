@@ -127,3 +127,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-03 17:51 - Round 6 review: no crit/high; K1,K2 medium + K3,K4 low as PR known issues. PR gate confirmed by user decision 5 (A) + round-5 decision 3 (A). Squashing and pushing.
 - 2026-11-03 17:53 - Squashed to 9cf9bc3 (tree identical; backup branch backup/pre-squash-voice-router-discord local), pushed to origin/claude/upbeat-clarke-1vcz7v, draft PR robsgreen/hermes-duplex#1 created. Next: Archive gate after merge.
 - 2026-11-03 23:59 - User: refer to tasks by topic, numbers internal (PR revision). change-topic-names.md; coder dispatched
+- 2026-11-04 00:20 - Topic-names revision verified (gate green, 794 default, 4 e2e) and committed locally (not pushed); scoped review dispatched
