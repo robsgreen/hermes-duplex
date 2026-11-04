@@ -1,0 +1,6 @@
+# Orchestrator decisions on planner handoffs (2026-11-04)
+1. V6 default stays "ask" (user can change later).
+2. Held request after "yes": model = new profile's effort table at the router's effort (add a lookup helper, e.g. CompositeRouter.model_for(profile, effort) or a config-level function).
+3. Pending holds at session end: run on the active profile (as on timeout); the resulting task follows the normal unattended/adoption path.
+4. no_profiles_allowed: drop the notice (config rejects empty profile lists).
+5. ActiveProfiles.switch returns (outcome, notified_live: bool) — listeners count — so Discord /duplex profile can say "saved for next time" when no live conversation was notified.

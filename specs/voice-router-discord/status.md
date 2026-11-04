@@ -135,3 +135,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-04 17:06 - User asked to research Hermes bot mode before confirming the amendment; researcher dispatched
 - 2026-11-04 17:10 - Bot mode research returned (research-bot-mode.md): Desktop-only UI over profiles; no overlap; supports amendment
 - 2026-11-04 17:13 - User confirmed amendment-active-profile.md. Phase -> Task Generation (amendment)
+- 2026-11-04 17:22 - Task generation (amendment) done: 12 tasks/86 sub-tasks; handoff decisions in task-spec-amendment.md.notes. Phase -> Implementation (amendment); wave 1: 1.1, 1.2, 1.3
