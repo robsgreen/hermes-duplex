@@ -19,9 +19,10 @@ from .audio.frames import FRAME_MS
 from .audio.gate import LoudnessGate
 from .audio.mixer import AttributionRing
 from .audio.pacer import OutputPacer
-from .config import CONTROL_PROFILE, AudioConfig
+from .config import AudioConfig
 from .dispatch.hermes_api import HermesApiClient, HermesApiError, RunEvent
 from .people import PermissionChecker
+from .profiles import ActiveProfiles
 from .prompts.base import SENTENCE_END, TaskReport
 from .prompts.notices import (
     LOST_TRACK,
@@ -241,9 +242,9 @@ class Router(Protocol):
         text: str,
         speaker: str,
         *,
-        history: Sequence[str] = (),
-        hint: str | None = None,
+        active_profile: str,
         permitted: Callable[[str], bool] | None = None,
+        history: Sequence[str] = (),
     ) -> RouteDecision: ...
 
 
@@ -364,11 +365,13 @@ class VoiceSession:
 
     Input frames go to the provider, and each frame's voiced people are remembered to credit
     requests. Output audio is paced to the conversation. Each delegation the provider requests is
-    credited to a person, routed, checked against that person's profiles, and run on Hermes; tasks
-    on different profiles run concurrently. The session reports the task's start (or its place in
-    the queue), throttled progress, and its result or failure back to the provider. ``_control``
-    requests are answered locally from the ``TaskTracker`` and never reach Hermes. The model's
-    instructions, each result, and the reconnect summary come from the provider's ``prompter``.
+    credited to a person, routed for its effort, checked against that person's profiles, and run on
+    Hermes on the person's active profile (``active_profiles``), in the Hermes session
+    ``duplex-{person}-{profile}``; tasks on different profiles run concurrently. The session reports
+    the task's start (or its place in the queue), throttled progress, and its result or failure back
+    to the provider. ``_control`` requests are answered locally from the ``TaskTracker`` and never
+    reach Hermes. The model's instructions, each result, and the reconnect summary come from the
+    provider's ``prompter``.
 
     Tool-style providers get exactly one function output per call. A ``delegate`` call is answered
     at once with ``DELEGATE_RECEIPT``, before routing, so the model can go on talking; the spoken
@@ -422,6 +425,7 @@ class VoiceSession:
         hermes: HermesApiClient,
         tracker: TaskTracker,
         permissions: PermissionChecker,
+        active_profiles: ActiveProfiles,
         voice: str | None = None,
         pacer_lead_ms: int = 200,
         gate_threshold_dbfs: float = AudioConfig.gate_threshold_dbfs,
@@ -435,6 +439,7 @@ class VoiceSession:
         self._hermes = hermes
         self._tracker = tracker
         self._permissions = permissions
+        self._active_profiles = active_profiles
         self._voice = voice
         self._result_cap_tokens = result_cap_tokens
         self._clock = clock
@@ -754,8 +759,7 @@ class VoiceSession:
                 await self._answer(request, {"status": "not_started", "message": NO_TASK_GIVEN})
                 return
             await self._answer(request, DELEGATE_RECEIPT)
-            hint = args.get("profile_hint")
-            await self._delegate(request, text.strip(), speaker, hint if isinstance(hint, str) else None)
+            await self._delegate(request, text.strip(), speaker)
         elif request.target == TASK_STATUS_TOOL:
             message = self._status(speaker, words, number)
             tasks = [_tool_entry(task) for task in self._tracker.active_for(speaker)]
@@ -810,7 +814,7 @@ class VoiceSession:
             return
         said = self._output_transcript.text(offset_ms - TRANSCRIPT_LOOKBACK_MS, offset_ms)
         context = SENTENCE_END.split(said)[-1] if said else None
-        await self._delegate(request, text, speaker, None, context)
+        await self._delegate(request, text, speaker, context)
 
     def _transcript_window(self, offset_ms: int) -> tuple[int, int]:
         """The span [start_ms, end_ms) of input transcript that words the live delegation at ``offset_ms``.
@@ -839,10 +843,10 @@ class VoiceSession:
         request: DelegationRequested,
         text: str,
         speaker: str,
-        hint: str | None,
         context: str | None = None,
     ) -> None:
-        """Route ``text``, check the speaker may use the profile, and run it as a task.
+        """Route ``text`` for its effort, check the speaker may use their active profile, and run it
+        there as a task; a status or cancel request is answered from the tracker instead.
 
         ``context`` is what the assistant said just before the request, or None; the router sees it
         as the latest history line and Hermes gets it after the request.
@@ -854,23 +858,26 @@ class VoiceSession:
         def permitted(profile: str) -> bool:
             return person is not None and self._permissions.allowed(person, profile)
 
-        decision = await self._router.route(text, speaker, history=history, hint=hint, permitted=permitted)
-        if decision.profile == CONTROL_PROFILE:
-            if decision.control_intent == "cancel":
-                self._announce(await self._cancel(speaker, text))
-            else:
-                self._announce(self._status(speaker, text))
+        profile = self._active_profiles.get(speaker)
+        decision = await self._router.route(
+            text, speaker, active_profile=profile, permitted=permitted, history=history
+        )
+        if decision.control_intent == "cancel":
+            self._announce(await self._cancel(speaker, text))
+            return
+        if decision.control_intent == "status":
+            self._announce(self._status(speaker, text))
             return
 
-        if not permitted(decision.profile):
-            logger.warning("refused a task for %s: not allowed to use profile %s", speaker, decision.profile)
-            self._announce(refusal(decision.profile))
+        if not permitted(profile):
+            logger.warning("refused a task for %s: not allowed to use profile %s", speaker, profile)
+            self._announce(refusal(profile))
             return
 
         live = self._capabilities["delegation_style"] == "live"
         task = await self._tracker.create(
             person=speaker,
-            profile=decision.profile,
+            profile=profile,
             effort=decision.effort,
             model=decision.model,
             text=text,
@@ -900,7 +907,7 @@ class VoiceSession:
         ahead = self._tracker.ahead_of(task.number)
         announcement = queued_behind(task, ahead) if ahead else task_started(task)
         if self._capabilities["delegation_style"] == "tool":
-            self._announce(announcement)  # the call's receipt said only that it started; this says what
+            self._announce(announcement)  # the call's receipt said only that it was received; this says what
         else:
             await self._report_progress(ref, announcement)
         if start.run_id is None:

@@ -53,9 +53,7 @@ STARTUP_TIMEOUT_S = 180.0
 STOP_TIMEOUT_S = 10.0
 """How long the gateway gets to exit after SIGTERM before it is killed."""
 
-ROUTE_LINE = re.compile(
-    r" route speaker=(?P<speaker>\S+) profile=(?P<profile>\S+) .* sticky=(?P<sticky>True|False)$"
-)
+ROUTE_LINE = re.compile(r" route speaker=(?P<speaker>\S+) profile=(?P<profile>\S+) ")
 
 
 class RealHermes:
@@ -84,12 +82,12 @@ class RealHermes:
         """Every task in ``$HERMES_HOME/duplex/tasks.jsonl`` by uuid, as its latest record."""
         return {record["uuid"]: record for record in _read_jsonl(self.home / "duplex" / "tasks.jsonl")}
 
-    def route_decisions(self) -> list[tuple[str, str, bool]]:
-        """``(speaker, profile, sticky)`` for every route decision in the gateway log, oldest first."""
+    def route_decisions(self) -> list[tuple[str, str]]:
+        """``(speaker, active profile)`` for every route decision in the gateway log, oldest first."""
         log = self.home / "logs" / "gateway.log"
         lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
         matches = (ROUTE_LINE.search(line) for line in lines)
-        return [(m["speaker"], m["profile"], m["sticky"] == "True") for m in matches if m]
+        return [(m["speaker"], m["profile"]) for m in matches if m]
 
     def llm_requests(self) -> list[dict[str, Any]]:
         """Every chat completion request body the fake LLM received, oldest first."""

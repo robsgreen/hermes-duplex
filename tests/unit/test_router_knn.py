@@ -25,7 +25,7 @@ PROFILES = (
 
 
 def _request(text: str) -> RouteRequest:
-    return RouteRequest(text=text, speaker="rob", history=(), active_profile=None, hint=None)
+    return RouteRequest(text=text, speaker="rob", history=(), active_profile="general")
 
 
 async def _configured(extra: ControlExamples | None = None) -> KnnBackend:

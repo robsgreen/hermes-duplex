@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,9 +13,10 @@ import pytest
 import yaml
 
 from hermes_duplex.audio.frames import silent_frame
-from hermes_duplex.config import CONTROL_PROFILE, load_config
+from hermes_duplex.config import Config, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
+from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.base import PromptContext, TaskReport, VoicePrompter
 from hermes_duplex.prompts.notices import (
     NO_SUCH_TASK,
@@ -103,62 +104,71 @@ def _delegation(at_input_ms: int, call_id: str, task: str) -> dict[str, Any]:
     }
 
 
-def _decision(profile: str, control_intent: ControlIntent | None = None) -> RouteDecision:
-    is_control = profile == CONTROL_PROFILE
+def _decision(*, deep: bool = False, control_intent: ControlIntent | None = None) -> RouteDecision:
+    """A knn decision: high effort on ``STOCKS_MODEL`` when ``deep``, else medium effort on the profile's
+    default model."""
     return RouteDecision(
-        profile=profile,
-        effort="high" if profile == "stock-picker" else "medium",
-        model=STOCKS_MODEL if profile == "stock-picker" else None,
-        confidence=0.9,
-        probabilities={profile: 0.9},
-        followup_prob=None,
-        sticky=False,
+        effort="high" if deep else "medium",
+        model=STOCKS_MODEL if deep else None,
+        suggestion=None,
+        control_intent=control_intent,
+        probabilities={},
         source="knn",
         latency_ms=1,
-        control_intent=(control_intent or "status") if is_control else None,
     )
 
 
 class _StubRouter:
-    """Routes each task text to a fixed decision and records what it was asked."""
+    """Routes each task text to a fixed decision and records what it was asked.
+
+    ``after_route`` maps a task text to what to do once it is routed, such as switching a person to
+    another profile before their next request.
+    """
 
     def __init__(self, decisions: Mapping[str, RouteDecision]) -> None:
         self._decisions = decisions
-        self.requests: list[tuple[str, str, tuple[str, ...], str | None]] = []
+        self.requests: list[tuple[str, str, tuple[str, ...], str]] = []
+        """Per request: text, speaker, history, and the speaker's active profile."""
         self.permitted: list[dict[str, bool]] = []
         """Per request, whether the speaker may use each profile, as the session told the router."""
+        self.after_route: dict[str, Callable[[], Awaitable[object]]] = {}
 
     async def route(
         self,
         text: str,
         speaker: str,
         *,
-        history: Sequence[str] = (),
-        hint: str | None = None,
+        active_profile: str,
         permitted: Callable[[str], bool] | None = None,
+        history: Sequence[str] = (),
     ) -> RouteDecision:
-        self.requests.append((text, speaker, tuple(history), hint))
+        self.requests.append((text, speaker, tuple(history), active_profile))
         if permitted is not None:
             self.permitted.append({profile: permitted(profile) for profile in ("general", "stock-picker")})
+        if (after := self.after_route.get(text)) is not None:
+            await after()
         return self._decisions[text]
 
 
 ROUTES = {
-    "how is my portfolio doing": _decision("stock-picker"),
-    "and what about Tesla": _decision("stock-picker"),
-    "what's the weather": _decision("general"),
-    "what are you working on": _decision(CONTROL_PROFILE, "status"),
-    "cancel that": _decision(CONTROL_PROFILE, "cancel"),
-    "cancel task 1": _decision(CONTROL_PROFILE, "cancel"),
-    "cancel the portfolio one": _decision(CONTROL_PROFILE, "cancel"),
-    "cancel the latest one": _decision(CONTROL_PROFILE, "cancel"),
-    "cancel the Tesla question": _decision(CONTROL_PROFILE, "cancel"),
-    "how's the Tesla thing": _decision(CONTROL_PROFILE, "status"),
+    "how is my portfolio doing": _decision(deep=True),
+    "and what about Tesla": _decision(deep=True),
+    "what's the weather": _decision(),
+    "what are you working on": _decision(control_intent="status"),
+    "cancel that": _decision(control_intent="cancel"),
+    "cancel task 1": _decision(control_intent="cancel"),
+    "cancel the portfolio one": _decision(control_intent="cancel"),
+    "cancel the latest one": _decision(control_intent="cancel"),
+    "cancel the Tesla question": _decision(control_intent="cancel"),
+    "how's the Tesla thing": _decision(control_intent="status"),
 }
 
 
 class _Harness:
-    """A session wired to the fake provider, a stub router, and the fake Hermes API."""
+    """A session wired to the fake provider, a stub router, and the fake Hermes API.
+
+    Rob starts on stock-picker (his ``default_profile``), Alex on general, the only profile he may use.
+    """
 
     def __init__(
         self, tmp_path: Path, api: FakeHermesApi, *, api_base: str | None = None, router: Router | None = None
@@ -169,7 +179,9 @@ class _Harness:
         self.stub = _StubRouter(ROUTES)
         self.router = router or self.stub
         self.tracker = TaskTracker(tmp_path / "home")
-        self.permissions = PermissionChecker(_config(tmp_path))
+        config = _config(tmp_path)
+        self.permissions = PermissionChecker(config)
+        self.active_profiles = _active_profiles(tmp_path, config)
         self.provider: FakeProvider | None = None
         self.conversation: _MemoryConversation | None = None
         self._hermes: HermesApiClient | None = None
@@ -197,6 +209,7 @@ class _Harness:
             hermes=self._hermes,
             tracker=self.tracker,
             permissions=self.permissions,
+            active_profiles=self.active_profiles,
             clock=clock,
         )
         self._run = asyncio.create_task(session.run())
@@ -225,7 +238,13 @@ class _Harness:
                 await asyncio.sleep(0.01)
 
 
-def _config(tmp_path: Path) -> Any:
+def _active_profiles(tmp_path: Path, config: Config) -> ActiveProfiles:
+    return ActiveProfiles(
+        tmp_path / "home" / "duplex" / "active_profiles.json", PermissionChecker(config), config
+    )
+
+
+def _config(tmp_path: Path, alex_profiles: Sequence[str] = ("general",)) -> Config:
     raw = {
         "hermes": {"api_base": "http://127.0.0.1:8642"},
         "provider": {"name": "fake"},
@@ -238,8 +257,8 @@ def _config(tmp_path: Path) -> Any:
             },
         },
         "people": {
-            "rob": {"discord_id": "123", "profiles": ["*"]},
-            "alex": {"discord_id": "456", "profiles": ["general"]},
+            "rob": {"discord_id": "123", "profiles": ["*"], "default_profile": "stock-picker"},
+            "alex": {"discord_id": "456", "profiles": list(alex_profiles)},
         },
     }
     path = tmp_path / "duplex.yaml"
@@ -369,7 +388,17 @@ async def test_announces_start_after_the_task_is_on_disk(
     assert states_at_announce[0] == ["routing", "running"]
 
 
-async def test_refuses_a_profile_the_person_may_not_use(
+async def test_runs_on_the_speakers_active_profile(harness: _Harness, api: FakeHermesApi) -> None:
+    harness.start([_delegation(1500, "call_1", "how is my portfolio doing")], _frames(2000, _voiced("alex")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    [start] = api.requests_to("POST", "/runs")
+    assert (start.path, start.body["session_id"]) == ("/p/general/v1/runs", "duplex-alex-general")
+    assert harness.stub.requests[0][3] == "general", "the router is told the active profile"
+
+
+async def test_refuses_an_active_profile_the_person_may_no_longer_use(
     tmp_path: Path, api: FakeHermesApi, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The real router, so the log shows its decision line before the refusal line.
@@ -377,6 +406,9 @@ async def test_refuses_a_profile_the_person_may_not_use(
     router = CompositeRouter(config.router, config.profiles, [KnnBackend(fake_embed)])
     await router.configure()
     harness = _Harness(tmp_path, api, router=router)
+    # Alex switched to stock-picker while he could use it; the session's permissions no longer allow it.
+    harness.active_profiles = _active_profiles(tmp_path, _config(tmp_path, alex_profiles=["*"]))
+    assert (await harness.active_profiles.switch("alex", "stock-picker")).outcome == "switched"
     caplog.set_level(logging.INFO)
     try:
         harness.start(
@@ -404,8 +436,13 @@ async def test_router_is_told_which_profiles_the_speaker_may_use(harness: _Harne
 
     await harness.wait_for(lambda: bool(harness.sent("say")))
 
-    # The router keeps a refused profile from becoming Alex's active profile.
+    # The router suggests only profiles the speaker may use.
     assert harness.stub.permitted == [{"general": True, "stock-picker": False}]
+
+
+def _switch_rob_to_general_after(harness: _Harness, text: str) -> None:
+    """Rob switches to general right after asking ``text``, so his next request runs there."""
+    harness.stub.after_route[text] = lambda: harness.active_profiles.switch("rob", "general")
 
 
 async def _session_that_ended(tmp_path: Path, api: FakeHermesApi) -> _Harness:
@@ -665,6 +702,7 @@ async def test_cancel_is_confirmed_once_when_the_run_reports_cancelled_before_st
 
 async def test_control_cancel_by_number(harness: _Harness, api: FakeHermesApi) -> None:
     api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    _switch_rob_to_general_after(harness, "how is my portfolio doing")
     harness.start(
         [
             _delegation(500, "call_1", "how is my portfolio doing"),
@@ -715,6 +753,7 @@ async def test_second_task_on_the_same_profile_is_queued_behind_the_first(
 
 async def test_tasks_on_different_profiles_run_concurrently(harness: _Harness, api: FakeHermesApi) -> None:
     api.run_scripts.append(OPEN_RUN)
+    _switch_rob_to_general_after(harness, "how is my portfolio doing")
     harness.start(
         [
             _delegation(500, "call_1", "how is my portfolio doing"),

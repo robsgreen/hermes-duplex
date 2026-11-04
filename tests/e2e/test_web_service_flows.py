@@ -61,13 +61,13 @@ OPEN_RUN = RunScript(events=[{"event": "run.started"}])
 ROUTE_FIELDS = {
     "speaker",
     "profile",
+    "control",
     "effort",
     "model",
-    "confidence",
+    "suggestion",
     "top3",
     "source",
     "latency_ms",
-    "sticky",
 }
 
 
@@ -168,7 +168,7 @@ def _write_config(home: Path, api_base: str, script: Sequence[Mapping[str, Any]]
     """A duplex.yaml for the fake provider replaying ``script``, the knn router over the phrase
     fixture's profiles, Hermes at ``api_base``, and the web transport on a free port. stock-picker
     has a model only for effort ``high`` plus a default model; general has none. rob may use every
-    profile, alex only ``general``."""
+    profile and starts on ``stock-picker``; alex may use only ``general``."""
     script_path = home / "script.jsonl"
     script_path.write_text("".join(json.dumps(step) + "\n" for step in script), encoding="utf-8")
     profiles = yaml.safe_load(PHRASES.read_text(encoding="utf-8"))["profiles"]
@@ -182,7 +182,7 @@ def _write_config(home: Path, api_base: str, script: Sequence[Mapping[str, Any]]
         "router": {"backend": "knn"},
         "profiles": profiles,
         "people": {
-            "rob": {"web_token_env": "TOKEN_ROB", "profiles": ["*"]},
+            "rob": {"web_token_env": "TOKEN_ROB", "profiles": ["*"], "default_profile": "stock-picker"},
             "alex": {"web_token_env": "TOKEN_ALEX", "profiles": ["general"]},
         },
         "transports": {"web": {"enabled": True, "port": 0}},
@@ -217,7 +217,7 @@ async def api() -> AsyncIterator[FakeHermesApi]:
         yield fake
 
 
-async def test_topic_switch_goes_to_general_and_each_profile_gets_its_model(
+async def test_every_request_runs_on_the_active_profile_with_its_model(
     tmp_path: Path, api: FakeHermesApi, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger="hermes_duplex.router.composite")
@@ -232,34 +232,29 @@ async def test_topic_switch_goes_to_general_and_each_profile_gets_its_model(
         await page.speak(2000)
         results = await stack.wait_for("deliver_result", 2)
 
-    stocks, general = api.requests_to("POST", "/runs")
-    assert stocks.path == "/p/stock-picker/v1/runs"
-    assert stocks.body["session_id"] == "duplex-rob-stock-picker"
-    # knn gives no effort, so the request runs at medium, which has no cell: the default model.
-    assert stocks.body["model_options"] == {"reasoning": {"effort": "medium"}}
-    assert (stocks.body["provider"], stocks.body["model"]) == (
-        STOCKS_DEFAULT["provider"],
-        STOCKS_DEFAULT["model"],
-    )
-    assert stocks.headers["Authorization"] == f"Bearer {KEYS['stock-picker']}"
-
-    assert general.path == "/p/general/v1/runs"
-    assert general.body["session_id"] == "duplex-rob-general"
-    assert general.body["input"] == "what's the weather tomorrow"
-    assert "model" not in general.body and "provider" not in general.body
-    assert general.headers["Authorization"] == f"Bearer {KEYS['general']}"
+    portfolio, weather = api.requests_to("POST", "/runs")
+    for start in (portfolio, weather):
+        assert start.path == "/p/stock-picker/v1/runs"
+        assert start.body["session_id"] == "duplex-rob-stock-picker"
+        # knn gives no effort, so the request runs at medium, which has no cell: the default model.
+        assert start.body["model_options"] == {"reasoning": {"effort": "medium"}}
+        assert (start.body["provider"], start.body["model"]) == (
+            STOCKS_DEFAULT["provider"],
+            STOCKS_DEFAULT["model"],
+        )
+        assert start.headers["Authorization"] == f"Bearer {KEYS['stock-picker']}"
+    assert weather.body["input"] == "what's the weather tomorrow"
 
     decisions = [r.__dict__["route_decision"] for r in caplog.records if "route_decision" in r.__dict__]
     assert all(decision.keys() == ROUTE_FIELDS for decision in decisions)
-    assert [(d["speaker"], d["profile"], d["model"], d["source"], d["sticky"]) for d in decisions] == [
-        ("rob", "stock-picker", "openai/stocks-default", "knn", False),
-        ("rob", "general", None, "knn", False),
-    ]
+    assert [(d["speaker"], d["profile"], d["model"], d["source"], d["control"]) for d in decisions] == [
+        ("rob", "stock-picker", "openai/stocks-default", "knn", None),
+    ] * 2
     assert all(len(d["top3"]) <= 3 and d["latency_ms"] >= 0 for d in decisions)
 
     assert [result["text"] for result in results] == [
         frame_result("stock-picker", "portfolio up 2%", RESULT_CAP_TOKENS),
-        frame_result("general", "sunny, 21 degrees", RESULT_CAP_TOKENS),
+        frame_result("stock-picker", "sunny, 21 degrees", RESULT_CAP_TOKENS),
     ]
 
 

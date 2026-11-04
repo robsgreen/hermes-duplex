@@ -1,8 +1,8 @@
-"""The routing policy: runs both paths, applies the sticky rule and fallbacks, and looks up the model.
+"""The routing policy: runs both paths, picks the effort, suggests a better profile, and looks up the model.
 
-``CompositeRouter`` is what the rest of the service routes through. It owns each speaker's active
-(sticky) profile, the ``_control`` choice, the main path's deadline and circuit breaker, the
-profile-by-effort model table, and the decision log.
+``CompositeRouter`` is what the rest of the service routes through. It owns the ``_control`` choice,
+the main path's deadline and circuit breaker, the switch-suggestion rule, and the decision log. It
+never picks the profile a task runs on: that is the speaker's active profile.
 """
 
 import asyncio
@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import cast
 
 from ..config import CONTROL_PROFILE, ProfileConfig, RouterConfig
-from ..providers.base import ModelChoice
 from .base import (
     BackendResult,
     Effort,
@@ -34,23 +33,12 @@ EARLY_ACCEPT_PROB = 0.85
 without waiting for the main path."""
 EARLY_ACCEPT_MARGIN = 0.3
 """How much the fast path's top choice must beat its runner-up by to be accepted early."""
-FOLLOWUP_PROB = 0.5
-"""Below this follow-up probability, a request may leave the speaker's active profile."""
-LEAVE_MARGIN = 0.2
-"""How much the winner must beat the active profile by to leave it, when the backend judged follow-up."""
-LEAVE_MARGIN_WITHOUT_FOLLOWUP = 0.3
-"""The same margin when the backend did not judge follow-up (``followup_prob`` is None)."""
+SUGGEST_MARGIN = 0.2
+"""How much a suggested profile's probability must beat the active profile's by."""
 BREAKER_FAILURES = 3
 """Consecutive main-path failures or deadline misses that open the circuit breaker."""
 BREAKER_OPEN_S = 30.0
 """How long an open breaker skips the main path, in seconds."""
-
-
-@dataclass
-class _Active:
-    profile: str
-    last_routed_s: float
-    """Clock reading of the speaker's last decision for this profile."""
 
 
 @dataclass(frozen=True)
@@ -100,18 +88,23 @@ class _Breaker:
 
 
 class CompositeRouter:
-    """Routes a speaker's request to a profile (or ``_control``), an effort, and a model.
+    """Decides a request's effort and model, whether it is a ``_control`` request, and whether another
+    profile would suit it better.
 
-    Every configured profile is a choice, whatever the speaker may use: permission is checked after
-    routing. ``_control`` is always a choice too. A speaker's active profile is the last profile they
-    were routed to and may use; it expires after ``sticky_idle_s`` of no routing, and ``_control``
-    decisions, like decisions for a profile the speaker may not use, neither change nor refresh it.
+    Every configured profile is a choice for the backends, and ``_control`` is too. The request runs
+    on the speaker's active profile, which the caller gives and the router never changes; the model
+    comes from that profile's effort table. The router suggests another profile
+    (``RouteDecision.suggestion``) only when ``config.suggest_switch`` is on, the speaker may use it,
+    its probability is at least ``config.suggest_threshold``, and it beats the active profile's by at
+    least ``SUGGEST_MARGIN``.
 
     Each request goes to the main path (``config.backend``) and, when configured, the fast path
     (``config.fast_path``) at once. The router waits up to ``config.deadline_ms`` for the main path,
-    and stops early when the fast path is sure (``EARLY_ACCEPT_PROB``, ``EARLY_ACCEPT_MARGIN``) and
-    agrees with the active profile. The first confident answer of main, then fast path decides;
-    without one the request goes to the hint, else the active profile, else ``default_profile``.
+    and stops early when the fast path is sure (``EARLY_ACCEPT_PROB``, ``EARLY_ACCEPT_MARGIN``) of the
+    active profile or ``_control``, so a suggestion always waits for the main path. The first
+    confident answer of main, then fast path decides. Without one (``source`` ``fallback``), the
+    request is not a ``_control`` request, nothing is suggested, and the effort is the main path's
+    judgement when it answered, else the fast path's, else ``DEFAULT_EFFORT``.
     """
 
     def __init__(
@@ -124,14 +117,11 @@ class CompositeRouter:
     ) -> None:
         """``backends`` must include the backends ``config`` names, matched by ``name``: the main
         path ``config.backend`` and, when set, the fast path ``config.fast_path``; others are unused.
-        ``clock`` returns seconds and times the sticky expiry, the circuit breaker, and the decision
-        latency; the deadline itself is real time.
+        ``clock`` returns seconds and times the circuit breaker and the decision latency; the deadline
+        itself is real time.
 
-        Raises ``ValueError`` when ``config.default_profile`` is not in ``profiles`` or a backend
-        ``config`` names is not in ``backends``.
+        Raises ``ValueError`` when a backend ``config`` names is not in ``backends``.
         """
-        if config.default_profile not in profiles:
-            raise ValueError(f"default profile '{config.default_profile}' is not a configured profile")
         by_name = {backend.name: backend for backend in backends}
         wanted = [config.backend] if config.fast_path is None else [config.backend, config.fast_path]
         if missing := [name for name in wanted if name not in by_name]:
@@ -144,7 +134,6 @@ class CompositeRouter:
         self._breaker = _Breaker(self._main.name)
         self._clock = clock
         self._choices = (*profiles, CONTROL_PROFILE)
-        self._active: dict[str, _Active] = {}
         self._abandoned: set[asyncio.Task[BackendResult]] = set()
         """Backend calls cancelled mid-flight, referenced until they finish unwinding."""
 
@@ -166,40 +155,25 @@ class CompositeRouter:
         text: str,
         speaker: str,
         *,
-        history: Sequence[str] = (),
-        hint: str | None = None,
+        active_profile: str,
         permitted: Callable[[str], bool] | None = None,
+        history: Sequence[str] = (),
     ) -> RouteDecision:
-        """Decide where ``speaker``'s request ``text`` goes, update their active profile, and log it.
+        """Decide the effort, model, and any switch suggestion for ``speaker``'s request ``text``, and
+        log the decision.
 
-        ``history`` is the conversation's recent lines, oldest first; ``hint`` is a profile the voice
-        model suggested, used only when neither path answers confidently (a name that is not a
-        configured profile is ignored). ``permitted(profile)`` says whether the speaker may use a
-        profile (None: every profile); the decision may still name one they may not, which the caller
-        refuses, but only a permitted profile becomes their active profile. Never raises for a backend
-        failure: with no answer, the request goes to the hint, else the active profile, else the
-        default profile.
+        ``active_profile`` is the configured profile the request runs on; the model comes from its
+        effort table. ``permitted(profile)`` says whether the speaker may use a profile (None: every
+        profile); only a permitted profile is ever suggested. ``history`` is the conversation's recent
+        lines, oldest first. Never raises for a backend failure: with no confident answer, the
+        decision is the fallback the class describes.
         """
         started = self._clock()
-        active = self._active_profile(speaker, started)
-        req = RouteRequest(
-            text=text, speaker=speaker, history=tuple(history), active_profile=active, hint=hint
-        )
+        req = RouteRequest(text=text, speaker=speaker, history=tuple(history), active_profile=active_profile)
         answers = await self._ask(req, ask_main=self._breaker.allows(started))
-        decision = self._decide(answers, hint, active, started)
-        if decision.profile != CONTROL_PROFILE and (permitted is None or permitted(decision.profile)):
-            self._active[speaker] = _Active(decision.profile, started)
-        _log_decision(speaker, decision)
+        decision = self._decide(answers, active_profile, permitted, started)
+        _log_decision(speaker, active_profile, decision)
         return decision
-
-    def _active_profile(self, speaker: str, now: float) -> str | None:
-        active = self._active.get(speaker)
-        if active is None:
-            return None
-        if now - active.last_routed_s >= self._config.sticky_idle_s:
-            del self._active[speaker]
-            return None
-        return active.profile
 
     async def _ask(self, req: RouteRequest, *, ask_main: bool) -> _Answers:
         """Ask the main path (when ``ask_main``) and the fast path at once, collecting answers until the
@@ -252,19 +226,23 @@ class CompositeRouter:
                     self._breaker.record(answered=False, now_s=self._clock())
         return _Answers(main=main, fast=fast)
 
-    def _accepts_early(self, fast: BackendResult, active: str | None) -> bool:
+    def _accepts_early(self, fast: BackendResult, active: str) -> bool:
         """Whether the fast path is sure enough to stop waiting for the main path: a clear winner that
-        keeps the speaker on their active profile (or is ``_control``, which leaves it alone)."""
+        is the speaker's active profile or ``_control``, so there is no switch to suggest."""
         probs = fast.profile_probs
         top, runner_up = sorted((probs.get(choice, 0.0) for choice in self._choices), reverse=True)[:2]
         sure = top >= EARLY_ACCEPT_PROB and top - runner_up >= EARLY_ACCEPT_MARGIN
-        return sure and (active is None or self._winner(probs) in (active, CONTROL_PROFILE))
+        return sure and self._winner(probs) in (active, CONTROL_PROFILE)
 
     def _decide(
-        self, answers: _Answers, hint: str | None, active: str | None, started: float
+        self,
+        answers: _Answers,
+        active: str,
+        permitted: Callable[[str], bool] | None,
+        started: float,
     ) -> RouteDecision:
-        # The main path's effort and follow-up judgements count whenever it answered, even when it was
-        # not confident about the profile.
+        # The main path's effort judgement counts whenever it answered, even when it was not confident
+        # about the choice.
         judge = answers.main or answers.fast
         decider = next(
             (
@@ -274,66 +252,51 @@ class CompositeRouter:
             ),
             None,
         )
-        followup_prob = judge.followup_prob if judge is not None else None
-
-        source: RouteSource
-        if decider is not None:
-            probs = decider.profile_probs
-            winner = self._winner(probs)
-            # Status and cancel concern the speaker's tasks, not a new topic, so ``_control`` bypasses
-            # the sticky rule and leaves the active profile alone.
-            if (
-                winner == CONTROL_PROFILE
-                or active is None
-                or winner == active
-                or self._leaves(probs, winner, active, followup_prob)
-            ):
-                profile, source = winner, _backend_source(decider)
-            else:
-                profile, source = active, "sticky"
-        else:
-            probs = judge.profile_probs if judge is not None else {}
-            if hint is not None and hint in self._profiles:
-                profile, source = hint, "hint"
-            else:
-                profile, source = active or self._config.default_profile, "fallback"
-
         effort = _top_effort(judge)
-        is_control = profile == CONTROL_PROFILE
+        probs: Mapping[str, float] = judge.profile_probs if judge is not None else {}
+        source: RouteSource = "fallback"
         control_intent = None
-        if is_control:
-            # A backend that cannot tell the intents apart gets ``status``, which changes nothing.
-            control_intent = (decider.control_intent if decider is not None else None) or "status"
+        suggestion = None
+        if decider is not None:
+            probs, source = decider.profile_probs, _backend_source(decider)
+            if self._winner(probs) == CONTROL_PROFILE:
+                # A backend that cannot tell the intents apart gets ``status``, which changes nothing.
+                control_intent = decider.control_intent or "status"
+            else:
+                suggestion = self._suggestion(probs, active, permitted)
         return RouteDecision(
-            profile=profile,
             effort=effort,
-            model=None if is_control else self._model(profile, effort),
-            confidence=probs.get(profile, 0.0),
+            model=None if control_intent is not None else self._profiles[active].model_for(effort),
+            suggestion=suggestion,
+            control_intent=control_intent,
             probabilities=probs,
-            followup_prob=followup_prob,
-            sticky=profile == active,
             source=source,
             latency_ms=round((self._clock() - started) * 1000),
-            control_intent=control_intent,
         )
+
+    def _suggestion(
+        self, probs: Mapping[str, float], active: str, permitted: Callable[[str], bool] | None
+    ) -> str | None:
+        """The profile to suggest switching to, by the rule in the class docstring, or None."""
+        if not self._config.suggest_switch:
+            return None
+        others = [
+            profile
+            for profile in self._profiles
+            if profile != active and (permitted is None or permitted(profile))
+        ]
+        if not others:
+            return None
+        best = max(others, key=lambda profile: probs.get(profile, 0.0))
+        best_prob = probs.get(best, 0.0)
+        beats_active = best_prob - probs.get(active, 0.0) >= SUGGEST_MARGIN
+        return best if best_prob >= self._config.suggest_threshold and beats_active else None
 
     def _winner(self, probs: Mapping[str, float]) -> str:
         return max(self._choices, key=lambda choice: probs.get(choice, 0.0))
 
     def _is_confident(self, result: BackendResult) -> bool:
         return result.profile_probs.get(self._winner(result.profile_probs), 0.0) >= CONFIDENT_PROB
-
-    @staticmethod
-    def _leaves(probs: Mapping[str, float], winner: str, active: str, followup_prob: float | None) -> bool:
-        """The sticky rule: whether a confident ``winner`` takes the request off the ``active`` profile."""
-        margin = probs.get(winner, 0.0) - probs.get(active, 0.0)
-        if followup_prob is None:
-            return margin >= LEAVE_MARGIN_WITHOUT_FOLLOWUP
-        return followup_prob < FOLLOWUP_PROB and margin >= LEAVE_MARGIN
-
-    def _model(self, profile: str, effort: Effort) -> ModelChoice | None:
-        config = self._profiles[profile]
-        return config.models.get(effort) or config.default_model
 
 
 def _result(call: asyncio.Task[BackendResult], backend: RouterBackend) -> BackendResult | None:
@@ -357,20 +320,23 @@ def _top_effort(result: BackendResult | None) -> Effort:
     return max(probs, key=lambda effort: probs[effort])
 
 
-def _log_decision(speaker: str, decision: RouteDecision) -> None:
-    """Log one line per decision; the fields are also attached to the record as ``route_decision``."""
+def _log_decision(speaker: str, active_profile: str, decision: RouteDecision) -> None:
+    """Log one line per decision; the fields are also attached to the record as ``route_decision``.
+
+    ``profile`` is the speaker's active profile, which the request runs on unless ``control`` is set.
+    """
     top3 = sorted(decision.probabilities.items(), key=lambda item: item[1], reverse=True)[:3]
     model = decision.model
     fields = {
         "speaker": speaker,
-        "profile": decision.profile,
+        "profile": active_profile,
+        "control": decision.control_intent,
         "effort": decision.effort,
         "model": f"{model.provider}/{model.model}" if model is not None else None,
-        "confidence": round(decision.confidence, 3),
+        "suggestion": decision.suggestion,
         "top3": {choice: round(prob, 3) for choice, prob in top3},
         "source": decision.source,
         "latency_ms": decision.latency_ms,
-        "sticky": decision.sticky,
     }
     line = " ".join(f"{key}={value}" for key, value in fields.items())
     logger.info("route %s", line, extra={"route_decision": fields})

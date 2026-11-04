@@ -1,5 +1,6 @@
-"""Against a real Hermes gateway with the plugin installed: a topic switch from stock-picker to
-general, a status request that never reaches Hermes, and ``doctor`` checking the live API server.
+"""Against a real Hermes gateway with the plugin installed: requests on two topics that both run on
+the speaker's default profile, a status request that never reaches Hermes, and ``doctor`` checking the
+live API server.
 
 The gateway runs its own provider script (written by the fixture): the portfolio question at 1.5 s of
 input, "what's the weather tomorrow" at 3.5 s, and "what are you working on" at 5.5 s. The knn
@@ -119,7 +120,7 @@ def doctor(config: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str
     )
 
 
-async def test_topic_switch_runs_on_general_and_status_stays_local(hermes: RealHermes) -> None:
+async def test_both_topics_run_on_the_default_profile_and_status_stays_local(hermes: RealHermes) -> None:
     async with voice_call(hermes, "rob") as socket:
         await speak(socket, 2000)
         await provider_calls(hermes, "deliver_result", 1)
@@ -133,20 +134,18 @@ async def test_topic_switch_runs_on_general_and_status_stays_local(hermes: RealH
 
     tasks = list(hermes.tasks().values())
     assert [(t["person"], t["profile"], t["text"], t["state"]) for t in tasks] == [
-        ("rob", "stock-picker", "how is my portfolio doing", "completed"),
+        ("rob", "general", "how is my portfolio doing", "completed"),
         ("rob", "general", "what's the weather tomorrow", "completed"),
     ]
-    assert hermes.route_decisions()[1] == ("rob", "general", False)
+    assert hermes.route_decisions()[:2] == [("rob", "general")] * 2
 
-    general = tasks[1]
-    assert general["model"] is None
-    status = hermes.run_status("general", general["run_id"])
-    assert status["status"] == "completed"
-    assert status["session_id"] == "duplex-rob-general"
-    assert status["output"] == f"{GENERAL_MODEL} says: done"
+    for task in tasks:
+        assert task["model"] is None
+        status = hermes.run_status("general", task["run_id"])
+        assert status["status"] == "completed"
+        assert status["session_id"] == "duplex-rob-general"
+        assert status["output"] == f"{GENERAL_MODEL} says: done"
     assert GENERAL_MODEL in {request["model"] for request in hermes.llm_requests()}
-    stocks_status = hermes.run_status("stock-picker", tasks[0]["run_id"])
-    assert stocks_status["session_id"] == "duplex-rob-stock-picker"
 
     assert results[1]["text"] == frame_result("general", f"{GENERAL_MODEL} says: done", RESULT_CAP_TOKENS)
     assert [call["text"] for call in said] == ["You have no tasks running."]

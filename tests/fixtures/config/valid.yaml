@@ -13,7 +13,6 @@ router:
   fast_path: knn
   deadline_ms: 250
   default_profile: general
-  sticky_idle_s: 300
   suggest_switch: false
   suggest_threshold: 0.9
   control_examples:

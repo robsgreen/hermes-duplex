@@ -87,7 +87,6 @@ def test_valid_config_round_trips_into_dataclasses() -> None:
         fast_path="knn",
         deadline_ms=250,
         default_profile="general",
-        sticky_idle_s=300,
         suggest_switch=False,
         suggest_threshold=0.9,
         control_examples=ControlExamples(status=("where are we",), cancel=("forget it",)),
@@ -143,7 +142,6 @@ def test_minimal_config_takes_defaults() -> None:
     assert config.router == RouterConfig(backend="knn")
     assert config.router.deadline_ms == 300
     assert config.router.default_profile == "general"
-    assert config.router.sticky_idle_s == 600
     assert config.router.suggest_switch is True
     assert config.router.suggest_threshold == 0.85
     assert config.profiles == {"general": ProfileConfig()}
@@ -389,6 +387,17 @@ def test_person_referencing_undefined_profile_is_rejected(tmp_path: Path) -> Non
         tmp_path, lambda raw: raw["people"]["alex"].update(profiles=["home"]), "people.alex.profiles"
     )
     assert "'home'" in str(error)
+
+
+@pytest.mark.parametrize("value", [600, None])
+def test_removed_sticky_idle_is_rejected_with_a_migration_message(tmp_path: Path, value: object) -> None:
+    if value is None:
+        _load_mutated(tmp_path, lambda raw: raw["router"].update(sticky_idle_s=None))  # null is absent
+        return
+    error = _assert_error(
+        tmp_path, lambda raw: raw["router"].update(sticky_idle_s=value), "router.sticky_idle_s"
+    )
+    assert "removed" in str(error) and "active profile until they switch" in str(error)
 
 
 def test_undefined_default_profile_is_rejected(tmp_path: Path) -> None:
@@ -696,7 +705,6 @@ def test_invalid_fake_capability_is_rejected(tmp_path: Path, capabilities: dict[
     ("section", "key"),
     [
         ("router", "deadline_ms"),
-        ("router", "sticky_idle_s"),
         ("audio", "pacer_lead_ms"),
     ],
 )
@@ -759,3 +767,13 @@ def test_profile_key_value_that_is_not_an_env_var_name_is_rejected(tmp_path: Pat
         lambda raw: raw["hermes"]["profile_keys_env"].update(general="hermes-key-0123456789"),
         "hermes.profile_keys_env.general",
     )
+
+
+def test_profile_model_for_effort_falls_back_to_the_default_model() -> None:
+    fast = ModelChoice(provider="openai", model="gpt-fast")
+    fallback = ModelChoice(provider="openai", model="gpt-default")
+    profile = ProfileConfig(models={"low": fast}, default_model=fallback)
+
+    assert profile.model_for("low") == fast
+    assert profile.model_for("high") == fallback
+    assert ProfileConfig().model_for("medium") is None

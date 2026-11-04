@@ -171,7 +171,7 @@ async def test_a_follow_up_comes_from_the_same_speaker_with_history_and_active_p
     assert follow_up.speaker == first.speaker != other.speaker
     assert follow_up.history == ("how is my portfolio",)
     assert follow_up.active_profile == "stock-picker"
-    assert (first.history, first.active_profile) == ((), None)
+    assert (first.history, first.active_profile) == ((), "general")  # the router's default profile
 
 
 async def test_a_label_the_router_does_not_have_is_a_phrase_file_error() -> None:

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import os
 import signal
 import time
@@ -267,7 +268,7 @@ async def test_service_with_the_decisions_backend_starts_and_closes_it_on_stop(
 
     await duplex.start()
     result = await decisions.classify(
-        RouteRequest("what's the weather", "rob", history=(), active_profile=None, hint=None), 2000
+        RouteRequest("what's the weather", "rob", history=(), active_profile="general"), 2000
     )
     assert result.profile_probs["general"] == 1.0
     await duplex.stop()
@@ -318,5 +319,21 @@ async def test_start_goes_on_when_the_task_history_is_torn(tmp_path: Path) -> No
     await duplex.start()
     try:
         assert duplex.status().tasks == ()
+    finally:
+        await duplex.stop()
+
+
+async def test_start_loads_each_persons_saved_active_profile(tmp_path: Path) -> None:
+    profiles = {"general": {"description": "Anything"}, "stock-picker": {"description": "Portfolio"}}
+    config = _config(tmp_path, profiles=profiles)
+    saved = config.hermes_home / "duplex" / "active_profiles.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text(json.dumps({"rob": "stock-picker"}), encoding="utf-8")
+
+    duplex = build_service(config, embed=fake_embed)
+    assert duplex._active_profiles.get("rob") == "general", "nothing is read before start"
+    await duplex.start()
+    try:
+        assert duplex._active_profiles.get("rob") == "stock-picker"
     finally:
         await duplex.stop()

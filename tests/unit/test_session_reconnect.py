@@ -14,12 +14,12 @@ from hermes_duplex.audio.frames import silent_frame
 from hermes_duplex.config import load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
+from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.notices import NOT_HEARD, PROVIDER_LOST
-from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.providers.wire import WireError
-from hermes_duplex.router.base import RouteDecision
+from hermes_duplex.router.base import ControlIntent, RouteDecision
 from hermes_duplex.session import PROVIDER_LOST_REASON, VoiceSession
 from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.base import InputFrame
@@ -30,21 +30,19 @@ KEYS = {"general": "general-key-0123456789", "stock-picker": "stocks-key-0123456
 LIVE = {"delegation_style": "live", "emits_speech_events": False, "supports_truncate": False}
 
 
-def _decision(profile: str) -> RouteDecision:
+def _decision(control_intent: ControlIntent | None = None) -> RouteDecision:
     return RouteDecision(
-        profile=profile,
         effort="medium",
-        model=ModelChoice(provider="openai", model="gpt-x") if profile == "stock-picker" else None,
-        confidence=0.9,
-        probabilities={profile: 0.9},
-        followup_prob=None,
-        sticky=False,
+        model=None,
+        suggestion=None,
+        control_intent=control_intent,
+        probabilities={},
         source="knn",
         latency_ms=1,
     )
 
 
-ROUTES = {"how is my portfolio doing": _decision("stock-picker"), "what's the weather": _decision("general")}
+ROUTES = {"how is my portfolio doing": _decision(), "what's the weather": _decision()}
 
 
 class _StubRouter:
@@ -58,9 +56,9 @@ class _StubRouter:
         text: str,
         speaker: str,
         *,
-        history: Sequence[str] = (),
-        hint: str | None = None,
+        active_profile: str,
         permitted: Callable[[str], bool] | None = None,
+        history: Sequence[str] = (),
     ) -> RouteDecision:
         self.requests.append((text, speaker))
         return ROUTES[text]
@@ -132,6 +130,7 @@ class _Harness:
         self.conversation = _QueueConversation()
         self.reconnect_waits_s: list[float] = []
         self._permissions = PermissionChecker(_config(tmp_path))
+        self.active_profiles = _active_profiles(tmp_path, self._permissions)
         self._hermes = HermesApiClient(api.api_base, KEYS.get, sleep=lambda _s: asyncio.sleep(0.01))
         self._run: asyncio.Task[None] | None = None
         self.provider = FakeProvider()
@@ -149,6 +148,7 @@ class _Harness:
             hermes=self._hermes,
             tracker=self.tracker,
             permissions=self._permissions,
+            active_profiles=self.active_profiles,
             sleep=record_wait,
         )
         self._run = asyncio.create_task(session.run())
@@ -174,6 +174,12 @@ class _Harness:
                 await asyncio.sleep(0.01)
 
 
+def _active_profiles(tmp_path: Path, permissions: PermissionChecker) -> ActiveProfiles:
+    """Everyone on their default profile: rob on stock-picker, alex on general."""
+    config = _config(tmp_path)
+    return ActiveProfiles(tmp_path / "home" / "duplex" / "active_profiles.json", permissions, config)
+
+
 def _config(tmp_path: Path) -> Any:
     raw = {
         "hermes": {"api_base": "http://127.0.0.1:8642"},
@@ -184,7 +190,7 @@ def _config(tmp_path: Path) -> Any:
             "stock-picker": {"description": "Portfolio and stocks", "examples": ["how's my portfolio"]},
         },
         "people": {
-            "rob": {"discord_id": "123", "profiles": ["*"]},
+            "rob": {"discord_id": "123", "profiles": ["*"], "default_profile": "stock-picker"},
             "alex": {"discord_id": "456", "profiles": ["general"]},
         },
     }

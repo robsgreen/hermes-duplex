@@ -127,55 +127,47 @@ async def test_slow_decisions_falls_to_knn_in_time_and_trips_the_breaker_for_30_
     router = _router(tmp_path, slow_decisions, clock)
     await router.configure()
     try:
-        await router.route(WEATHER, "rob")  # sets rob's active profile; knn is accepted early
+        await router.route(WEATHER, "rob", active_profile="general")  # knn agrees: accepted early
         caplog.clear()
 
         decisions = []
-        for text in (PORTFOLIO, WEATHER, PORTFOLIO):
+        for text, active in ((PORTFOLIO, "general"), (WEATHER, "stock-picker"), (PORTFOLIO, "general")):
             started = time.monotonic()
-            decisions.append(await router.route(text, "rob"))
+            decisions.append(await router.route(text, "rob", active_profile=active))
             assert (time.monotonic() - started) * 1000 < ROUTE_BUDGET_MS
-        assert [(d.profile, d.source) for d in decisions] == [
-            ("stock-picker", "knn"),
-            ("general", "knn"),
-            ("stock-picker", "knn"),
-        ]
+        assert [d.source for d in decisions] == ["knn", "knn", "knn"]
         assert all(d.latency_ms < ROUTE_BUDGET_MS for d in decisions)
         missed = [r for r in caplog.records if "decisions missed the 300 ms deadline" in r.getMessage()]
         assert len(missed) == 3
         asked = slow_decisions.calls
 
         # Three misses in a row: Decisions is not asked again until 30 s have passed.
-        skipped = await router.route(WEATHER, "rob")
-        assert (skipped.profile, skipped.source) == ("general", "knn")
+        skipped = await router.route(WEATHER, "rob", active_profile="stock-picker")
+        assert skipped.source == "knn"
         assert slow_decisions.calls == asked
 
         clock.skew_s = BREAKER_OPEN_S + 1
-        await router.route(PORTFOLIO, "rob")
+        await router.route(PORTFOLIO, "rob", active_profile="general")
         assert slow_decisions.calls == asked + 1
     finally:
         await router.close()
 
 
-async def test_every_backend_failing_falls_to_the_hint_else_active_else_default(tmp_path: Path) -> None:
+async def test_every_backend_failing_gives_the_default_effort_on_the_active_profile(tmp_path: Path) -> None:
     async with FakeDecisions(status=500) as failing:
         router = _router(tmp_path, failing)
         await router.configure()
         try:
-            hinted = await router.route(GIBBERISH, "alex", hint="stock-picker")
-            default = await router.route(GIBBERISH, "rob")
-            await router.route(PORTFOLIO, "rob")
-            active = await router.route(GIBBERISH, "rob")
+            decisions = [
+                await router.route(GIBBERISH, speaker, active_profile=active)
+                for speaker, active in (("alex", "general"), ("rob", "stock-picker"), ("rob", "general"))
+            ]
+            await router.route(GIBBERISH, "rob", active_profile="general")
         finally:
             await router.close()
 
-    assert (hinted.profile, hinted.source, hinted.effort) == ("stock-picker", "hint", "medium")
-    assert (default.profile, default.source, default.effort) == ("general", "fallback", "medium")
-    assert (active.profile, active.source, active.effort, active.sticky) == (
-        "stock-picker",
-        "fallback",
-        "medium",
-        True,
-    )
+    for decision in decisions:
+        assert (decision.source, decision.effort, decision.model) == ("fallback", "medium", None)
+        assert (decision.suggestion, decision.control_intent) == (None, None)
     # The third failure opened the breaker, so the last request did not ask Decisions.
     assert failing.calls == 3

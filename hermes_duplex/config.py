@@ -186,7 +186,7 @@ class JevConfig:
 
 @dataclass(frozen=True)
 class RouterConfig:
-    """Which backends route tasks to profiles, and the composite policy's knobs."""
+    """Which backends judge each task's effort and suggest switches, and the composite policy's knobs."""
 
     backend: str
     """Main-path backend, one of ``ROUTER_BACKENDS``."""
@@ -198,10 +198,8 @@ class RouterConfig:
     """How long the main path may take before the composite falls back, in ms."""
 
     default_profile: str = "general"
-    """Profile used when nothing else decides; must be defined under ``profiles``."""
-
-    sticky_idle_s: int = 600
-    """Seconds of idle after which a speaker's active profile expires."""
+    """The profile people start on when their own ``default_profile`` is unset and they may use it;
+    must be defined under ``profiles``."""
 
     suggest_switch: bool = True
     """Whether the router may suggest switching to another profile the speaker may use."""
@@ -242,6 +240,11 @@ class ProfileConfig:
     voice_context: str | None = None
     """Text, at most ``VOICE_CONTEXT_MAX_CHARS`` long, that the voice prompt carries while this is the
     active profile: what it covers, what to always hand off, how to say its words. None for none."""
+
+    def model_for(self, effort: str) -> ModelChoice | None:
+        """The model for a run at ``effort`` (``low``, ``medium``, ``high``) on this profile: its
+        ``models`` entry, else ``default_model``; None means the Hermes profile's own default."""
+        return self.models.get(effort) or self.default_model
 
 
 @dataclass(frozen=True)
@@ -593,6 +596,11 @@ def _router(section: _Section, profiles: Mapping[str, ProfileConfig]) -> RouterC
         raise ConfigError(
             section.child("fast_path"), _not_allowed("fast-path backend", fast_path, FAST_PATH_BACKENDS)
         )
+    if section.has("sticky_idle_s"):
+        raise ConfigError(
+            section.child("sticky_idle_s"),
+            "was removed: each person now keeps an active profile until they switch; delete this key",
+        )
     default_profile = section.text("default_profile") or RouterConfig.default_profile
     if default_profile not in profiles:
         raise ConfigError(
@@ -612,7 +620,6 @@ def _router(section: _Section, profiles: Mapping[str, ProfileConfig]) -> RouterC
         fast_path=fast_path,
         deadline_ms=section.positive_int("deadline_ms", RouterConfig.deadline_ms),
         default_profile=default_profile,
-        sticky_idle_s=section.positive_int("sticky_idle_s", RouterConfig.sticky_idle_s),
         suggest_switch=section.flag("suggest_switch", RouterConfig.suggest_switch),
         suggest_threshold=suggest_threshold,
         control_examples=control_examples,

@@ -70,7 +70,7 @@ async def test_knn_uses_the_given_embedder(tmp_path: Path) -> None:
 
     await knn.configure(choice_specs(config.profiles, config.router.control_examples))
     result = await knn.classify(
-        RouteRequest(text="how is my portfolio", speaker="rob", history=(), active_profile=None, hint=None),
+        RouteRequest(text="how is my portfolio", speaker="rob", history=(), active_profile="general"),
         deadline_ms=300,
     )
 

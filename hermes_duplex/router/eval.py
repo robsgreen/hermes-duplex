@@ -182,9 +182,11 @@ async def evaluate(
     A target is a backend's name (that backend alone, configured with every profile and ``_control``)
     or ``COMPOSITE`` (a ``CompositeRouter`` over ``router`` and ``backends``). Phrases are routed in
     order. A follow-up is sent by the speaker of the phrase it follows, with that speaker's earlier
-    phrases as history; each other phrase starts a new speaker. A backend alone gets that speaker's
-    last predicted profile as ``active_profile``. ``clock`` returns seconds and times each request;
-    the deadline is ``router.deadline_ms``. ``phrases`` must not be empty.
+    phrases as history; each other phrase starts a new speaker. Each target gets that speaker's last
+    predicted profile as ``active_profile``, starting from ``router.default_profile`` (the first
+    profile when that is not one of ``profiles``). The composite's prediction is ``_control`` for a
+    control request, else its decision's most probable choice. ``clock`` returns seconds and times
+    each request; the deadline is ``router.deadline_ms``. ``phrases`` must not be empty.
 
     Raises ``PhraseFileError`` when a phrase's profile is neither a profile nor ``_control``, and
     ``ValueError`` when a target is neither a backend in ``backends`` nor ``COMPOSITE``, or
@@ -200,15 +202,18 @@ async def evaluate(
     composite = CompositeRouter(router, profiles, backends, clock=clock) if COMPOSITE in targets else None
 
     speakers = _speakers(phrases)
+    first_active = router.default_profile if router.default_profile in profiles else next(iter(profiles))
     reports: list[EvalReport] = []
     for target in targets:
         if target == COMPOSITE:
             assert composite is not None
-            outcomes = await _run_composite(composite, phrases, speakers, router.deadline_ms, clock)
+            outcomes = await _run_composite(
+                composite, choices, phrases, speakers, first_active, router.deadline_ms, clock
+            )
         else:
             specs = choice_specs(profiles, router.control_examples)
             outcomes = await _run_backend(
-                by_name[target], specs, choices, phrases, speakers, router.deadline_ms, clock
+                by_name[target], specs, choices, phrases, speakers, first_active, router.deadline_ms, clock
             )
         reports.append(_report(target, phrases, outcomes, choices, router.deadline_ms))
     return reports
@@ -273,6 +278,7 @@ async def _run_backend(
     choices: Sequence[str],
     phrases: Sequence[LabelledPhrase],
     speakers: Sequence[tuple[str, tuple[str, ...]]],
+    first_active: str,
     deadline_ms: int,
     clock: Callable[[], float],
 ) -> list[_Outcome]:
@@ -281,7 +287,10 @@ async def _run_backend(
     outcomes: list[_Outcome] = []
     for phrase, (speaker, history) in zip(phrases, speakers, strict=True):
         req = RouteRequest(
-            text=phrase.text, speaker=speaker, history=history, active_profile=active.get(speaker), hint=None
+            text=phrase.text,
+            speaker=speaker,
+            history=history,
+            active_profile=active.get(speaker, first_active),
         )
         started = clock()
         try:
@@ -304,18 +313,32 @@ async def _run_backend(
 
 async def _run_composite(
     router: CompositeRouter,
+    choices: Sequence[str],
     phrases: Sequence[LabelledPhrase],
     speakers: Sequence[tuple[str, tuple[str, ...]]],
+    first_active: str,
     deadline_ms: int,
     clock: Callable[[], float],
 ) -> list[_Outcome]:
     await router.configure()
+    active: dict[str, str] = {}
     outcomes: list[_Outcome] = []
     for phrase, (speaker, history) in zip(phrases, speakers, strict=True):
         started = clock()
-        decision = await router.route(phrase.text, speaker, history=history)
+        decision = await router.route(
+            phrase.text, speaker, active_profile=active.get(speaker, first_active), history=history
+        )
         latency_ms = (clock() - started) * 1000
-        outcomes.append(_Outcome(decision.profile, decision.effort, latency_ms, latency_ms <= deadline_ms))
+        probs = decision.probabilities
+        if decision.control_intent is not None:
+            profile = CONTROL_PROFILE
+        elif probs:
+            profile = max(choices, key=lambda choice: probs.get(choice, 0.0))
+        else:
+            profile = active.get(speaker, first_active)
+        if profile != CONTROL_PROFILE:
+            active[speaker] = profile
+        outcomes.append(_Outcome(profile, decision.effort, latency_ms, latency_ms <= deadline_ms))
     return outcomes
 
 

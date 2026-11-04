@@ -18,8 +18,8 @@ Effort = Literal["low", "medium", "high"]
 ControlIntent = Literal["status", "cancel"]
 """What a ``_control`` request asks for: a summary of running tasks, or to stop one."""
 
-RouteSource = Literal["decisions", "jev", "knn", "hint", "sticky", "fallback"]
-"""What settled a decision: a backend by name, the profile hint, the sticky rule, or the fallback."""
+RouteSource = Literal["decisions", "jev", "knn", "fallback"]
+"""What settled a decision: a backend by name, or the fallback when no backend answered confidently."""
 
 CONTROL_DESCRIPTION = "status or cancel of running voice tasks"
 """The fixed description of the ``_control`` choice."""
@@ -88,39 +88,36 @@ def choice_specs(
 class RouteRequest:
     """One task to route.
 
-    ``history`` holds the conversation's recent lines, oldest first. ``active_profile`` is the
-    speaker's current sticky profile, or None. ``hint`` is a profile the voice model suggested, or None.
+    ``history`` holds the conversation's recent lines, oldest first. ``active_profile`` is the profile
+    the speaker's requests run on until they switch.
     """
 
     text: str
     speaker: str
     history: tuple[str, ...]
-    active_profile: str | None
-    hint: str | None
+    active_profile: str
 
 
 @dataclass(frozen=True)
 class RouteDecision:
-    """Where a task goes, and why.
+    """How hard a task should be worked on, and whether another profile would suit it better.
 
-    ``profile`` is a configured profile or ``_control``; a ``_control`` decision is answered locally
-    and never dispatched to Hermes. ``model`` None means the Hermes profile's own default.
-    ``confidence`` is the probability the deciding backend gave ``profile`` (0.0 when no backend
-    answered). ``probabilities`` maps every choice to the deciding backend's probability (empty when
-    none answered). ``sticky`` is true when the task stays on the speaker's active profile.
+    The task itself runs on the speaker's active profile; the router never changes it. ``model`` is
+    the active profile's model for ``effort``, None for the Hermes profile's own default (and for a
+    ``_control`` request). ``suggestion`` is another profile the speaker may use that clearly fits
+    the request better, or None. ``control_intent`` is set when the request asks about or stops the
+    speaker's tasks; such a request is answered locally and never dispatched to Hermes.
+    ``probabilities`` maps every choice to the deciding backend's probability (empty when none
+    answered).
     """
 
-    profile: str
     effort: Effort
     model: ModelChoice | None
-    confidence: float
+    suggestion: str | None
+    control_intent: ControlIntent | None
     probabilities: Mapping[str, float]
-    followup_prob: float | None
-    sticky: bool
     source: RouteSource
     latency_ms: int
-    control_intent: ControlIntent | None = None
-    """Set exactly when ``profile`` is ``_control``."""
 
 
 @dataclass(frozen=True)

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from .config import Config
 from .dispatch.hermes_api import HermesApiClient
 from .people import PermissionChecker
+from .profiles import ActiveProfiles
 from .prompts.base import PromptContext
 from .providers.registry import ProviderFactory, provider_factory
 from .router.composite import CompositeRouter
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 STOP_TIMEOUT_S = 5.0
 """``stop`` returns within this many seconds, abandoning whatever has not finished by then."""
+
+ACTIVE_PROFILES_FILE_NAME = "active_profiles.json"
+"""The file under ``$HERMES_HOME/duplex/`` that keeps each person's active profile across restarts."""
 
 SESSION_STOP_GRACE_S = 1.0
 """How long ``stop`` lets cancelled sessions finish (closing their provider) before abandoning them."""
@@ -51,9 +55,9 @@ class ServiceStatus:
 class DuplexService:
     """Runs one voice session per conversation that the transports accept.
 
-    Every session shares the router (so a speaker's sticky profile follows them across
-    conversations), the Hermes client, the task tracker, and the permission checker; each gets its
-    own provider session from ``provider_factory``. Use it from one event loop.
+    Every session shares the router, the Hermes client, the task tracker, the permission checker, and
+    the active-profile store (so a person's active profile follows them across conversations); each
+    gets its own provider session from ``provider_factory``. Use it from one event loop.
     """
 
     def __init__(
@@ -65,6 +69,7 @@ class DuplexService:
         hermes: HermesApiClient,
         tracker: TaskTracker,
         permissions: PermissionChecker,
+        active_profiles: ActiveProfiles,
         transports: Sequence[Transport],
     ) -> None:
         self._config = config
@@ -74,6 +79,7 @@ class DuplexService:
         self._hermes = hermes
         self._tracker = tracker
         self._permissions = permissions
+        self._active_profiles = active_profiles
         self.transports = tuple(transports)
         """The enabled transports, in start order."""
         self._sessions: dict[asyncio.Task[None], Conversation] = {}
@@ -81,8 +87,8 @@ class DuplexService:
         self._stopping = False
 
     async def start(self) -> None:
-        """Restore the tasks a previous run left open, configure the router, then start every
-        transport; returns once they accept conversations.
+        """Restore the tasks a previous run left open, load each person's saved active profile,
+        configure the router, then start every transport; returns once they accept conversations.
 
         The restored tasks stay unattended until a conversation hears their person
         (``TaskTracker.restore``).
@@ -90,6 +96,7 @@ class DuplexService:
         after stopping the transports that had started.
         """
         await self._tracker.restore()
+        self._active_profiles.load()
         await self._router.configure()
         self._started = True
         try:
@@ -160,6 +167,7 @@ class DuplexService:
             hermes=self._hermes,
             tracker=self._tracker,
             permissions=self._permissions,
+            active_profiles=self._active_profiles,
             voice=self._config.provider.voice,
             pacer_lead_ms=self._config.audio.pacer_lead_ms,
             gate_threshold_dbfs=self._config.audio.gate_threshold_dbfs,
@@ -215,6 +223,9 @@ def build_service(config: Config, *, embed: Embedder | None = None) -> DuplexSer
         hermes=HermesApiClient(config.hermes.api_base, lambda profile: _profile_key(config, profile)),
         tracker=TaskTracker(config.hermes_home, restore_max_age_h=config.tasks.restore_max_age_h),
         permissions=permissions,
+        active_profiles=ActiveProfiles(
+            config.hermes_home / "duplex" / ACTIVE_PROFILES_FILE_NAME, permissions, config
+        ),
         transports=transports,
     )
 

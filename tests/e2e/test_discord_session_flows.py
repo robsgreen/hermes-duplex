@@ -1,6 +1,6 @@
 """A Discord voice channel joined to a voice session, as the service joins them: who is credited
-with a request when several people talk, whose permissions apply, and that a stranger's voice never
-reaches the provider.
+with a request when several people talk, whose active profile it runs on, and that a stranger's
+voice never reaches the provider.
 
 The Discord conversation (20 ms mix tick, allowlist mixer, resampler, pacer), the voice session,
 the knn router, the permission check, the Hermes client, and the task history are the real ones.
@@ -22,7 +22,7 @@ from hermes_duplex.audio.frames import FRAME_MS
 from hermes_duplex.config import AudioConfig, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
-from hermes_duplex.prompts.notices import refusal
+from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.providers.fake.adapter import FakeProvider
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.router.composite import CompositeRouter
@@ -127,7 +127,8 @@ async def _wait_until(condition: Callable[[], bool], timeout_s: float) -> None:
 async def api() -> AsyncIterator[FakeHermesApi]:
     async with FakeHermesApi(KEYS) as fake:
         fake.run_scripts = [
-            RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "sunny"}])
+            RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": output}])
+            for output in ("sunny", "up 2%")
         ]
         yield fake
 
@@ -152,15 +153,24 @@ async def test_request_is_credited_to_who_talked_most_and_a_stranger_is_never_he
         receiver_factory=receivers,
     )
     provider = _ListeningProvider(SCRIPT)
+    active_profiles = ActiveProfiles(
+        tmp_path / "home" / "duplex" / "active_profiles.json", permissions, config
+    )
     session = VoiceSession(
-        conversation, provider, router=router, hermes=hermes, tracker=tracker, permissions=permissions
+        conversation,
+        provider,
+        router=router,
+        hermes=hermes,
+        tracker=tracker,
+        permissions=permissions,
+        active_profiles=active_profiles,
     )
     conversation.start()
     running = asyncio.create_task(session.run())
     try:
         await _feed(provider, receivers.built[-1].on_frame)
         await _wait_until(
-            lambda: len(provider.said("deliver_result")) == 1 and len(provider.said("say")) >= 2, 5
+            lambda: len(provider.said("deliver_result")) == 2 and len(provider.said("say")) >= 2, 5
         )
     finally:
         await conversation.close("test over")
@@ -169,20 +179,26 @@ async def test_request_is_credited_to_who_talked_most_and_a_stranger_is_never_he
         await tracker.close()
         await router.close()
 
-    [start] = api.requests_to("POST", "/runs")
-    assert start.path == "/p/general/v1/runs"
-    assert start.body["session_id"] == "duplex-alex-general"
-    assert start.body["input"] == "what's the weather tomorrow"
-    task = tracker.get(1)
-    assert task is not None
-    assert (task.person, task.profile, task.state) == ("alex", "general", "completed")
-    assert tracker.get(2) is None  # the refused request never became a task
+    # Both requests are alex's, so both run on his active profile, the only one he may use.
+    weather, portfolio = api.requests_to("POST", "/runs")
+    assert [start.path for start in (weather, portfolio)] == ["/p/general/v1/runs"] * 2
+    assert {weather.body["session_id"], portfolio.body["session_id"]} == {"duplex-alex-general"}
+    assert (weather.body["input"], portfolio.body["input"]) == (
+        "what's the weather tomorrow",
+        "how is my portfolio doing",
+    )
+    for number in (1, 2):
+        task = tracker.get(number)
+        assert task is not None
+        assert (task.person, task.profile, task.state) == ("alex", "general", "completed")
 
-    [result] = provider.said("deliver_result")
-    assert result["text"] == frame_result("general", "sunny", RESULT_CAP_TOKENS)
+    assert [result["text"] for result in provider.said("deliver_result")] == [
+        frame_result("general", "sunny", RESULT_CAP_TOKENS),
+        frame_result("general", "up 2%", RESULT_CAP_TOKENS),
+    ]
     assert [call["text"] for call in provider.said("say")] == [
         'Started "what\'s the weather tomorrow" on the general agent.',
-        refusal("stock-picker"),
+        'Started "how is my portfolio doing" on the general agent.',
     ]
 
     # The mix carries rob and alex; while only the stranger talks it holds nothing but the

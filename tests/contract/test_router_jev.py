@@ -96,7 +96,7 @@ async def backend(fake: FakeSystemOneApi) -> AsyncIterator[JevBackend]:
 
 
 def _request(text: str = "should I buy NVDA", history: tuple[str, ...] = ()) -> RouteRequest:
-    return RouteRequest(text=text, speaker="rob", history=history, active_profile=None, hint=None)
+    return RouteRequest(text=text, speaker="rob", history=history, active_profile="general")
 
 
 # --- request shape ---

@@ -41,10 +41,9 @@ router:
   fast_path: knn
   # How long the main path may take before falling back, in ms.
   deadline_ms: 300
-  # Profile used when nothing else decides; must be defined under `profiles`.
+  # Profile people start on when their own `default_profile` is unset and they may use it; must be
+  # defined under `profiles`.
   default_profile: general
-  # Seconds of idle after which a speaker's active profile expires.
-  sticky_idle_s: 600
   # Whether the router may ask "That sounds like a <profile> question. Want me to switch?" when a
   # request clearly belongs to another profile the speaker may use (default true). Nothing switches
   # without a yes.

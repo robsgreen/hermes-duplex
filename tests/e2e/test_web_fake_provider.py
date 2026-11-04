@@ -19,7 +19,6 @@ import pytest
 import yaml
 
 from hermes_duplex.config import load_config
-from hermes_duplex.prompts.notices import refusal
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.service import STOP_TIMEOUT_S, DuplexService, build_service
 from hermes_duplex.session import RESULT_CAP_TOKENS
@@ -88,8 +87,8 @@ def _sine(ms: int) -> bytes:
 
 def _write_config(tmp_path: Path, api_base: str) -> Path:
     """A duplex.yaml for the fake provider, the knn router over the phrase fixture's profiles, the
-    fake Hermes API, and the web transport on a free port. rob may use every profile, alex only
-    ``general``."""
+    fake Hermes API, and the web transport on a free port. rob may use every profile and starts on
+    ``stock-picker``; alex may use only ``general``."""
     profiles = yaml.safe_load(PHRASES.read_text(encoding="utf-8"))["profiles"]
     raw = {
         "hermes": {
@@ -100,7 +99,7 @@ def _write_config(tmp_path: Path, api_base: str) -> Path:
         "router": {"backend": "knn"},
         "profiles": profiles,
         "people": {
-            "rob": {"web_token_env": "TOKEN_ROB", "profiles": ["*"]},
+            "rob": {"web_token_env": "TOKEN_ROB", "profiles": ["*"], "default_profile": "stock-picker"},
             "alex": {"web_token_env": "TOKEN_ALEX", "profiles": ["general"]},
         },
         "transports": {"web": {"enabled": True, "port": 0}},
@@ -128,7 +127,7 @@ async def running(tmp_path: Path) -> AsyncIterator[Running]:
             assert time.monotonic() - started < STOP_TIMEOUT_S
 
 
-async def test_rob_routes_to_stock_picker_and_the_follow_up_sticks(
+async def test_rob_and_his_follow_up_run_on_his_active_profile(
     running: Running, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger="hermes_duplex.router.composite")
@@ -143,10 +142,7 @@ async def test_rob_routes_to_stock_picker_and_the_follow_up_sticks(
     assert {start.body["session_id"] for start in starts} == {"duplex-rob-stock-picker"}
 
     decisions = [r.__dict__["route_decision"] for r in caplog.records if "route_decision" in r.__dict__]
-    assert [(d["speaker"], d["profile"], d["sticky"]) for d in decisions] == [
-        ("rob", "stock-picker", False),
-        ("rob", "stock-picker", True),
-    ]
+    assert [(d["speaker"], d["profile"]) for d in decisions] == [("rob", "stock-picker")] * 2
 
     assert [result["text"] for result in results] == [
         frame_result("stock-picker", output, RESULT_CAP_TOKENS) for output in OUTPUTS
@@ -155,10 +151,10 @@ async def test_rob_routes_to_stock_picker_and_the_follow_up_sticks(
     assert OUTPUTS[0] in results[0]["text"]
 
 
-async def test_alex_is_refused_stock_picker_and_no_run_starts(running: Running) -> None:
+async def test_alex_asking_about_a_portfolio_runs_on_his_only_profile(running: Running) -> None:
     await running.talk("alex-web-token", 2000)
     [said] = await running.wait_for("say", 1)
 
-    assert said["text"] == refusal("stock-picker")
-    assert running.api.requests_to("POST", "/runs") == []
-    assert running.recorded("deliver_result") == []
+    assert said["text"] == 'Started "how is my portfolio doing" on the general agent.'
+    [start] = running.api.requests_to("POST", "/runs")
+    assert (start.path, start.body["session_id"]) == ("/p/general/v1/runs", "duplex-alex-general")

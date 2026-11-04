@@ -1,5 +1,5 @@
-"""CompositeRouter: fast and main paths, deadline, circuit breaker, hint, sticky rule, fallbacks,
-``_control``, the model table, and the decision log."""
+"""CompositeRouter: fast and main paths, deadline, circuit breaker, fallbacks, ``_control``, the effort
+and model of the active profile, switch suggestions, and the decision log."""
 
 import asyncio
 import logging
@@ -17,6 +17,7 @@ from hermes_duplex.router.base import (
     ControlSpec,
     Effort,
     ProfileSpec,
+    RouteDecision,
     RouteRequest,
 )
 from hermes_duplex.router.composite import CompositeRouter
@@ -76,7 +77,6 @@ class _StubBackend:
         self,
         profile_probs: Mapping[str, float],
         *,
-        followup_prob: float | None = None,
         effort_probs: Mapping[Effort, float] | None = None,
         control_intent: ControlIntent | None = None,
     ) -> None:
@@ -84,7 +84,7 @@ class _StubBackend:
             BackendResult(
                 profile_probs=profile_probs,
                 effort_probs=effort_probs,
-                followup_prob=followup_prob,
+                followup_prob=None,
                 latency_ms=1,
                 backend=self.name,
                 control_intent=control_intent,
@@ -129,24 +129,16 @@ def router(stub: _StubBackend, clock: _Clock) -> CompositeRouter:
     return CompositeRouter(CONFIG, PROFILES, [stub], clock=clock)
 
 
-async def _start_on_stock_picker(router: CompositeRouter, stub: _StubBackend) -> None:
-    stub.answer({"stock-picker": 0.9, "general": 0.1})
-    assert (await router.route("how's my portfolio", "rob")).profile == "stock-picker"
-
-
-async def test_scenario_portfolio_then_sticky_follow_up_then_topic_switch(clock: _Clock) -> None:
-    router = CompositeRouter(CONFIG, PROFILES, [KnnBackend(fake_embed)], clock=clock)
-    await router.configure()
-
-    first = await router.route("how is my portfolio doing", "rob")
-    clock.now_s += 30
-    follow_up = await router.route("and what about Tesla", "rob")
-    clock.now_s += 30
-    switch = await router.route("what's the weather tomorrow", "rob")
-
-    assert (first.profile, first.source, first.sticky) == ("stock-picker", "knn", False)
-    assert (follow_up.profile, follow_up.sticky) == ("stock-picker", True)
-    assert (switch.profile, switch.source, switch.sticky) == ("general", "knn", False)
+async def _route(
+    router: CompositeRouter,
+    text: str = "hmm",
+    speaker: str = "rob",
+    *,
+    active: str = "stock-picker",
+    permitted: Callable[[str], bool] | None = None,
+    history: Sequence[str] = (),
+) -> RouteDecision:
+    return await router.route(text, speaker, active_profile=active, permitted=permitted, history=history)
 
 
 async def test_choices_always_include_every_profile_and_control(stub: _StubBackend) -> None:
@@ -175,172 +167,177 @@ async def test_choices_always_include_every_profile_and_control(stub: _StubBacke
     assert control.intents["never mind"] == "cancel"
 
 
-def test_rejects_a_default_profile_that_is_not_configured(stub: _StubBackend) -> None:
-    with pytest.raises(ValueError, match="nowhere"):
-        CompositeRouter(RouterConfig(backend="knn", default_profile="nowhere"), PROFILES, [stub])
-
-
 async def test_backends_see_the_speakers_active_profile(router: CompositeRouter, stub: _StubBackend) -> None:
-    await _start_on_stock_picker(router, stub)
     stub.answer({"general": 0.9, "stock-picker": 0.1})
 
-    await router.route("set a reminder", "rob", history=("earlier line",), hint="general")
+    await _route(router, "set a reminder", history=("earlier line",), active="stock-picker")
 
-    assert stub.requests[0].active_profile is None
-    assert stub.requests[1] == RouteRequest(
-        text="set a reminder",
-        speaker="rob",
-        history=("earlier line",),
-        active_profile="stock-picker",
-        hint="general",
-    )
-
-
-async def test_a_profile_the_speaker_may_not_use_does_not_become_their_active_profile(
-    router: CompositeRouter, stub: _StubBackend
-) -> None:
-    def general_only(profile: str) -> bool:
-        return profile == "general"
-
-    stub.answer({"general": 0.9, "stock-picker": 0.1})
-    await router.route("set a reminder", "alex", permitted=general_only)
-    stub.answer({"stock-picker": 0.9, "general": 0.1})
-    refused = await router.route("how's my portfolio", "alex", permitted=general_only)
-    stub.answer({"general": 0.4, "stock-picker": 0.35})
-    after = await router.route("hmm", "alex", permitted=general_only)
-
-    assert refused.profile == "stock-picker", "the router still sees every profile"
-    assert [request.active_profile for request in stub.requests] == [None, "general", "general"]
-    assert (after.profile, after.sticky) == ("general", True)
-
-
-async def test_active_profile_is_per_speaker(router: CompositeRouter, stub: _StubBackend) -> None:
-    await _start_on_stock_picker(router, stub)
-    stub.answer({"general": 0.4, "stock-picker": 0.35})
-
-    decision = await router.route("hmm", "alex")
-
-    assert (decision.profile, decision.sticky, decision.source) == ("general", False, "fallback")
-
-
-async def test_sticky_profile_expires_after_idle(
-    router: CompositeRouter, stub: _StubBackend, clock: _Clock
-) -> None:
-    await _start_on_stock_picker(router, stub)
-
-    clock.now_s += 599
-    stub.answer({"general": 0.4, "stock-picker": 0.3})
-    before = await router.route("hmm", "rob")
-    clock.now_s += 600
-    stub.answer({"general": 0.4, "stock-picker": 0.3})
-    after = await router.route("hmm", "rob")
-
-    assert (before.profile, before.sticky, before.source) == ("stock-picker", True, "fallback")
-    assert stub.requests[2].active_profile is None
-    assert (after.profile, after.sticky, after.source) == ("general", False, "fallback")
-
-
-async def test_sticky_idle_is_configurable(stub: _StubBackend, clock: _Clock) -> None:
-    router = CompositeRouter(RouterConfig(backend="knn", sticky_idle_s=60), PROFILES, [stub], clock=clock)
-    await _start_on_stock_picker(router, stub)
-
-    clock.now_s += 60
-    stub.answer({"general": 0.4, "stock-picker": 0.3})
-
-    assert (await router.route("hmm", "rob")).profile == "general"
+    assert stub.requests == [
+        RouteRequest(
+            text="set a reminder", speaker="rob", history=("earlier line",), active_profile="stock-picker"
+        )
+    ]
 
 
 @pytest.mark.parametrize(
-    ("followup_prob", "general", "stock_picker", "expected"),
+    ("winner", "effort_probs", "effort", "model"),
     [
-        (0.4, 0.5, 0.3, "general"),  # margin 0.2, not a follow-up: leaves
-        (0.4, 0.5, 0.31, "stock-picker"),  # margin 0.19: stays
-        (0.5, 0.75, 0.25, "stock-picker"),  # a follow-up: stays whatever the margin
-        (None, 0.5, 0.2, "general"),  # no follow-up judgement, margin 0.3: leaves
-        (None, 0.5, 0.21, "stock-picker"),  # margin 0.29: stays
+        ("stock-picker", {"low": 0.1, "medium": 0.2, "high": 0.7}, "high", DEEP),  # table cell
+        ("stock-picker", {"low": 0.6, "medium": 0.3, "high": 0.1}, "low", FAST),  # table cell
+        ("stock-picker", {"low": 0.1, "medium": 0.8, "high": 0.1}, "medium", FALLBACK),  # → default_model
+        ("stock-picker", None, "medium", FALLBACK),  # no effort judgement → medium
+        ("general", {"low": 0.1, "medium": 0.2, "high": 0.7}, "high", DEEP),  # the active profile's table
     ],
 )
-async def test_sticky_thresholds(
+async def test_model_comes_from_the_active_profiles_table(
     router: CompositeRouter,
     stub: _StubBackend,
-    followup_prob: float | None,
-    general: float,
-    stock_picker: float,
-    expected: str,
+    winner: str,
+    effort_probs: Mapping[Effort, float] | None,
+    effort: Effort,
+    model: ModelChoice,
 ) -> None:
-    await _start_on_stock_picker(router, stub)
-    stub.answer({"general": general, "stock-picker": stock_picker}, followup_prob=followup_prob)
+    stub.answer(
+        {winner: 0.6, "stock-picker" if winner == "general" else "general": 0.4}, effort_probs=effort_probs
+    )
 
-    decision = await router.route("next", "rob")
+    decision = await _route(router, "should I buy NVDA", active="stock-picker")
 
-    assert decision.profile == expected
-    if expected == "stock-picker":
-        assert (decision.sticky, decision.source, decision.confidence) == (True, "sticky", stock_picker)
-    else:
-        assert (decision.sticky, decision.source, decision.confidence) == (False, "knn", general)
-    assert decision.followup_prob == followup_prob
+    assert (decision.effort, decision.model, decision.source) == (effort, model, "knn")
 
 
-async def test_unconfident_backend_falls_back_to_the_default_profile(
+async def test_active_profile_without_models_uses_the_hermes_profile_default(
     router: CompositeRouter, stub: _StubBackend
 ) -> None:
-    stub.answer({"stock-picker": 0.49, "general": 0.3})
+    stub.answer({"general": 0.9, "stock-picker": 0.1}, effort_probs={"low": 0.0, "medium": 0.0, "high": 1.0})
 
-    decision = await router.route("hmm", "rob")
+    decision = await _route(router, "set a reminder", active="general")
 
-    assert (decision.profile, decision.source, decision.sticky, decision.effort) == (
-        "general",
+    assert (decision.effort, decision.model, decision.suggestion) == ("high", None, None)
+
+
+@pytest.mark.parametrize(
+    ("probs", "suggestion"),
+    [
+        ({"general": 0.9, "stock-picker": 0.1}, "general"),  # confident other profile
+        ({"general": 0.85, "stock-picker": 0.15}, "general"),  # exactly the threshold
+        ({"general": 0.84, "stock-picker": 0.16}, None),  # below the threshold
+        ({"general": 0.9, "stock-picker": 0.7}, "general"),  # beats the active profile by 0.2
+        ({"general": 0.9, "stock-picker": 0.71}, None),  # beats it by less than 0.2
+        ({"stock-picker": 0.95, "general": 0.05}, None),  # the active profile itself
+    ],
+)
+async def test_suggests_another_profile_only_when_clearly_better(
+    router: CompositeRouter, stub: _StubBackend, probs: Mapping[str, float], suggestion: str | None
+) -> None:
+    stub.answer(probs)
+
+    decision = await _route(router, "what's the weather", active="stock-picker")
+
+    assert decision.suggestion == suggestion
+    assert decision.model == FALLBACK, "the request still runs on the active profile"
+
+
+async def test_suggestions_can_be_turned_off(stub: _StubBackend) -> None:
+    router = CompositeRouter(RouterConfig(backend="knn", suggest_switch=False), PROFILES, [stub])
+    stub.answer({"general": 0.99, "stock-picker": 0.01})
+
+    assert (await _route(router, "what's the weather")).suggestion is None
+
+
+async def test_suggest_threshold_is_configurable(stub: _StubBackend) -> None:
+    router = CompositeRouter(RouterConfig(backend="knn", suggest_threshold=0.6), PROFILES, [stub])
+    stub.answer({"general": 0.65, "stock-picker": 0.35})
+
+    assert (await _route(router, "what's the weather")).suggestion == "general"
+
+
+async def test_never_suggests_a_profile_the_speaker_may_not_use(stub: _StubBackend) -> None:
+    profiles = {**PROFILES, "news": ProfileConfig(description="Headlines")}
+    router = CompositeRouter(RouterConfig(backend="knn", suggest_threshold=0.5), profiles, [stub])
+
+    def no_stocks(profile: str) -> bool:
+        return profile != "stock-picker"
+
+    stub.answer({"stock-picker": 0.9, "news": 0.05, "general": 0.05})
+    refused = await _route(router, "how's my portfolio", "alex", active="general", permitted=no_stocks)
+    stub.answer({"stock-picker": 0.35, "news": 0.6, "general": 0.05})
+    next_best = await _route(router, "any headlines", "alex", active="general", permitted=no_stocks)
+
+    assert refused.suggestion is None
+    assert next_best.suggestion == "news"
+
+
+async def test_unconfident_backend_falls_back_without_a_suggestion(
+    router: CompositeRouter, stub: _StubBackend
+) -> None:
+    stub.answer({"general": 0.49, "stock-picker": 0.3})
+
+    decision = await _route(router, active="stock-picker")
+
+    assert (
+        decision.source,
+        decision.effort,
+        decision.model,
+        decision.suggestion,
+        decision.control_intent,
+    ) == (
         "fallback",
-        False,
         "medium",
+        FALLBACK,
+        None,
+        None,
     )
 
 
 async def test_failing_backend_falls_back_and_logs(
     router: CompositeRouter, stub: _StubBackend, caplog: pytest.LogCaptureFixture
 ) -> None:
-    await _start_on_stock_picker(router, stub)
     stub.results.append(RuntimeError("boom"))
 
     with caplog.at_level(logging.ERROR, logger="hermes_duplex.router.composite"):
-        decision = await router.route("next", "rob")
+        decision = await _route(router, "next")
 
-    assert (decision.profile, decision.source, decision.sticky) == ("stock-picker", "fallback", True)
-    assert (decision.confidence, decision.probabilities, decision.effort) == (0.0, {}, "medium")
+    assert (decision.source, decision.probabilities, decision.effort, decision.model) == (
+        "fallback",
+        {},
+        "medium",
+        FALLBACK,
+    )
     assert "router backend knn failed" in caplog.text
 
 
 async def test_deadline_is_passed_to_backends(stub: _StubBackend) -> None:
     stub.answer({"general": 1.0})
 
-    await CompositeRouter(RouterConfig(backend="knn", deadline_ms=123), PROFILES, [stub]).route("x", "rob")
+    await _route(CompositeRouter(RouterConfig(backend="knn", deadline_ms=123), PROFILES, [stub]), "x")
 
     assert stub.deadlines_ms == [123]
 
 
 @pytest.mark.parametrize(("text", "intent"), [("any updates", "status"), ("cancel that", "cancel")])
-async def test_control_requests_carry_their_intent_and_keep_the_active_profile(
-    clock: _Clock, text: str, intent: str
-) -> None:
+async def test_control_requests_carry_their_intent(clock: _Clock, text: str, intent: str) -> None:
     router = CompositeRouter(CONFIG, PROFILES, [KnnBackend(fake_embed)], clock=clock)
     await router.configure()
-    await router.route("how is my portfolio doing", "rob")
 
-    decision = await router.route(text, "rob")
-    after = await router.route("zxq", "rob")
+    decision = await _route(router, text, active="general")
 
-    assert (decision.profile, decision.control_intent, decision.model) == (CONTROL_PROFILE, intent, None)
-    assert (decision.source, decision.sticky) == ("knn", False)
-    assert (after.profile, after.sticky, after.control_intent) == ("stock-picker", True, None)
+    assert (decision.control_intent, decision.model, decision.suggestion, decision.source) == (
+        intent,
+        None,
+        None,
+        "knn",
+    )
 
 
-async def test_control_bypasses_the_sticky_rule(router: CompositeRouter, stub: _StubBackend) -> None:
-    await _start_on_stock_picker(router, stub)
-    stub.answer({CONTROL_PROFILE: 0.55, "stock-picker": 0.45}, control_intent="cancel")
+async def test_control_takes_the_intent_the_backend_tells(
+    router: CompositeRouter, stub: _StubBackend
+) -> None:
+    stub.answer({CONTROL_PROFILE: 0.55, "general": 0.45}, control_intent="cancel")
 
-    decision = await router.route("stop it", "rob")
+    decision = await _route(router, "stop it")
 
-    assert (decision.profile, decision.control_intent) == (CONTROL_PROFILE, "cancel")
+    assert (decision.control_intent, decision.suggestion) == ("cancel", None)
 
 
 async def test_control_without_an_intent_is_a_status_request(
@@ -348,66 +345,31 @@ async def test_control_without_an_intent_is_a_status_request(
 ) -> None:
     stub.answer({CONTROL_PROFILE: 0.9, "general": 0.1})
 
-    decision = await router.route("what's happening", "rob")
-
-    assert (decision.profile, decision.control_intent) == (CONTROL_PROFILE, "status")
-
-
-@pytest.mark.parametrize(
-    ("effort_probs", "effort", "model"),
-    [
-        ({"low": 0.1, "medium": 0.2, "high": 0.7}, "high", DEEP),  # table cell
-        ({"low": 0.6, "medium": 0.3, "high": 0.1}, "low", FAST),  # table cell
-        ({"low": 0.1, "medium": 0.8, "high": 0.1}, "medium", FALLBACK),  # missing cell → default_model
-        (None, "medium", FALLBACK),  # no effort judgement → medium
-    ],
-)
-async def test_model_table(
-    router: CompositeRouter,
-    stub: _StubBackend,
-    effort_probs: Mapping[Effort, float] | None,
-    effort: Effort,
-    model: ModelChoice,
-) -> None:
-    stub.answer({"stock-picker": 0.9, "general": 0.1}, effort_probs=effort_probs)
-
-    decision = await router.route("should I buy NVDA", "rob")
-
-    assert (decision.effort, decision.model) == (effort, model)
-
-
-async def test_profile_without_models_uses_the_hermes_profile_default(
-    router: CompositeRouter, stub: _StubBackend
-) -> None:
-    stub.answer({"general": 0.9, "stock-picker": 0.1}, effort_probs={"low": 0.0, "medium": 0.0, "high": 1.0})
-
-    decision = await router.route("set a reminder", "rob")
-
-    assert (decision.profile, decision.effort, decision.model) == ("general", "high", None)
+    assert (await _route(router, "what's happening")).control_intent == "status"
 
 
 async def test_logs_one_structured_line_per_decision(clock: _Clock, caplog: pytest.LogCaptureFixture) -> None:
     stub = _StubBackend(clock, latency_s=0.012)
     router = CompositeRouter(CONFIG, PROFILES, [stub], clock=clock)
     stub.answer(
-        {"stock-picker": 0.7, "general": 0.2, CONTROL_PROFILE: 0.1},
+        {"general": 0.9, "stock-picker": 0.05, CONTROL_PROFILE: 0.05},
         effort_probs={"low": 0.0, "medium": 0.0, "high": 1.0},
     )
 
     with caplog.at_level(logging.INFO, logger="hermes_duplex.router.composite"):
-        decision = await router.route("should I buy NVDA", "rob")
+        decision = await _route(router, "what's the weather", active="stock-picker")
 
     [record] = [r for r in caplog.records if r.name == "hermes_duplex.router.composite"]
     assert record.__dict__["route_decision"] == {
         "speaker": "rob",
         "profile": "stock-picker",
+        "control": None,
         "effort": "high",
         "model": "anthropic/deep-1",
-        "confidence": 0.7,
-        "top3": {"stock-picker": 0.7, "general": 0.2, CONTROL_PROFILE: 0.1},
+        "suggestion": "general",
+        "top3": {"general": 0.9, "stock-picker": 0.05, CONTROL_PROFILE: 0.05},
         "source": "knn",
         "latency_ms": 12,
-        "sticky": False,
     }
     assert decision.latency_ms == 12
     message = record.getMessage()
@@ -415,8 +377,8 @@ async def test_logs_one_structured_line_per_decision(clock: _Clock, caplog: pyte
         "speaker=rob",
         "profile=stock-picker",
         "model=anthropic/deep-1",
+        "suggestion=general",
         "latency_ms=12",
-        "sticky=False",
     ):
         assert fragment in message
 
@@ -462,13 +424,13 @@ async def test_main_path_in_time_decides_with_its_effort() -> None:
     main.answer({"stock-picker": 0.8, "general": 0.2}, effort_probs={"low": 0.1, "medium": 0.1, "high": 0.8})
     fast.answer({"general": 0.7, "stock-picker": 0.3})
 
-    decision = await _two_path_router(main, fast).route("should I buy NVDA", "rob")
+    decision = await _route(_two_path_router(main, fast), "should I buy NVDA")
 
-    assert (decision.profile, decision.source, decision.effort, decision.model) == (
-        "stock-picker",
+    assert (decision.source, decision.effort, decision.model, decision.suggestion) == (
         "decisions",
         "high",
         DEEP,
+        None,
     )
     assert main.requests == fast.requests
     assert main.deadlines_ms == fast.deadlines_ms == [300]
@@ -481,10 +443,10 @@ async def test_decisions_timeout_uses_knn_within_the_deadline(caplog: pytest.Log
 
     started = time.monotonic()
     with caplog.at_level(logging.WARNING, logger="hermes_duplex.router.composite"):
-        decision = await router.route("how's my portfolio", "rob")
+        decision = await _route(router, "how's my portfolio")
     elapsed_ms = (time.monotonic() - started) * 1000
 
-    assert (decision.profile, decision.source, decision.effort) == ("stock-picker", "knn", "medium")
+    assert (decision.source, decision.effort) == ("knn", "medium")
     assert 290 <= decision.latency_ms < 350
     assert elapsed_ms < 350
     await asyncio.sleep(0)  # let the cancelled call unwind
@@ -496,40 +458,26 @@ async def test_deadline_is_configurable() -> None:
     main, fast = _main(delay_s=SLOW_S), _StubBackend()
     fast.answer({"stock-picker": 0.7, "general": 0.3})
 
-    decision = await _two_path_router(
-        main, fast, RouterConfig(backend="decisions", fast_path="knn", deadline_ms=50)
-    ).route("how's my portfolio", "rob")
+    decision = await _route(
+        _two_path_router(main, fast, RouterConfig(backend="decisions", fast_path="knn", deadline_ms=50)),
+        "how's my portfolio",
+    )
 
     assert 45 <= decision.latency_ms < 150
     assert main.deadlines_ms == [50]
 
 
 @pytest.mark.parametrize("winner", ["stock-picker", CONTROL_PROFILE])
-async def test_sure_fast_path_is_accepted_without_waiting(winner: str) -> None:
+async def test_sure_fast_path_for_the_active_profile_or_control_is_accepted_without_waiting(
+    winner: str,
+) -> None:
     main, fast = _main(delay_s=SLOW_S), _StubBackend()
-    other = "general"
-    fast.answer({winner: 0.9, other: 0.1})
+    fast.answer({winner: 0.9, "general": 0.1})
 
-    decision = await _two_path_router(main, fast).route("how's my portfolio", "rob")
+    decision = await _route(_two_path_router(main, fast), "how's my portfolio", active="stock-picker")
 
-    assert (decision.profile, decision.source) == (winner, "knn")
-    assert decision.latency_ms < 100
-    await asyncio.sleep(0)  # let the cancelled call unwind
-    assert main.cancelled
-
-
-async def test_sure_fast_path_agreeing_with_the_active_profile_is_accepted_early() -> None:
-    main, fast = _main(), _StubBackend()
-    router = _two_path_router(main, fast)
-    main.answer({"stock-picker": 0.9, "general": 0.1})
-    fast.answer({"stock-picker": 0.9, "general": 0.1})
-    await router.route("how's my portfolio", "rob")
-    main.delay_s = SLOW_S
-    fast.answer({"stock-picker": 0.9, "general": 0.1})
-
-    decision = await router.route("and Tesla", "rob")
-
-    assert (decision.profile, decision.source, decision.sticky) == ("stock-picker", "knn", True)
+    assert (decision.source, decision.suggestion) == ("knn", None)
+    assert decision.control_intent == ("status" if winner == CONTROL_PROFILE else None)
     assert decision.latency_ms < 100
     await asyncio.sleep(0)  # let the cancelled call unwind
     assert main.cancelled
@@ -539,147 +487,57 @@ async def test_sure_fast_path_agreeing_with_the_active_profile_is_accepted_early
     "fast_probs",
     [
         {"stock-picker": 0.84, "general": 0.16},  # not sure enough
-        {"general": 0.9, "stock-picker": 0.1},  # sure, but leaves the active profile
+        {"general": 0.9, "stock-picker": 0.1},  # sure, but of another profile: a suggestion waits
     ],
 )
 async def test_fast_path_not_accepted_early_waits_for_the_main_path(fast_probs: Mapping[str, float]) -> None:
-    main, fast = _main(), _StubBackend()
-    router = _two_path_router(main, fast)
-    main.answer({"stock-picker": 0.9, "general": 0.1})
-    fast.answer({"stock-picker": 0.9, "general": 0.1})
-    await router.route("how's my portfolio", "rob")
-    main.delay_s = 0.05
-    main.answer({"stock-picker": 0.8, "general": 0.2}, followup_prob=0.9)
+    main, fast = _main(delay_s=0.05), _StubBackend()
+    main.answer({"stock-picker": 0.8, "general": 0.2})
     fast.answer(fast_probs)
 
-    decision = await router.route("and that other one", "rob")
+    decision = await _route(_two_path_router(main, fast), "and that other one", active="stock-picker")
 
-    assert (decision.profile, decision.source) == ("stock-picker", "decisions")
+    assert (decision.source, decision.suggestion) == ("decisions", None)
     assert not main.cancelled
 
 
-async def test_unconfident_main_path_falls_to_knn_but_keeps_its_effort_and_follow_up() -> None:
+async def test_main_path_suggestion_after_a_sure_fast_path_for_another_profile() -> None:
+    main, fast = _main(delay_s=0.02), _StubBackend()
+    main.answer({"general": 0.9, "stock-picker": 0.1})
+    fast.answer({"general": 0.9, "stock-picker": 0.1})
+
+    decision = await _route(_two_path_router(main, fast), "what's the weather", active="stock-picker")
+
+    assert (decision.source, decision.suggestion) == ("decisions", "general")
+
+
+async def test_unconfident_main_path_falls_to_knn_but_keeps_its_effort() -> None:
     main, fast = _main(), _StubBackend()
     main.answer(
-        {"stock-picker": 0.45, "general": 0.4},
-        effort_probs={"low": 0.9, "medium": 0.05, "high": 0.05},
-        followup_prob=0.2,
+        {"stock-picker": 0.45, "general": 0.4}, effort_probs={"low": 0.9, "medium": 0.05, "high": 0.05}
     )
     fast.answer({"stock-picker": 0.7, "general": 0.3})
 
-    decision = await _two_path_router(main, fast).route("should I buy NVDA", "rob")
+    decision = await _route(_two_path_router(main, fast), "should I buy NVDA")
 
-    assert (decision.profile, decision.source, decision.effort, decision.model) == (
-        "stock-picker",
-        "knn",
-        "low",
-        FAST,
-    )
-    assert (decision.followup_prob, decision.confidence) == (0.2, 0.7)
+    assert (decision.source, decision.effort, decision.model) == ("knn", "low", FAST)
+    assert decision.probabilities == {"stock-picker": 0.7, "general": 0.3}
 
 
-async def test_hint_is_used_when_the_main_path_times_out_and_knn_is_not_confident() -> None:
-    main, fast = _main(delay_s=SLOW_S), _StubBackend()
-    fast.answer({"general": 0.45, "stock-picker": 0.4})
-
-    decision = await _two_path_router(main, fast, SHORT_DEADLINE).route("hmm", "rob", hint="stock-picker")
-
-    assert (decision.profile, decision.source, decision.effort, decision.sticky) == (
-        "stock-picker",
-        "hint",
-        "medium",
-        False,
-    )
-    assert decision.confidence == 0.4
-
-
-async def test_hint_is_ignored_when_knn_is_confident() -> None:
-    main, fast = _main(delay_s=SLOW_S), _StubBackend()
-    fast.answer({"general": 0.7, "stock-picker": 0.3})
-
-    decision = await _two_path_router(main, fast, SHORT_DEADLINE).route("hmm", "rob", hint="stock-picker")
-
-    assert (decision.profile, decision.source) == ("general", "knn")
-
-
-async def test_hint_is_ignored_when_the_main_path_answers() -> None:
+async def test_every_path_failing_gives_the_default_effort_on_the_active_profile() -> None:
     main, fast = _main(), _StubBackend()
-    main.answer({"general": 0.8, "stock-picker": 0.2})
-    fast.answer({"general": 0.45, "stock-picker": 0.4})
-
-    decision = await _two_path_router(main, fast).route("hmm", "rob", hint="stock-picker")
-
-    assert (decision.profile, decision.source) == ("general", "decisions")
-
-
-async def test_hint_that_is_not_a_profile_is_ignored() -> None:
-    main, fast = _main(), _StubBackend()
-    main.results.append(RuntimeError("boom"))
-    fast.answer({"general": 0.45, "stock-picker": 0.4})
-
-    decision = await _two_path_router(main, fast).route("hmm", "rob", hint="nowhere")
-
-    assert (decision.profile, decision.source) == ("general", "fallback")
-
-
-async def test_all_paths_failing_fall_back_to_the_active_profile_else_the_default() -> None:
-    main, fast = _main(), _StubBackend()
-    router = _two_path_router(main, fast)
-    main.results.append(RuntimeError("boom"))
-    fast.results.append(RuntimeError("boom"))
-    first = await router.route("hmm", "rob")
-    main.answer({"stock-picker": 0.9, "general": 0.1})
-    fast.answer({"stock-picker": 0.9, "general": 0.1})
-    await router.route("how's my portfolio", "rob")
     main.results.append(RuntimeError("boom"))
     fast.results.append(RuntimeError("boom"))
 
-    second = await router.route("hmm", "rob")
+    decision = await _route(_two_path_router(main, fast), active="stock-picker")
 
-    assert (first.profile, first.source, first.effort, first.sticky) == (
-        "general",
+    assert (decision.source, decision.effort, decision.model, decision.suggestion) == (
         "fallback",
         "medium",
-        False,
+        FALLBACK,
+        None,
     )
-    assert (second.profile, second.source, second.effort, second.sticky) == (
-        "stock-picker",
-        "fallback",
-        "medium",
-        True,
-    )
-    assert (second.confidence, second.probabilities) == (0.0, {})
-
-
-async def test_main_path_follow_up_judges_a_confident_knn_switch() -> None:
-    main, fast = _main(), _StubBackend()
-    router = _two_path_router(main, fast)
-    for speaker in ("rob", "alex"):
-        main.answer({"stock-picker": 0.9, "general": 0.1})
-        fast.answer({"stock-picker": 0.9, "general": 0.1})
-        await router.route("how's my portfolio", speaker)
-
-    # knn alone (no follow-up judgement) would need a 0.3 margin to leave. With the main path's
-    # follow-up probability, 0.25 is enough for a new topic, and no margin is enough for a follow-up.
-    main.answer({"general": 0.45, "stock-picker": 0.4}, followup_prob=0.1)
-    fast.answer({"general": 0.6, "stock-picker": 0.35})
-    leaves = await router.route("what's the weather", "rob")
-    main.answer({"general": 0.45, "stock-picker": 0.4}, followup_prob=0.9)
-    fast.answer({"general": 0.6, "stock-picker": 0.35})
-    stays = await router.route("and the weather there", "alex")
-
-    assert (leaves.profile, leaves.source, leaves.sticky, leaves.followup_prob) == (
-        "general",
-        "knn",
-        False,
-        0.1,
-    )
-    assert (stays.profile, stays.source, stays.sticky, stays.followup_prob) == (
-        "stock-picker",
-        "sticky",
-        True,
-        0.9,
-    )
+    assert (decision.control_intent, decision.probabilities) == (None, {})
 
 
 async def test_circuit_breaker_skips_the_main_path_for_30_s_after_3_failures(
@@ -693,21 +551,21 @@ async def test_circuit_breaker_skips_the_main_path_for_30_s_after_3_failures(
 
     with caplog.at_level(logging.INFO, logger="hermes_duplex.router.composite"):
         for _ in range(3):
-            await router.route("hmm", "rob")
+            await _route(router)
         assert "circuit breaker open: skipping decisions for 30 s after 3 consecutive failures" in caplog.text
 
         clock.now_s += 29.9
-        skipped = await router.route("hmm", "rob")
+        skipped = await _route(router)
         assert len(main.requests) == 3
-        assert (skipped.profile, skipped.source) == ("general", "knn")
+        assert skipped.source == "knn"
 
         clock.now_s += 0.1
         main.answer({"stock-picker": 0.9, "general": 0.1})
         fast.answer({"general": 0.7, "stock-picker": 0.3})
-        back = await router.route("how's my portfolio", "rob")
+        back = await _route(router, "how's my portfolio")
 
     assert len(main.requests) == 4
-    assert (back.profile, back.source) == ("stock-picker", "decisions")
+    assert back.source == "decisions"
     assert "circuit breaker closed: asking decisions again" in caplog.text
 
 
@@ -718,7 +576,7 @@ async def test_circuit_breaker_counts_deadline_misses() -> None:
         fast.answer({"general": 0.7, "stock-picker": 0.3})
 
     for _ in range(4):
-        await router.route("hmm", "rob")
+        await _route(router)
 
     assert len(main.requests) == 3
 
@@ -733,7 +591,7 @@ async def test_circuit_breaker_needs_consecutive_failures() -> None:
         fast.answer({"general": 0.7, "stock-picker": 0.3})
 
     for _ in range(6):
-        await router.route("hmm", "rob")
+        await _route(router)
 
     assert len(main.requests) == 6
 
@@ -745,6 +603,6 @@ async def test_early_accept_does_not_count_against_the_main_path() -> None:
         fast.answer({"general": 0.9, "stock-picker": 0.1})
 
     for _ in range(4):
-        await router.route("set a reminder", "rob")
+        await _route(router, "set a reminder", active="general")
 
     assert len(main.requests) == 4

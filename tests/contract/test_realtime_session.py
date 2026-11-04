@@ -14,12 +14,12 @@ import pytest
 import yaml
 
 from hermes_duplex.audio.frames import silent_frame
-from hermes_duplex.config import CONTROL_PROFILE, load_config
+from hermes_duplex.config import load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
+from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.base import TaskReport, json_report
 from hermes_duplex.prompts.notices import NO_SUCH_TASK, task_summary, which_to_cancel
-from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.realtime.adapter import RealtimeApiProvider
 from hermes_duplex.providers.realtime.openai.dialect import OPENAI
 from hermes_duplex.router.base import ControlIntent, RouteDecision
@@ -42,28 +42,25 @@ TRUNCATE_TOLERANCE_MS = 20
 # A run that starts and never ends on its own, so it stays open for status and cancel.
 OPEN_RUN = RunScript(events=[{"event": "run.started"}])
 
-STARTED_WEATHER = 'Started "what\'s the weather" on the general agent.'
+STARTED_WEATHER = 'Started "what\'s the weather" on the stock-picker agent.'
 
 
-def _decision(profile: str, control_intent: ControlIntent | None = None) -> RouteDecision:
+def _decision(control_intent: ControlIntent | None = None) -> RouteDecision:
     return RouteDecision(
-        profile=profile,
         effort="medium",
-        model=ModelChoice(provider="openai", model="gpt-x") if profile == "stock-picker" else None,
-        confidence=0.9,
-        probabilities={profile: 0.9},
-        followup_prob=None,
-        sticky=False,
+        model=None,
+        suggestion=None,
+        control_intent=control_intent,
+        probabilities={},
         source="knn",
         latency_ms=1,
-        control_intent=control_intent,
     )
 
 
 ROUTES = {
-    "how is my portfolio doing": _decision("stock-picker"),
-    "what's the weather": _decision("general"),
-    "cancel that": _decision(CONTROL_PROFILE, "cancel"),
+    "how is my portfolio doing": _decision(),
+    "what's the weather": _decision(),
+    "cancel that": _decision("cancel"),
 }
 
 
@@ -71,18 +68,18 @@ class _StubRouter:
     """Routes each task text to a fixed decision and records every request with its hint."""
 
     def __init__(self) -> None:
-        self.requests: list[tuple[str, str, str | None]] = []
+        self.requests: list[tuple[str, str, str]] = []
 
     async def route(
         self,
         text: str,
         speaker: str,
         *,
-        history: Sequence[str] = (),
-        hint: str | None = None,
+        active_profile: str,
         permitted: Callable[[str], bool] | None = None,
+        history: Sequence[str] = (),
     ) -> RouteDecision:
-        self.requests.append((text, speaker, hint))
+        self.requests.append((text, speaker, active_profile))
         return ROUTES[text]
 
 
@@ -195,6 +192,7 @@ class _Harness:
         self.conversation = _QueueConversation()
         self._hermes = HermesApiClient(api.api_base, KEYS.get, sleep=lambda _s: asyncio.sleep(0.01))
         self._permissions = PermissionChecker(_config(tmp_path))
+        self.active_profiles = _active_profiles(tmp_path, self._permissions)
         self._run: asyncio.Task[None] | None = None
         self._answered_requests = 0
 
@@ -209,6 +207,7 @@ class _Harness:
             hermes=self._hermes,
             tracker=self.tracker,
             permissions=self._permissions,
+            active_profiles=self.active_profiles,
             clock=self.clock,
         )
         self._run = asyncio.create_task(session.run())
@@ -258,6 +257,12 @@ class _Harness:
                 await asyncio.sleep(0.005)
 
 
+def _active_profiles(tmp_path: Path, permissions: PermissionChecker) -> ActiveProfiles:
+    """Everyone on their default profile: rob on stock-picker, alex on general."""
+    config = _config(tmp_path)
+    return ActiveProfiles(tmp_path / "home" / "duplex" / "active_profiles.json", permissions, config)
+
+
 def _config(tmp_path: Path) -> Any:
     raw = {
         "hermes": {"api_base": "http://127.0.0.1:8642"},
@@ -267,7 +272,7 @@ def _config(tmp_path: Path) -> Any:
             "general": {"description": "Anything else", "examples": ["what's the weather"]},
             "stock-picker": {"description": "Portfolio and stocks", "examples": ["how's my portfolio"]},
         },
-        "people": {"rob": {"discord_id": "123", "profiles": ["*"]}},
+        "people": {"rob": {"discord_id": "123", "profiles": ["*"], "default_profile": "stock-picker"}},
     }
     path = tmp_path / "duplex.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
@@ -347,8 +352,8 @@ async def test_function_call_from_the_interrupted_response_is_not_executed(
         await asyncio.sleep(0.1)
 
         assert list(harness.outputs()) == ["call_2"]
-        assert harness.router.requests == [("what's the weather", "rob", None)]
-        assert [start.path for start in api.requests_to("POST", "/runs")] == ["/p/general/v1/runs"]
+        assert harness.router.requests == [("what's the weather", "rob", "stock-picker")]
+        assert [start.path for start in api.requests_to("POST", "/runs")] == ["/p/stock-picker/v1/runs"]
 
 
 async def test_announcement_waits_for_speech_stopped_the_model_and_playback(
@@ -433,7 +438,9 @@ async def test_cancel_task_tool_stops_the_run_and_answers_in_the_function_output
         assert task is not None and task.state == "cancelled"
         [stop] = api.requests_to("POST", "/stop")
         assert stop.path == f"/p/stock-picker/v1/runs/{task.run_id}/stop"
-        assert harness.router.requests == [("how is my portfolio doing", "rob", None)], "never routed"
+        assert harness.router.requests == [("how is my portfolio doing", "rob", "stock-picker")], (
+            "never routed"
+        )
 
 
 async def test_control_intent_cancel_routed_from_delegate_stops_the_run_and_is_confirmed(
@@ -522,7 +529,7 @@ async def test_delegate_receipt_comes_at_once_and_the_task_reaches_the_router(
         assert receipt_ms < RECEIPT_BUDGET_MS
         assert harness.outputs()["call_1"] == {"status": "received"}
         await harness.wait_for(lambda: bool(harness.router.requests))
-        assert harness.router.requests == [("what's the weather", "rob", None)]
+        assert harness.router.requests == [("what's the weather", "rob", "stock-picker")]
 
 
 async def _response_create_waits_for_the_calling_response(
