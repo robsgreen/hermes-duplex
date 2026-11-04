@@ -24,9 +24,17 @@ CONTEXT = PromptContext(
     profiles=(
         ("stock-picker", "Portfolio, holdings, stock research, trades"),
         ("general", "Anything else"),
-    )
+    ),
+    active_profile="stock-picker",
+    active_profile_description="Portfolio, holdings, stock research, trades",
+    voice_context=(
+        "Covers the user's portfolio, holdings, market data and trades.\n"
+        "Always hand off prices, positions, and anything time-sensitive; never quote a number from memory.\n"
+        "Say tickers letter by letter (NVDA as N-V-D-A).\n"
+        "Confirm before handing off any request to buy or sell.\n"
+    ),
 )
-"""The example config's deployment, with the default assistant."""
+"""The example config's deployment, with the default assistant, while stock-picker is active."""
 
 
 def _bound_prompter(name: str) -> VoicePrompter:

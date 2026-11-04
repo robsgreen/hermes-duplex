@@ -1,9 +1,11 @@
 """The OpenAI Realtime prompter, following OpenAI's Realtime 2 prompting guide.
 
 The guide asks for short labeled sections, only those the product needs, in its order: here Role and
-Objective, Personality and Tone, Reasoning, Preambles, Verbosity, Tools, and Unclear Audio. Rules are
-written as trigger, action, and exception, with few must/never/always words, since Realtime 2 follows
-instructions literally. Tools are named exactly as the session offers them.
+Objective, Personality and Tone, Reasoning, Preambles, Verbosity, Tools, and Unclear Audio. An Active
+Agent section, which the guide does not name, follows Personality and Tone when a profile is active,
+with that profile's voice context. Rules are written as trigger, action, and exception, with few
+must/never/always words, since Realtime 2 follows instructions literally. Tools are named exactly as
+the session offers them.
 """
 
 import json
@@ -11,8 +13,15 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from ....prompts import blocks
-from ....prompts.base import REPORT_TYPE, PromptContext, TaskReport, json_report
-from ...base import CANCEL_TASK_TOOL, DELEGATE_RECEIPT, DELEGATE_TOOL, TASK_STATUS_TOOL
+from ....prompts.base import REPORT_TYPE, PromptContext, TaskReport, json_report, spoken_series
+from ...base import (
+    CANCEL_TASK_TOOL,
+    CONFIRM_SWITCH_TOOL,
+    DELEGATE_RECEIPT,
+    DELEGATE_TOOL,
+    SWITCH_PROFILE_TOOL,
+    TASK_STATUS_TOOL,
+)
 
 if TYPE_CHECKING:
     from ....tasks import Task
@@ -23,7 +32,8 @@ class OpenAiRealtimePrompter:
 
     def instructions(self, ctx: PromptContext) -> str:
         """The sections filled in for ``ctx``. Role and Objective names ``ctx.assistant_name``;
-        ``ctx.persona`` replaces Personality and Tone."""
+        ``ctx.persona`` replaces Personality and Tone. Only the tools the session offers for ``ctx`` are
+        named: ``switch_profile`` only when ``ctx.profiles`` names any profile."""
         agents = blocks.agent_list(ctx.profiles)
         agents_line = f"\nHermes agents: {agents}." if agents else ""
         personality = ctx.persona or (
@@ -31,7 +41,20 @@ class OpenAiRealtimePrompter:
             "- If the user is frustrated, acknowledge it briefly and focus on the next helpful step."
         )
         delegate, status, cancel = DELEGATE_TOOL, TASK_STATUS_TOOL, CANCEL_TASK_TOOL
+        switch, confirm = SWITCH_PROFILE_TOOL, CONFIRM_SWITCH_TOOL
         receipt = json.dumps(DELEGATE_RECEIPT)
+        offered = [delegate, status, cancel, *([switch] if ctx.profiles else []), confirm]
+        tools = spoken_series([f"`{name}`" for name in offered], "and")
+        switch_tool = (
+            f"""
+
+`{switch}`
+- When: the user asks to talk to a different Hermes agent, by its name or a nickname.
+- Do: pass the agent's name from the list above as `profile`. {blocks.SWITCH_WHEN_ASKED}
+- The switch is confirmed to the user in a separate message."""
+            if ctx.profiles
+            else ""
+        )
         return f"""\
 # Role and Objective
 You are {ctx.assistant_name}, the voice of a team of Hermes agents working for the people on this \
@@ -41,7 +64,7 @@ with `{delegate}`.{agents_line}
 
 # Personality and Tone
 {personality.strip()}
-
+{_active_agent(ctx)}
 # Reasoning
 - For small talk, direct answers, and questions about the user's tasks, respond right away without \
 reasoning.
@@ -50,22 +73,20 @@ reasoning.
 # Preambles
 - Before calling `{delegate}`, say one short sentence about what you are handing off, such as \
 "I'll ask Hermes about that." Then call the tool.
-- Skip the preamble for `{status}` and `{cancel}`, and when the audio is unclear.
+- Skip the preamble for every other tool, and when the audio is unclear.
 
 # Verbosity
 - {blocks.SPOKEN_STYLE}
 - Reports and tool results: give the summary first, then only the next useful detail.
 
 # Tools
-Use only `{delegate}`, `{status}`, and `{cancel}`.
+Use only {tools}.
 
 `{delegate}`
 - When: the request needs {blocks.NEEDS_HERMES}.
-- Do: restate the request as one self-contained `task`; set `profile_hint` only when the user named \
-an agent.
+- Do: restate the request as one self-contained `task`.
 - Except: {blocks.ANSWER_YOURSELF}; answer those yourself.
-- It returns only {receipt}. The task's start and its result arrive later as separate messages; \
-keep talking with the user meanwhile.
+- It returns only {receipt}. {blocks.AFTER_HANDOFF} Keep talking with the user meanwhile.
 
 `{status}`
 - When: the user asks how their tasks are going, or asks you to check again on work that is still \
@@ -80,7 +101,11 @@ their tasks.
 - When: the user asks you to stop a task.
 - Do: pass `task_id` when an earlier `{status}` result gave you the task's id; otherwise pass `about` \
 with the user's words for the task. {blocks.CANCEL_POLICY}
-- Except: if you are unsure which tasks are running, call `{status}` first.
+- Except: if you are unsure which tasks are running, call `{status}` first.{switch_tool}
+
+`{confirm}`
+- When: the user answers your question about switching to another agent.
+- Do: pass their answer as `accept`: true for yes, false for no. {blocks.SWITCH_QUESTION}
 
 After tool calls:
 - Say a task is done only after its report arrives.
@@ -107,3 +132,13 @@ and how it ended, with Hermes's words in "report".
     def reseed(self, lines: Sequence[tuple[str, str]], tasks: Sequence[Task]) -> str:
         """The shared ``blocks.history_summary``."""
         return blocks.history_summary(lines, tasks)
+
+
+def _active_agent(ctx: PromptContext) -> str:
+    """The Active Agent section for ``ctx.active_profile`` and its voice context, each line ending in
+    a newline and the first one blank; empty when no profile is active."""
+    if ctx.active_profile is None:
+        return ""
+    agent = blocks.agent_phrase(ctx.active_profile, ctx.active_profile_description)
+    voice_context = f"{ctx.voice_context.strip()}\n" if ctx.voice_context else ""
+    return f"\n# Active Agent\nThe active agent is {agent}. {blocks.ACTIVE_AGENT_SCOPE}\n{voice_context}"

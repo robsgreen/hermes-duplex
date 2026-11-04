@@ -1,4 +1,5 @@
-"""Short spoken notices: refusals, task starts and ends, statuses, and function-call reasons.
+"""Short spoken notices: refusals, task starts and ends, statuses, profile switches, and function-call
+reasons.
 
 Every provider speaks the same wording; only results and instructions differ by provider.
 """
@@ -7,7 +8,7 @@ import re
 from collections.abc import Sequence
 
 from ..tasks import ACTIVE_STATES, Task, TaskState
-from .base import fit_text
+from .base import fit_text, spoken_series
 
 
 def refusal(profile: str) -> str:
@@ -84,8 +85,7 @@ NOTHING_TO_CANCEL = "You have no running task to cancel."
 def which_to_cancel(tasks: Sequence[Task]) -> str:
     """Question for a cancel request that could not tell which of the person's open ``tasks`` (two or
     more) it means, naming each by topic so they can say which."""
-    topics = [f'"{topic(task.text)}"' for task in tasks]
-    choices = f"{', '.join(topics[:-1])}, or {topics[-1]}" if len(topics) > 2 else " or ".join(topics)
+    choices = spoken_series([f'"{topic(task.text)}"' for task in tasks], "or")
     return f"Which one should I cancel: {choices}?"
 
 
@@ -171,6 +171,39 @@ def failed_while_away(task: Task, reason: str) -> str:
 def cancelled_while_away(task: Task) -> str:
     """Notice that ``task`` was cancelled on Hermes while its person was away."""
     return f'While you were away, "{topic(task.text)}" was cancelled.'
+
+
+def switched_to(profile: str) -> str:
+    """Notice that the speaker's active profile is now ``profile``."""
+    return f"You're now talking to {profile}."
+
+
+def switch_refused(profile: str) -> str:
+    """Notice for a switch to ``profile``, which the speaker may not use; the active profile stays."""
+    return f"Sorry, you don't have access to the {profile} agent, so I didn't switch."
+
+
+def already_active(profile: str) -> str:
+    """Notice for a switch to ``profile`` while it is already the speaker's active profile."""
+    return f"You're already talking to {profile}."
+
+
+def which_profile(permitted: Sequence[str]) -> str:
+    """Question for a switch request that names no profile, or one that fits several, listing the
+    ``permitted`` profiles (at least one) the speaker may switch to."""
+    return f"Sorry, which agent do you mean? You can switch to {spoken_series(permitted, 'or')}."
+
+
+def suggest_switch(profile: str) -> str:
+    """Question for a request that suits ``profile`` better than the active one, asking whether to
+    switch to it first."""
+    return f"That sounds like a {profile} question. Want me to switch?"
+
+
+def fallback_to_default(profile: str) -> str:
+    """Notice that the speaker's saved profile can no longer be used, so they are back on their
+    default ``profile``."""
+    return f"You're back on {profile}."
 
 
 PROVIDER_LOST = (

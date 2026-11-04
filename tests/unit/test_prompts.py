@@ -16,9 +16,11 @@ from hermes_duplex.prompts.base import (
     chars_for_tokens,
     json_report,
     split_text,
+    spoken_series,
 )
 from hermes_duplex.providers.base import DELEGATE_RECEIPT
 from hermes_duplex.providers.gpt_live.prompt import GptLivePrompter, frame_result
+from hermes_duplex.providers.realtime.adapter import session_tools
 from hermes_duplex.providers.realtime.openai.prompt import OpenAiRealtimePrompter
 from hermes_duplex.providers.realtime.xai.prompt import GrokPrompter
 from hermes_duplex.tasks import Task
@@ -27,7 +29,24 @@ NOW = datetime(2026, 11, 3, tzinfo=UTC)
 
 CONTEXT = PromptContext(profiles=(("stock-picker", "Portfolio, holdings, trades"), ("general", "")))
 
-TOOL_NAMES = ("delegate", "task_status", "cancel_task")
+TOOL_NAMES = ("delegate", "task_status", "cancel_task", "switch_profile", "confirm_switch")
+
+VOICE_CONTEXTS = {
+    "stock-picker": "Always hand off prices.\nSay tickers letter by letter (NVDA as N-V-D-A).",
+    "general": "Keep answers about the weather short.",
+}
+"""Each profile's voice context, as config would hold it; a prompt carries only the active one's."""
+
+
+def _active(profile: str) -> PromptContext:
+    """``CONTEXT`` while ``profile`` is the active profile, carrying its description and voice context."""
+    return dataclasses.replace(
+        CONTEXT,
+        active_profile=profile,
+        active_profile_description=dict(CONTEXT.profiles)[profile],
+        voice_context=VOICE_CONTEXTS[profile] + "\n",
+    )
+
 
 PROMPTERS: list[VoicePrompter] = [GptLivePrompter(), OpenAiRealtimePrompter(), GrokPrompter()]
 
@@ -119,6 +138,38 @@ def test_tool_prompts_pass_the_task_id_from_a_tool_result_else_the_users_words(
 
 
 @pytest.mark.parametrize("prompter", PROMPTERS, ids=_name)
+@pytest.mark.parametrize("profile", sorted(VOICE_CONTEXTS))
+def test_every_prompter_carries_only_the_active_profiles_voice_context_once(
+    prompter: VoicePrompter, profile: str
+) -> None:
+    text = prompter.instructions(_active(profile))
+
+    assert text.count(VOICE_CONTEXTS[profile]) == 1
+    assert not [other for name, other in VOICE_CONTEXTS.items() if name != profile and other in text]
+    assert (
+        f"{blocks.agent_phrase(profile, dict(CONTEXT.profiles)[profile])}. {blocks.ACTIVE_AGENT_SCOPE}"
+        in text
+    )
+
+
+@pytest.mark.parametrize("prompter", PROMPTERS, ids=_name)
+def test_every_prompter_leaves_out_the_active_agent_when_none_is_active(prompter: VoicePrompter) -> None:
+    text = prompter.instructions(dataclasses.replace(CONTEXT, voice_context="Say tickers letter by letter."))
+
+    assert blocks.ACTIVE_AGENT_SCOPE not in text
+    assert "active agent" not in text.lower()
+    assert "Say tickers" not in text
+
+
+@pytest.mark.parametrize("prompter", PROMPTERS, ids=_name)
+def test_every_prompter_says_what_follows_a_hand_off_and_how_to_switch(prompter: VoicePrompter) -> None:
+    text = prompter.instructions(CONTEXT).replace("\n", " ")
+
+    for rule in (blocks.AFTER_HANDOFF, blocks.SWITCH_WHEN_ASKED, blocks.SWITCH_QUESTION):
+        assert rule in text
+
+
+@pytest.mark.parametrize("prompter", PROMPTERS, ids=_name)
 def test_every_prompter_reseeds_with_the_shared_history_summary(prompter: VoicePrompter) -> None:
     assert prompter.reseed([("user", "hi")], []) == blocks.history_summary([("user", "hi")], [])
 
@@ -146,6 +197,27 @@ def test_gpt_live_follows_the_recommended_template() -> None:
         "You are Hermes, a voice assistant for the people on this call.\nBe calm, friendly"
     )
     assert "Backend tools:\n- stock-picker: Portfolio, holdings, trades\n- general\n- Tasks: " in text
+
+
+def test_gpt_live_hands_off_switch_requests_and_answers_to_a_switch_question() -> None:
+    text = GptLivePrompter().instructions(CONTEXT)
+
+    assert "\n- Agents: switch which agent the user talks to" in text
+    assert "Hand off their yes or no as they said it." in text
+    when = text.split("Generate <|SpawnThinking|> when:\n")[1].split("\n\n")[0]
+    assert (
+        "- The user asks to talk to a different agent, or answers your question about switching agents."
+        in when
+    )
+
+
+def test_gpt_live_places_the_active_agent_after_the_persona_lines() -> None:
+    text = GptLivePrompter().instructions(_active("stock-picker"))
+
+    assert (
+        f"{blocks.UNCLEAR_AUDIO}\n\nActive agent: stock-picker (Portfolio, holdings, trades). "
+        f"{blocks.ACTIVE_AGENT_SCOPE}\n{VOICE_CONTEXTS['stock-picker']}\n\nBackchannel policy: "
+    ) in text
 
 
 def test_gpt_live_mentions_progress_notes_only_when_asked() -> None:
@@ -251,11 +323,38 @@ def test_realtime_uses_the_guides_labeled_sections_in_order() -> None:
     assert "Hermes agents: stock-picker (Portfolio, holdings, trades); general." in text
 
 
-def test_realtime_names_exactly_the_session_tools() -> None:
+def test_realtime_adds_an_active_agent_section_after_personality_and_tone() -> None:
+    text = OpenAiRealtimePrompter().instructions(_active("general"))
+
+    sections = re.findall(r"^# (.+)$", text, re.MULTILINE)
+    assert sections == [*REALTIME_SECTIONS[:2], "Active Agent", *REALTIME_SECTIONS[2:]]
+    assert (
+        f"# Active Agent\nThe active agent is general. {blocks.ACTIVE_AGENT_SCOPE}\n"
+        f"{VOICE_CONTEXTS['general']}\n\n# Reasoning"
+    ) in text
+
+
+@pytest.mark.parametrize("context", [CONTEXT, PromptContext()], ids=["with-profiles", "without-profiles"])
+def test_realtime_names_exactly_the_session_tools(context: PromptContext) -> None:
+    text = OpenAiRealtimePrompter().instructions(context)
+    offered = {tool["name"] for tool in session_tools(context)}
+    arguments = {"task", "task_id", "about", "accept", *(["profile"] if context.profiles else [])}
+
+    assert all(f"`{name}`" in text for name in offered)
+    assert set(re.findall(r"`([^`]+)`", text)) == offered | arguments
+    assert offered <= set(TOOL_NAMES)
+    assert ("switch_profile" in offered) == bool(context.profiles)
+
+
+def test_realtime_switches_and_answers_switch_questions_with_their_tools() -> None:
     text = OpenAiRealtimePrompter().instructions(CONTEXT)
 
-    assert all(f"`{name}`" in text for name in TOOL_NAMES)
-    assert set(re.findall(r"`([^`]+)`", text)) == {*TOOL_NAMES, "task", "profile_hint", "task_id", "about"}
+    assert (
+        "Use only `delegate`, `task_status`, `cancel_task`, `switch_profile`, and `confirm_switch`." in text
+    )
+    assert "- Do: pass the agent's name from the list above as `profile`." in text
+    assert "- Do: pass their answer as `accept`: true for yes, false for no." in text
+    assert "profile_hint" not in text
 
 
 def test_realtime_avoids_hard_constraint_words() -> None:
@@ -326,6 +425,35 @@ def test_grok_names_tools_only_in_backticks() -> None:
         assert f"`{name}`" in text
         assert not re.search(rf"(?<!`){name}(?!`)", text), name
     assert "stock-picker (Portfolio, holdings, trades); general" in text
+
+
+def test_grok_names_switch_profile_only_when_the_session_offers_it() -> None:
+    text = GrokPrompter().instructions(PromptContext())
+
+    assert "switch_profile" not in text
+    assert "`confirm_switch`" in text
+    assert "profile_hint" not in GrokPrompter().instructions(CONTEXT)
+
+
+def test_grok_switches_and_answers_switch_questions_with_their_tools() -> None:
+    text = GrokPrompter().instructions(CONTEXT)
+
+    assert "call `switch_profile` with the agent's name as `profile`, even if they used a nickname." in text
+    assert "call `confirm_switch` with `accept` true for yes and false for no." in text
+    assert "\nNEVER switch agents unless the user asks to.\n" in text.split("## CRITICAL INSTRUCTIONS")[1]
+
+
+def test_grok_puts_the_voice_context_in_objective_as_rules_about_words() -> None:
+    text = GrokPrompter().instructions(_active("stock-picker"))
+
+    assert re.findall(r"^## (.+)$", text, re.MULTILINE) == GROK_SECTIONS
+    objective = text.split("## Objective\n")[1].split("\n\n## ")[0]
+    assert (
+        "The active agent is stock-picker (Portfolio, holdings, trades). "
+        f"{blocks.ACTIVE_AGENT_SCOPE}\n"
+        "Follow these notes on what to answer, what to hand off, and which words to say, as rules for the "
+        f"words you speak:\n{VOICE_CONTEXTS['stock-picker']}"
+    ) in objective
 
 
 def test_grok_writes_words_not_sound() -> None:
@@ -426,6 +554,35 @@ def test_notices_name_their_subject() -> None:
     assert (
         notices.cancelled_while_away(weather) == 'While you were away, "what\'s the weather" was cancelled.'
     )
+
+
+def test_profile_switch_notices() -> None:
+    assert notices.switched_to("stock-picker") == "You're now talking to stock-picker."
+    assert notices.switch_refused("stock-picker") == (
+        "Sorry, you don't have access to the stock-picker agent, so I didn't switch."
+    )
+    assert notices.already_active("general") == "You're already talking to general."
+    assert notices.suggest_switch("stock-picker") == (
+        "That sounds like a stock-picker question. Want me to switch?"
+    )
+    assert notices.fallback_to_default("general") == "You're back on general."
+
+
+def test_which_profile_lists_the_permitted_profiles() -> None:
+    assert notices.which_profile(["general"]) == "Sorry, which agent do you mean? You can switch to general."
+    assert notices.which_profile(["general", "stock-picker"]) == (
+        "Sorry, which agent do you mean? You can switch to general or stock-picker."
+    )
+    assert notices.which_profile(["general", "stock-picker", "travel"]) == (
+        "Sorry, which agent do you mean? You can switch to general, stock-picker, or travel."
+    )
+
+
+def test_spoken_series_joins_with_the_conjunction() -> None:
+    assert spoken_series([], "or") == ""
+    assert spoken_series(["a"], "or") == "a"
+    assert spoken_series(["a", "b"], "and") == "a and b"
+    assert spoken_series(["a", "b", "c"], "or") == "a, b, or c"
 
 
 def test_which_to_cancel_names_each_task_by_topic() -> None:

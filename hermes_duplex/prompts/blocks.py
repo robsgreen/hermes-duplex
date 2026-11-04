@@ -48,12 +48,38 @@ CANCEL_POLICY = (
 """When to cancel without asking. Each prompter adds how its model names the task to cancel."""
 
 
-def agent_list(profiles: Sequence[tuple[str, str]]) -> str:
-    """The Hermes agents as one spoken-style phrase: ``name (description)``, joined with ``; ``.
+AFTER_HANDOFF = (
+    "After a hand-off, a note that the task started, or a question about switching to another agent, "
+    "follows as a separate message, and the result comes later."
+)
+"""What follows a hand-off: the app decides where the request runs only after it arrives."""
 
-    A profile with no description appears by name alone; no profiles give an empty string.
-    """
-    return "; ".join(f"{name} ({description})" if description else name for name, description in profiles)
+ACTIVE_AGENT_SCOPE = "Requests you hand off go to this agent until the user switches to another one."
+"""What the active agent means for hand-offs; follows the line that names it."""
+
+SWITCH_WHEN_ASKED = (
+    "Switch agents only when the user asks to; hand off other work as usual, even when it sounds like "
+    "another agent's."
+)
+"""When the voice model changes agents: only on request, since the app offers switches itself."""
+
+SWITCH_QUESTION = (
+    "Only a yes or no answers a question about switching agents; anything else the user says is a new "
+    "request."
+)
+"""How a switch question is answered. Each prompter adds how its model passes the answer on."""
+
+
+def agent_phrase(name: str, description: str | None) -> str:
+    """One Hermes agent as a spoken-style phrase: ``name (description)``, or ``name`` alone when the
+    description is None or empty."""
+    return f"{name} ({description})" if description else name
+
+
+def agent_list(profiles: Sequence[tuple[str, str]]) -> str:
+    """The Hermes agents as one spoken-style phrase: each ``agent_phrase``, joined with ``; ``; no
+    profiles give an empty string."""
+    return "; ".join(agent_phrase(name, description) for name, description in profiles)
 
 
 def history_summary(lines: Sequence[tuple[str, str]], tasks: Sequence[Task]) -> str:
