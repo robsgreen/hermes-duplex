@@ -141,3 +141,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-04 17:28 - Amendment task 1.1 verified (gate green, 891 default) and committed; wave 1 complete. Docs follow-up for 4.3: README People/Profiles sections.
 - 2026-11-04 17:35 - Amendment task 2.1 verified (20 tests) and committed (constructor takes Config; SwitchResult(outcome, notified_live); missing file INFO)
 - 2026-11-04 17:37 - Amendment task 2.2 verified (gate clean, 920 passed) and committed; Dialect.instructions_config added; switch_profile omitted when no profiles
+- 2026-11-04 17:44 - Amendment task 2.3 verified (gate clean, 943 passed, goldens reviewed) and committed; no_profiles_allowed dropped per note 4
