@@ -65,12 +65,16 @@ router:
   # jev:
   #   api_key_env: TYPESAFE_API_KEY
 
-# Hermes profiles the router chooses between. `description` and `examples` steer routing.
+# Hermes profiles people can talk to; Hermes Desktop's Bot Mode calls a profile a "Bot". Each person
+# talks to one active profile at a time and switches by asking (see README "Active profile and
+# switching"); voice conversations do not appear as Desktop Bot Chats. `description` and `examples`
+# steer the router's switch suggestions.
 # `models` is the profile-by-effort table (low | medium | high); each cell needs both `provider`
 # and `model`. Fill in your own models: the <fill> values below are placeholders. An effort missing
 # from `models` uses `default_model`; with neither, Hermes uses the profile's own default model.
 # `aliases` are other names people say for a profile ("switch to the stock picker"); matching ignores
-# case and extra spaces, and no two profiles may share one. `voice_context` (optional, at most 2000
+# case and extra spaces, and no two profiles may share one. To let people say a Bot's Desktop title,
+# copy it here by hand; it is not read from Hermes. `voice_context` (optional, at most 2000
 # characters) goes into the voice prompt while the profile is active: what it covers, what to always
 # hand off, how to say its words, and rules to follow.
 profiles:
@@ -103,7 +107,8 @@ people:
   alex: {discord_id: "456", web_token_env: DUPLEX_TOKEN_ALEX, profiles: [general]}
 
 transports:
-  # The bot is its own Discord application, not Hermes's bot. Off unless enabled.
+  # The bot is its own Discord application with its own token: never the token of Hermes's Discord
+  # bot or of a bot a Hermes profile runs through its gateway. Off unless enabled.
   discord: {enabled: true, bot_token_env: DUPLEX_DISCORD_TOKEN}
   # The web page and /ws socket. Off unless enabled; port 0 picks a free port.
   web: {enabled: true, host: 127.0.0.1, port: 8765}

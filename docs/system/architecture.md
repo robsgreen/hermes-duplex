@@ -2,21 +2,24 @@
 
 hermes-duplex is a Hermes Agent plugin that puts a full-duplex voice front end on Hermes. People talk
 through a transport (the Discord bot or the web page); a realtime voice model holds the
-conversation; tasks the voice model delegates are routed to a Hermes profile and run through the
-Hermes API server. The voice model never needs to know the profiles. It only decides when to hand
-off, and the router decides where the work goes.
+conversation; tasks the voice model delegates run on the speaker's **active profile** through the
+Hermes API server. Each person has one active profile, which changes only when they ask to switch.
+The voice model decides when to hand off; the router judges each request's effort and may suggest a
+switch, but never picks the profile.
 
 ## Components
 
 | Module | Role |
 |--------|------|
 | `hermes_duplex/service.py` | `build_service(config)` wires everything; `DuplexService` starts the transports and runs one `VoiceSession` per conversation. |
-| `hermes_duplex/session.py` | `VoiceSession`: audio both ways, provider events, delegation → route → permission → Hermes run → progress and result, barge-in, reconnect. |
+| `hermes_duplex/session.py` | `VoiceSession`: audio both ways, provider events, delegation → switch check → route → held request or Hermes run → progress and result, the conversation's prompt context, barge-in, reconnect. |
 | `hermes_duplex/providers/` | Realtime voice providers behind `RealtimeProvider` (`base.py`), one package each with its adapter and prompter: `gpt_live/`, `realtime/` (the shared adapter and `Dialect`, with the `openai/` and `xai/` dialects), and `fake/`; `wire.py` is their shared WebSocket client; `registry.py` maps `provider.name` to a `ProviderSpec` (factory, prompter, and dialect). |
-| `hermes_duplex/router/` | `CompositeRouter` (`composite.py`: both paths, deadline, circuit breaker, sticky rule, `_control`, model table, decision log) over the `knn`, `decisions`, and `jev` backends; `factory.py` builds them from config; `eval.py` scores them. |
+| `hermes_duplex/router/` | `CompositeRouter` (`composite.py`: both paths, deadline, circuit breaker, effort, switch suggestion, `_control`, model table, decision log) over the `knn`, `decisions`, and `jev` backends; `factory.py` builds them from config; `eval.py` scores them. |
 | `hermes_duplex/dispatch/hermes_api.py` | `HermesApiClient` for `/p/<profile>/v1/runs`: start, follow, stop. |
 | `hermes_duplex/tasks.py` | `TaskTracker` and its `$HERMES_HOME/duplex/tasks.jsonl` history. |
 | `hermes_duplex/people.py` | `PermissionChecker`: Discord ids and web tokens to people, and who may use which profile. |
+| `hermes_duplex/profiles.py` | `ActiveProfiles`: each person's active profile, its default, `$HERMES_HOME/duplex/active_profiles.json`, and switch notifications. |
+| `hermes_duplex/switching.py` | Pure text helpers: `read_switch_request` / `parse_switch_request` (a spoken switch request and any request after it) and `is_affirmative` / `is_negative` (a short yes or no). |
 | `hermes_duplex/prompts/` | The prompt pieces every provider shares: the `VoicePrompter` interface and its inputs (`base.py`), the shared rules (`blocks.py`), and every spoken notice (`notices.py`). Each provider family's prompter is its package's `prompt.py` under `providers/`. See Prompt strategy. |
 | `hermes_duplex/audio/` | 20 ms framing, resampling, the allowlist mixer and attribution ring, the loudness gate, and the output pacer. |
 | `hermes_duplex/transports/` | Sources of conversations (`Transport`, `Conversation`, `InputFrame` in `base.py`): the Discord bot (`discord/`) and the web page and `/ws` (`web/`). |
@@ -41,13 +44,18 @@ flowchart LR
     RT[Realtime: OpenAI, xAI]
   end
   R[CompositeRouter]
+  AP[ActiveProfiles]
   DS[HermesApiClient]
   DT <-->|InputFrame / PCM| VS
   WT <-->|InputFrame / PCM| VS
   VS <-->|normalized events| GL
   VS <-->|normalized events| RT
-  VS -->|text, speaker, history| R
-  R -->|profile, effort, model| VS
+  VS -->|text, speaker, active profile, history| R
+  R -->|effort, model, suggestion| VS
+  VS -->|switch| AP
+  AP -->|switched| VS
+  DT -->|/duplex profile| AP
+  WT -->|profile frame| AP
   VS -->|start, follow, stop| DS
   DS -->|/p/profile/v1/runs| API[Hermes API server]
   VS <--> TT
@@ -66,18 +74,21 @@ Four layers sit around the session core, each behind a small interface:
   `OutputAudio(pcm, item_id)`, `OutputDone`, `InputTranscript`, `OutputTranscript`,
   `DelegationRequested(id, offset_ms, target, tool_args)`, `ProviderError`, and `Closed`. It declares
   `ProviderCapabilities`: sample rates, `supports_truncate`, `supports_out_of_band_response`,
-  `emits_speech_events`, `delegation_style` (`live` or `tool`), and `max_session_s`. The session
+  `emits_speech_events`, `delegation_style` (`live` or `tool`), `replaces_instructions` (whether
+  `update_instructions` can change the open session's instructions), and `max_session_s`. The session
   branches on these flags only, never on the provider's name; a unit test greps `session.py` for
   provider names.
-- **Router** (`router/`). `CompositeRouter.route(text, speaker, history=, hint=)` returns a
-  `RouteDecision`: profile (or `_control`), effort, model, probabilities, follow-up probability,
-  sticky flag, source, and latency.
+- **Router** (`router/`). `CompositeRouter.route(text, speaker, active_profile=, permitted=,
+  history=)` returns a `RouteDecision`: effort, model (from the active profile's table), an optional
+  `suggestion`, an optional `control_intent` (`status` or `cancel`), probabilities, source, and
+  latency.
 - **Dispatcher** (`dispatch/hermes_api.py`). `HermesApiClient` starts a run, streams its events as
   `RunEvent`s, and stops it.
 
 `VoiceSession` joins one conversation to one provider session. `TaskTracker` records every task
 from routing to its end; the router, Hermes client, tracker, and permission checker are shared by
-every session of the service, so a speaker's sticky profile follows them across conversations.
+every session of the service, and so is `ActiveProfiles`, so a person's active profile follows them
+across conversations.
 
 ## Hand-off with GPT-Live
 
@@ -94,9 +105,10 @@ sequenceDiagram
   VS->>VS: wait for input to pass offset_ms + 1500 ms
   VS->>VS: speaker = most voiced in [offset_ms − 4000, offset_ms + 500]
   VS->>VS: words = input transcript window
-  VS->>R: route(words, speaker, history + last assistant sentence)
-  R-->>VS: profile, effort, model
-  VS->>H: POST /p/profile/v1/runs
+  VS->>VS: switch request or yes/no answer? (handled here, never routed)
+  VS->>R: route(words, speaker, active profile, history + last assistant sentence)
+  R-->>VS: effort, model, suggestion?
+  VS->>H: POST /p/active-profile/v1/runs
   VS->>GL: session.thinking.append ("Started "how is my portfolio doing" on the stock-picker agent.")
   H-->>VS: tool.started, message.interim, ...
   VS->>GL: session.thinking.append (at most one per 5 s)
@@ -111,7 +123,9 @@ offset to catch late transcript. The words are the input transcript from the pre
 offset (or at most 30 s back) to the offset plus 1500 ms. When a second delegation follows within
 1 s, the first window ends at the first offset and the second begins there. The assistant's last
 sentence before the offset goes along as context: to the router as the newest history line, and to
-Hermes after the request. When nobody can be credited, the model says "Sorry, who's asking?"; when
+Hermes after the request. The words then go through the same steps as a `delegate` call (see Active
+profiles and switching): GPT-Live has no tools, so its prompt tells it to hand off switch requests
+and yes/no answers to a switch question as words. When nobody can be credited, the model says "Sorry, who's asking?"; when
 the window holds no words, it asks the people to say it again.
 
 Progress goes back as silent `session.thinking.append`, throttled to one per 5 s per delegation.
@@ -131,9 +145,10 @@ GPT-Live sends no speech or response events, so they do not wait for the floor.
 ## Hand-off with Realtime providers
 
 OpenAI Realtime and Grok (`providers/realtime/`) are the `tool` delegation style. The session
-offers three function tools: `delegate(task, profile_hint?)`, `task_status(task_id?)`, and
-`cancel_task(task_id?)`, built per provider from its `PromptContext` (`session_tools`): the
-`delegate` description lists the profiles by name and description. Each call arrives as `DelegationRequested` with the tool's name as `target`
+offers five function tools, built per provider from its `PromptContext` (`session_tools`):
+`delegate(task)`, `task_status(task_id?, about?)`, `cancel_task(task_id?, about?)`,
+`switch_profile(profile)` (an enum of the profile names; its description lists each with its
+description and says the model maps a spoken alias to the name), and `confirm_switch(accept)`. Each call arrives as `DelegationRequested` with the tool's name as `target`
 and its arguments in `tool_args`; its `offset_ms` is how much input the adapter had sent when the
 call arrived.
 
@@ -143,11 +158,11 @@ sequenceDiagram
   participant VS as VoiceSession
   participant R as Router
   participant H as Hermes API
-  RT->>VS: function_call delegate(task, profile_hint?)
-  VS-->>RT: function output {"status": "started"}
+  RT->>VS: function_call delegate(task)
+  VS-->>RT: function output {"status": "received"}
   RT-->>RT: keeps talking
-  VS->>R: route(task, speaker, hint = profile_hint)
-  VS->>H: POST /p/profile/v1/runs
+  VS->>R: route(task, speaker, active profile)
+  VS->>H: POST /p/active-profile/v1/runs
   VS->>RT: announcement "Task N started on the profile agent."
   H-->>VS: run.completed
   VS->>VS: wait: model idle, playback drained, nobody talking (at most 20 s)
@@ -167,12 +182,16 @@ floor releases the response it counted. `send_function_output` tells the session
 the output asked for a response of its own, so the floor counts exactly the `response.create`s sent.
 Two kinds of call get none: one from a response
 a person interrupted (see Interruptions), and one whose provider session has ended by the time the
-output is ready. The `delegate` receipt, `{"status": "started"}`, goes back at once, before routing
-starts (a contract test holds it under 50 ms), so the model never waits on Hermes. It carries nothing about the task: a task exists only once routed and
-permitted, so the spoken start (or "queued behind") notice follows, naming the task by its topic
-(`notices.topic`: the request, cut at a word to at most 40 characters). Refusals and `_control`
-answers are announcements too. `profile_hint` reaches the router, which uses it only when
-neither router path answers confidently. `task_status` and `cancel_task` are answered from the
+output is ready. The `delegate` receipt, `{"status": "received"}` (`DELEGATE_RECEIPT`), goes back at
+once, before the switch check and routing (a contract test holds it under 50 ms), so the model never
+waits on Hermes. It says only that the request arrived: a task exists only once routed and permitted,
+so the spoken start (or "queued behind") notice, or a switch question, follows, naming the task by
+its topic (`notices.topic`: the request, cut at a word to at most 40 characters). Refusals, switch
+notices, and `_control` answers are announcements too. `switch_profile` is answered with its outcome
+as `status` (`switched`, `already_active`, `refused`, `unknown`) and the notice to speak as `message`,
+except on `switched`, whose confirmation follows on its own. `confirm_switch` is answered the same
+way after an accepted switch, `"declined"` after a no, and `"nothing_pending"` when no switch question
+is waiting. `task_status` and `cancel_task` are answered from the
 `TaskTracker` in the function output itself, as `{"status": "ok", "message": ...}` for the model to
 relay; a `task_status` output also lists the speaker's open tasks under `"tasks"`, each as `id` (its
 number), `topic`, `agent`, and `state`, so the model can pass that `task_id` next time. A call no allowed person was voiced before is answered with
@@ -227,60 +246,67 @@ empties its playback queue.
 
 ## Router policy
 
-`CompositeRouter` (`router/composite.py`) asks two paths at once. The main path is
-`router.backend`: `decisions` (OpenAI Decisions API, `POST {base_url}/decisions`), `jev` (TypeSafe
-System One, `POST {base_url}/v1/systemone`), or `knn`. The optional fast path is `knn`, a
-nearest-neighbour matcher over model2vec static embeddings (`minishlab/potion-base-8M`) of each
-profile's description and examples, which answers in well under a millisecond and judges only the
-profile. The API backends answer three questions in one call: which choice, which effort, and
-whether the request follows up on the previous one. When Decisions refuses the effort or follow-up
-question, that score is left out and the profile answer still counts; only a refused profile
-question fails the main path.
+`CompositeRouter` (`router/composite.py`) never picks the profile a task runs on: that is the
+speaker's active profile, which the session passes in. It decides the effort (and so the model),
+whether the request is a `_control` request, and whether to suggest another profile.
 
-The choices are every configured profile plus `_control`, whatever the speaker may use; permission
-is checked after routing. `_control` holds built-in status phrases ("what are you working on", "any
-updates", "how's that task going") and cancel phrases ("cancel that", "stop that task", "never
-mind"), plus `router.control_examples`.
+It asks two paths at once. The main path is `router.backend`: `decisions` (OpenAI Decisions API,
+`POST {base_url}/decisions`), `jev` (TypeSafe System One, `POST {base_url}/v1/systemone`), or `knn`.
+The optional fast path is `knn`, a nearest-neighbour matcher over model2vec static embeddings
+(`minishlab/potion-base-8M`) of each profile's description and examples, which answers in well under
+a millisecond and judges only the choice. The API backends answer two questions in one call: which
+choice fits the request, and which effort it needs. When Decisions refuses the effort question, that
+score is left out and the choice answer still counts; only a refused choice question fails the main
+path.
+
+The choices are every configured profile plus `_control`, whatever the speaker may use. `_control`
+holds built-in status phrases ("what are you working on", "any updates", "how's that task going") and
+cancel phrases ("cancel that", "stop that task", "never mind"), plus `router.control_examples`.
 
 ```mermaid
 flowchart TD
   T[text + speaker + active profile] --> K[fast path: knn]
   T --> D[main path, deadline_ms]
-  K -->|top ≥ 0.85, margin ≥ 0.3, agrees with active| S
+  K -->|top ≥ 0.85, margin ≥ 0.3, active profile or _control| W
   D --> C{main confident? top ≥ 0.5}
   K --> C
-  C -- yes --> S[sticky rule]
+  C -- yes --> W{winner}
   C -- no --> F{fast path confident?}
-  F -- yes --> S
-  F -- no --> G[hint, else active profile, else default_profile]
-  S --> M[model = models.effort, else default_model, else Hermes default]
-  G --> M
+  F -- yes --> W
+  F -- no --> N[fallback: no suggestion, not _control]
+  W -- _control --> X[control_intent]
+  W -- profile --> S[suggestion rule]
+  N --> E[effort: main, else fast, else medium]
+  S --> E
+  E --> M[model = active profile's models.effort, else default_model, else Hermes default]
 ```
 
 1. The router waits up to `router.deadline_ms` (default 300) for the main path. It stops early when
-   the fast path's top choice has probability ≥ 0.85, beats the runner-up by ≥ 0.3, and keeps the
-   speaker on their active profile (or is `_control`). Calls still running at the end are cancelled.
-2. The first confident answer (top probability ≥ 0.5) of main, then fast path decides. With none, the
-   request goes to the `profile_hint` when it names a profile, else the speaker's active profile,
-   else `router.default_profile`; the source is `hint` or `fallback`.
-3. **Sticky rule.** A speaker's active profile is the last profile they were routed to; it expires
-   after `router.sticky_idle_s` (default 600) of no routing. A confident winner other than the active
-   profile takes the request only if the follow-up probability is below 0.5 and the winner beats the
-   active profile by ≥ 0.2; when the backend gave no follow-up probability (`knn`), the margin must be
-   ≥ 0.3. Otherwise the request stays, with source `sticky`. `_control` bypasses the rule and neither
-   changes nor refreshes the active profile. The session tells the router which profiles the speaker
-   may use; a decision for one they may not use is still returned (and refused), but does not become
-   or refresh their active profile.
-4. **Effort** is the main path's top effort when it answered, else the fast path's; `knn` judges
+   the fast path's top choice has probability ≥ 0.85, beats the runner-up by ≥ 0.3, and is the
+   speaker's active profile or `_control`, so a possible suggestion always waits for the main path.
+   Calls still running at the end are cancelled.
+2. The first confident answer (top probability ≥ 0.5) of main, then fast path decides; its source is
+   that backend's name. With none, the source is `fallback`: no suggestion, not `_control`.
+3. **`_control`.** When the deciding answer's winner is `_control`, `control_intent` is the backend's
+   `status` or `cancel`; Decisions and Jev cannot tell the two apart and get `status`, which changes
+   nothing. The session answers it from the tracker, and it never reaches Hermes.
+4. **Suggestion.** With `router.suggest_switch` on (default), the router suggests the other profile
+   the speaker may use with the highest probability when that probability is at least
+   `router.suggest_threshold` (default 0.85) and beats the active profile's by at least 0.2
+   (`SUGGEST_MARGIN`). A profile the speaker may not use is never suggested. The router only
+   suggests; the session asks the speaker (see Active profiles and switching).
+5. **Effort** is the main path's top effort whenever it answered, else the fast path's; `knn` judges
    none, so the default is `medium`.
-5. **Model** is `profiles.<p>.models.<effort>`, else `profiles.<p>.default_model`, else none, which
-   leaves the choice to the Hermes profile.
-6. **Circuit breaker.** Three main-path failures or deadline misses in a row skip the main path for
+6. **Model** is the active profile's `models.<effort>`, else its `default_model`, else none, which
+   leaves the choice to the Hermes profile (`CompositeRouter.model_for`).
+7. **Circuit breaker.** Three main-path failures or deadline misses in a row skip the main path for
    30 s.
 
-Every decision logs one `route ...` line with the speaker, profile, effort, model, confidence, top-3
-probabilities, source, latency, and sticky flag, and attaches the same fields to the log record as
-`route_decision`. `hermes duplex eval-router` runs the same router over labelled phrases.
+Every decision logs one `route ...` line with the speaker, the active profile, the control intent,
+effort, model, suggestion, top-3 probabilities, source, and latency, and attaches the same fields to
+the log record as `route_decision`. `hermes duplex eval-router` runs the same router over labelled
+phrases, each with the speaker's `active` profile, and scores effort accuracy and suggestion precision
+and recall besides choice accuracy.
 
 A `_control` decision never reaches Hermes. People hear tasks only by topic; a task's number is an
 internal id for the tracker, `tasks.jsonl`, logs, `/duplex`, tool arguments, and what the model reads.
@@ -292,6 +318,90 @@ dropping filler words such as "cancel", "the", and "one"; the speaker's only ope
 speaks the task it resolves, or all the speaker's open tasks; cancel stops the task it resolves,
 and otherwise, with several open, cancels nothing and asks which one by topic
 (`notices.which_to_cancel`).
+
+## Active profiles and switching
+
+**The store.** `ActiveProfiles` (`profiles.py`) holds one active profile per person in config's
+`people`. A person's default is `people.<p>.default_profile`, else `router.default_profile` when they
+may use it, else the first profile in their `profiles` list (config rejects an empty list). Explicit
+switches are saved to `$HERMES_HOME/duplex/active_profiles.json`, written atomically, and read by
+`load()` when the service starts. A missing file is normal; an unreadable or corrupt one is logged as
+an error and everyone starts on their default; the start never stops for it. A saved profile that
+config no longer defines, or that the person may no longer use, is dropped, and the person's default
+becomes their `fallback_pending`, announced once ("You're back on general.") when a session first
+hears them. `switch(person, profile)` returns `switched`, `already_active`, `refused` (the person may
+not use it), or `unknown`, and on `switched` awaits every listener subscribed for that person;
+`SwitchResult.notified_live` says whether any was.
+
+**Ways to switch.** Every path ends in `ActiveProfiles.switch`, and none creates a Hermes task:
+
+- a `switch_profile` tool call (OpenAI Realtime, Grok);
+- hand-off words that `read_switch_request` recognises: a switch phrase ("switch to", "talk to",
+  "back to", "change to") followed by a profile's name or one of its `aliases` (GPT-Live, and any
+  provider's `delegate` text);
+- Discord `/duplex profile <name>`, which autocompletes the profiles the caller may use and replies
+  privately: `switched_to`, or, when no live conversation was notified, that it applies next time;
+- the web page's `{"type": "profile", "name": ...}` text frame.
+
+Names resolve as Hermes Bot Mode resolves Bot names: an exact profile name first, then an alias,
+longest match first. A name that fits several profiles or none gets `which_profile`, listing the
+profiles the speaker may use; the tool, the Discord command, and the voice path all read the name as
+a spoken switch request, so they resolve it the same way. The web frame names a profile exactly. A
+profile the person may not use gets `switch_refused`, and the active one `already_active`.
+
+Each session subscribes to the store for every person it hears and for the conversation's signed-in
+`person`, until it ends. On a switch, wherever it was made, the session moves its prompt context to
+the new profile and announces `switched_to` ("You're now talking to stock-picker."). The web
+conversation also subscribes for its person and sends the page a status frame with the new profile.
+
+**A hand-off, step by step** (`VoiceSession._delegate`, for a `delegate` call after its receipt and
+for a live delegation's words):
+
+1. When the speaker has a held request and the words are only a yes or a no (`is_affirmative`,
+   `is_negative`), they answer the switch question; nothing is routed.
+2. A switch request is carried out with its notice. Words after the target joined by "and", "then",
+   "so", or a sentence break ("switch to stocks and check NVDA") are the rest of the request; when
+   the switch happened or the profile was already active, the rest goes on to step 3 on the new
+   profile, with no suggestion; otherwise it is dropped.
+3. Any other hand-off from the speaker first ends their hold, which then runs as it is. The request
+   is routed with the speaker's active profile. A `_control` intent is answered from the tracker.
+4. A suggestion for a profile the speaker may use holds the request (below). Otherwise the task runs
+   at once on the active profile, in the Hermes session `duplex-<person>-<profile>`.
+
+**Held requests.** On a suggestion the session holds the request, one per speaker, and speaks
+`suggest_switch` ("That sounds like a stock-picker question. Want me to switch?"). The hold is
+settled by:
+
+- a `confirm_switch(accept)` call or a spoken yes or no: yes switches to the suggestion, then the
+  request runs there; no runs it on the active profile;
+- any other hand-off or `switch_profile` call from the same speaker, after its own switch if it makes
+  one: the held request runs on the profile active then;
+- no answer within `HOLD_TIMEOUT_S` (30 s): it runs on the active profile;
+- the session ending: it starts on the active profile and is left unattended with the session's
+  other tasks.
+
+A held request runs at its routed effort, with the model of the profile it finally runs on.
+
+**Prompt context.** The instructions speak for one active profile at a time: the session's current
+`PromptContext` (`service.prompt_context(config, profile)`), which carries that profile's name,
+description, and `voice_context`, and which every connect and reconnect renders. It starts on the
+conversation's signed-in `person`'s active profile (web), or on `router.default_profile` when the
+conversation has none (Discord). It moves to a person's active profile when the session first hears
+that person and it differs, and to the new profile on every switch it is notified of. When it changes
+while a provider session is open:
+
+| Provider | `replaces_instructions` | On a prompt-context change |
+|---|---|---|
+| OpenAI Realtime, xAI Grok | true | `update_instructions`: a `session.update` carrying only `instructions`; tools, voice, audio settings, and the conversation stay. Later announcements use the new instructions. |
+| GPT-Live | false | The session closes the provider session and reconnects it with the new instructions and the reconnect summary (see Reconnect and re-seed). The restart counts neither as short-lived nor as a failure; Hermes tasks keep running. |
+
+A failed `update_instructions` is logged and falls back to the restart. GPT-Live can only append to
+its instructions mid-call, and it drops the appends when it replaces its engine in a long call, so a
+fresh session is the reliable way to change the profile; it costs about a second of pause.
+
+**Limitation: one prompt per call.** Hand-offs always run on the speaker's own active profile, but the
+voice prompt speaks for one profile. On a Discord call with two people on different active profiles,
+it speaks for the profile of whoever switched last or was first heard last.
 
 ## Dispatch to Hermes
 
@@ -362,8 +472,10 @@ Results are read in full in whichever conversation next hears the person, whoeve
 
 `PermissionChecker` (`people.py`) maps each Discord id and web token to exactly one person. Audio
 from anyone else is dropped before mixing; a web socket without a valid token gets HTTP 401 before
-the upgrade. After routing, a profile the credited person may not use gets a spoken refusal naming
-the profile and no Hermes run; the refusal is logged.
+the upgrade. A switch to a profile the person may not use is refused aloud (`switch_refused`), and the
+router never suggests one, so a person's active profile is always one they may use. The session still
+checks the profile before creating each task; a failed check gets a spoken refusal naming the profile
+and no Hermes run, and is logged.
 
 Hermes results reach the voice model as data, written by the provider's prompter
 (`VoicePrompter.result`) and cut to the characters that 500 tokens allow at the 2.5
@@ -386,9 +498,19 @@ from its `Dialect` (OpenAI: `OpenAiRealtimePrompter` in `providers/realtime/open
 the golden tests read it from providers the registry builds. The fake provider defaults to
 `GptLivePrompter` and accepts any. The session asks `provider.prompter` for the instructions (from
 `provider.prompt_context`), each result, and the reconnect summary, and never looks at the
-provider's name. `service.prompt_context(config)` builds the `PromptContext` once from the
-`assistant` section (`name`, `persona`, `backchannel`) and the profiles' names and descriptions, and
-the provider factory hands it to every provider.
+provider's name. `service.prompt_context(config, profile)` builds a `PromptContext` from the
+`assistant` section (`name`, `persona`, `backchannel`), the profiles' names and descriptions, and the
+active profile with its description and `voice_context`; the session keeps one current context per
+conversation (see Active profiles and switching).
+
+Each prompter renders the active profile once, in its own format, with only that profile's
+`voice_context`: GPT-Live an `Active agent:` paragraph after the persona lines, OpenAI Realtime an
+`# Active Agent` section, and Grok a paragraph in `## Objective` that frames the voice context as
+rules about the words it speaks, as xAI's guide asks. Every prompt says that hand-offs go to the active
+agent until the user switches, to switch only when the user asks, and that only a yes or no answers a
+switch question (`blocks.ACTIVE_AGENT_SCOPE`, `SWITCH_WHEN_ASKED`, `SWITCH_QUESTION`). The tool-style
+prompts name `switch_profile` and `confirm_switch`; GPT-Live's lists "Agents" as a backend capability
+and hands off switch requests and yes/no answers as words.
 
 | Prompter | Follows | Instructions | Result |
 |---|---|---|---|
@@ -418,7 +540,8 @@ the session resolves the task from the user's words alone (see Router policy). J
 task's `topic` beside its internal id, and the reseed's task list gives each task's topic first and
 its number as an "internal id". The
 `delegate` receipt the prompts and tool description quote is `providers/base.py`'s
-`DELEGATE_RECEIPT`, the same object the session sends.
+`DELEGATE_RECEIPT`, `{"status": "received"}`, the same object the session sends; the prompts say that
+a start notice or a switch question follows it.
 
 Spoken notices (`prompts/notices.py`) have one wording for every provider.
 
@@ -451,7 +574,10 @@ seeded with the prompter's `reseed` (`blocks.history_summary` for all three): th
 transcript lines framed as data, and the open tasks with their states in neutral words
 (`notices.task_list`; the spoken status's "I'll tell you when it finishes" stays out of the model's
 context). OpenAI Realtime caps sessions at 60 minutes (`max_session_s` 3600);
-GPT-Live and xAI publish no cap.
+GPT-Live and xAI publish no cap. A change of prompt context on a provider without
+`replaces_instructions` (GPT-Live) takes this same path, by closing the provider session on purpose:
+it reconnects with the new instructions and the same summary, and does not count toward the
+short-session limit below.
 
 Hermes runs keep going across a reconnect and report to the new provider session. Only the provider
 session that requested a delegation can answer it, so a result for a delegation an earlier session
@@ -465,7 +591,8 @@ opening, so a provider that accepts the connection and drops it at once is not r
 ## Transports
 
 **Discord** (`transports/discord/`). The plugin's own bot logs in with `transports.discord.bot_token_env`
-and registers `/duplex join` and `/duplex leave`; an allowlisted person can also type `join`. It
+and registers `/duplex join`, `/duplex leave`, and `/duplex profile <name>` (see Active profiles and
+switching); an allowlisted person can also type `join`. It
 needs the guilds, voice states, guild messages, and message content intents, and joins one voice
 channel per server. `receiver.py` is adapted from Hermes's Discord `VoiceReceiver` (attribution in
 `NOTICE`): it hooks discord.py's voice socket, removes the transport encryption (NaCl), decrypts DAVE
@@ -493,7 +620,11 @@ failures it posts why in the channel's text chat and closes.
 `127.0.0.1:8765`) serves the page at `/` and the socket at `/ws`. The token comes from the `token`
 query parameter or `Sec-WebSocket-Protocol: bearer, <token>`. Binary messages carry PCM16 24 kHz mono
 both ways; JSON text messages from the server are `{"type": "interrupt"}` and `{"type": "status",
-...}` with transcript lines and the task list. The page captures the microphone with an AudioWorklet
+...}` with transcript lines, the task list, a `message`, or `{"active_profile": str, "profiles":
+[...]}` (the person's active profile and the profiles they may use, sent on connect and after each of
+their switches from any path, and after a switch that did not happen, with the reason as `message`).
+The page sends one kind of text message, `{"type": "profile", "name": <profile>}`, from its
+**Talking to** picker. The page captures the microphone with an AudioWorklet
 and keeps the token in `sessionStorage`. The server writes no access log, so a `?token=` query string
 never reaches the logs.
 

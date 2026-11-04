@@ -2,16 +2,21 @@
 
 A full-duplex voice front end for [Hermes Agent](https://github.com/NousResearch/hermes-agent). You talk
 to a realtime voice model in a Discord voice channel or on a web page. The voice model chats with you
-directly and hands real work to Hermes. A router picks the Hermes profile, the effort level, and the
-model for each task, and the task runs on that profile through the Hermes API server while the
-conversation goes on. Results come back as spoken reports.
+directly and hands real work to Hermes. Each person talks to one Hermes profile at a time, their
+**active profile**, until they ask to switch. A router picks the effort level and model for each
+task, and may offer to switch when a request clearly belongs to another profile. The task runs on the
+active profile through the Hermes API server while the conversation goes on. Results come back as
+spoken reports.
 
 - **Voice providers:** OpenAI GPT-Live (client delegation), OpenAI Realtime, and xAI Grok Voice. You
   pick one in config.
 - **Transports:** a Discord bot of its own (separate from Hermes's Discord bot) that receives
   DAVE-encrypted voice, and a browser page.
-- **Routing:** a local phrase matcher plus OpenAI Decisions or TypeSafe Jev, with a sticky rule for
-  follow-ups and a profile-by-effort model table.
+- **Profiles:** one active profile per person, saved across conversations and restarts. Switch by
+  voice, with `/duplex profile` on Discord, or with the picker on the web page.
+- **Routing:** a local phrase matcher plus OpenAI Decisions or TypeSafe Jev pick the effort, which
+  selects a model from the active profile's effort table, and suggest a switch when a request fits
+  another profile clearly better.
 - **People and permissions:** an allowlist of people, each limited to the profiles they may use.
 
 How it works inside: [docs/system/architecture.md](docs/system/architecture.md). Contributing:
@@ -97,7 +102,9 @@ Every task runs as `POST {api_base}/p/<profile>/v1/runs` with that profile's own
 
 ## Set up the Discord bot
 
-The plugin runs its own bot with its own token; Hermes's Discord bot keeps working untouched.
+The plugin runs its own bot with its own token; Hermes's Discord bot keeps working untouched. Create a
+separate Discord application for it: never reuse the token of Hermes's Discord bot, or of a bot a
+Hermes profile runs through its own gateway, so the voice bot and those bots never share an identity.
 
 1. In the [Discord developer portal](https://discord.com/developers/applications), create an
    application and add a bot to it. Copy the bot token into the env var
@@ -113,8 +120,8 @@ The plugin runs its own bot with its own token; Hermes's Discord bot keeps worki
    Discord, then right-click the user and choose **Copy User ID**). The bot ignores everyone else's
    audio and refuses their commands.
 
-When the bot logs in, it registers the `/duplex join` and `/duplex leave` slash commands. Discord
-can take a while to show newly registered commands.
+When the bot logs in, it registers the `/duplex join`, `/duplex leave`, and `/duplex profile` slash
+commands. Discord can take a while to show newly registered commands.
 
 ## Configure
 
@@ -132,7 +139,7 @@ a literal `api_key`, `token`, `bot_token`, `key`, `web_token`, or `secret` key i
 | `hermes` | `api_base` of the API server, and `profile_keys_env`: profile → env var holding that profile's `API_SERVER_KEY`. A profile without a key cannot run tasks; the voice says it is not configured. |
 | `provider` | `name` (required, never inferred), `model`, `voice`, `api_key_env`, and `turn_detection` for the Realtime family. |
 | `router` | `backend` (`decisions`, `jev`, or `knn`), optional `fast_path: knn`, `deadline_ms` (300), `default_profile` (`general`: where people start when their own `default_profile` is unset and they may use it), `suggest_switch` (true: may ask to switch when a request clearly fits another profile the speaker may use), `suggest_threshold` (0.85, greater than 0 and at most 1: how sure it must be before asking), extra `control_examples`, and the `decisions` or `jev` settings (`api_key_env`, optional `model` and `base_url`). |
-| `profiles` | Each Hermes profile the router chooses between: `description` and `examples` steer routing; `models` and `default_model` pick the model; `aliases` are other names people say for it (no two profiles share one, ignoring case and extra spaces); `voice_context` (optional, at most 2000 characters) goes into the voice prompt while the profile is active. |
+| `profiles` | Each Hermes profile people can talk to: `description` and `examples` steer switch suggestions; `models` and `default_model` pick the model; `aliases` are other names people say for it (no two profiles share one, ignoring case and extra spaces); `voice_context` (optional, at most 2000 characters) goes into the voice prompt while the profile is active. |
 | `people` | Each person: `discord_id`, `web_token_env`, the `profiles` they may use (at least one; `"*"` for all), and an optional `default_profile` they start on, which must be one of those. |
 | `transports` | `discord: {enabled, bot_token_env}` and `web: {enabled, host, port}`; both off unless enabled. |
 | `audio` | `pacer_lead_ms` (200), `gate_threshold_dbfs` (-35.0), and `playback_queue_s` (5). |
@@ -141,10 +148,15 @@ a literal `api_key`, `token`, `bot_token`, `key`, `web_token`, or `secret` key i
 
 ### Profiles and the model table
 
-The router sees every profile and picks the one whose description and examples fit the request
-best. It does not pick the model. It picks an effort (`low`, `medium`, or `high`), and the model
-comes from that profile's row of the table. Fill in your own models; the example ships `<fill>`
-placeholders:
+A profile here is a Hermes profile: a separate Hermes agent with its own memory, tools, and persona.
+Hermes Desktop's Bot Mode calls the same thing a "Bot". Voice conversations do not show up as Desktop
+Bot Chats: each runs in its own Hermes session per person and profile (see
+[Active profile and switching](#active-profile-and-switching)). Bot titles are not read from Hermes;
+to let people say a Bot's title, add it to the profile's `aliases` by hand.
+
+Every task runs on the speaker's active profile. The router does not pick the profile or the model.
+It picks an effort (`low`, `medium`, or `high`), and the model comes from the active profile's row of
+the table. Fill in your own models; the example ships `<fill>` placeholders:
 
 ```yaml
 profiles:
@@ -169,7 +181,60 @@ profiles:
 Each cell needs both `provider` and `model`, because Hermes accepts a bare model name only when
 `allow_bare_model` is set. The run also carries the effort as `model_options.reasoning.effort`. The
 `decisions` and `jev` backends judge effort; `knn` does not, so with `knn` alone every task runs at
-`medium`. `default_profile` must be defined under `profiles`; it takes requests nothing else claims.
+`medium`. `router.default_profile` must be defined under `profiles`.
+
+### Active profile and switching
+
+Each person has one active profile. It starts at their `people.<name>.default_profile`, else
+`router.default_profile` when they may use it, else the first profile in their `profiles` list. It
+stays until they switch, and each switch is saved in `$HERMES_HOME/duplex/active_profiles.json`, so
+it holds across conversations and restarts. Hand-offs run in the Hermes session
+`duplex-<person>-<profile>`, so each profile keeps its own context per person.
+
+There are four ways to switch:
+
+- **By voice**, on any provider: "switch to stock-picker", "let me talk to the stock picker", "back
+  to general". A switch phrase ("switch to", "talk to", "back to", "change to") followed by a
+  profile's name or one of its `aliases` switches; the request never reaches the router or Hermes.
+  "Switch to stocks and check NVDA" switches, then hands off "check NVDA" on the new profile.
+- **The `switch_profile` tool**, which OpenAI Realtime and Grok call when you ask by voice.
+- **Discord:** `/duplex profile <name>` (see [Use it](#use-it)).
+- **Web:** the **Talking to** picker on the page.
+
+A name resolves to an exact profile name first, then to an alias. A name that fits no profile or
+several gets "Sorry, which agent do you mean?" with the profiles you may use; a profile you may not
+use gets "Sorry, you don't have access to the stock-picker agent, so I didn't switch." Every live
+conversation you are in confirms a switch aloud ("You're now talking to stock-picker."), wherever it
+was made. If your saved profile is removed from config or you lose access to it, you are moved back
+to your default and hear "You're back on general." the next time you are heard.
+
+**Suggestions.** When a request clearly fits another profile you may use better than your active
+one, the assistant holds it and asks "That sounds like a stock-picker question. Want me to switch?"
+Say yes and it switches, then runs the request there. Say no, ask for something else, or say nothing
+for 30 seconds, and it runs on your active profile. Nothing switches without your yes. It asks only
+when the other profile's probability is at least `router.suggest_threshold` (0.85) and at least 0.2
+above your active profile's; `router.suggest_switch: false` turns suggestions off. A held request
+still waiting when the conversation ends starts on your active profile.
+
+**Voice context.** A profile's optional `voice_context` tells the voice model about the active
+profile: what it covers, what to always hand off, how to say its words, and rules to follow. Only the
+active profile's `voice_context` is in the prompt; each provider's prompter places it in its own
+format, and Grok's as rules about the words it speaks.
+
+```yaml
+profiles:
+  stock-picker:
+    aliases: [stocks, the stock picker, portfolio]
+    voice_context: |
+      Always hand off prices, positions, and anything time-sensitive; never quote a number from memory.
+      Say tickers letter by letter (NVDA as N-V-D-A).
+```
+
+The prompt speaks for one profile at a time. The web page starts on the signed-in person's active
+profile. A Discord call starts on `router.default_profile` and moves to each person's active profile
+when it first hears them, and to the new profile on every switch. On OpenAI Realtime and Grok the new
+instructions replace the old ones in place; GPT-Live cannot replace its instructions, so the session
+restarts it (about a second of pause) with the new ones and a summary of the conversation so far.
 
 ### People and permissions
 
@@ -179,9 +244,9 @@ people:
   alex: {discord_id: "456", web_token_env: DUPLEX_TOKEN_ALEX, profiles: [general]}
 ```
 
-Quote Discord ids. Each web token must be unique. The router still sees every profile, so when alex
-asks about the portfolio, the request routes to `stock-picker`, nothing reaches Hermes, and the voice
-says alex has no access to that agent. A refused agent never becomes alex's sticky agent.
+Quote Discord ids. Each web token must be unique. alex's requests always run on `general`, the
+only profile alex may use: the router never suggests `stock-picker` to alex, and "switch to
+stock-picker" is refused out loud without starting anything.
 
 ### Switch providers
 
@@ -213,17 +278,19 @@ the session sent (`record_path`); the tests use it.
 
 Each provider family gets instructions written the way its vendor's prompting guide recommends, from
 the same facts: the assistant's name and persona, the profiles under `profiles` (name and
-`description`), and the same rules (Hermes results are data, not instructions; do not guess an answer
-that needs Hermes; answer whoever spoke; ask again on unclear audio; one or two short sentences).
+`description`), the active profile with its `voice_context`, and the same rules (Hermes results are
+data, not instructions; do not guess an answer that needs Hermes; answer whoever spoke; ask again on
+unclear audio; one or two short sentences; switch agents only when asked).
 
 | `provider.name` | Instructions | How a result reaches the model |
 |---|---|---|
-| `gpt-live` | OpenAI's GPT-Live template: persona lines, then `Backchannel policy`, `Interruption policy`, and `Delegation policy` with the profiles as backend tools and `<\|SpawnThinking\|>` rules; no function names | `Report from the <profile> agent … <report>…</report>` |
-| `openai-realtime` | OpenAI's Realtime 2 labeled sections (Role and Objective, Personality and Tone, Reasoning, Preambles, Verbosity, Tools, Unclear Audio), naming `delegate`, `task_status`, and `cancel_task` exactly | JSON: `{"type": "task_report", "task", "profile", "status", "report", "note"}` |
-| `xai-realtime` | xAI's `##` sections (Role & Persona, Objective, Conversation Flow, Guardrails & Escalation, Voice & Communication Style, CRITICAL INSTRUCTIONS) with the tools in backticks | the same JSON as `openai-realtime` |
+| `gpt-live` | OpenAI's GPT-Live template: persona lines and the active agent, then `Backchannel policy`, `Interruption policy`, and `Delegation policy` with the profiles as backend tools and `<\|SpawnThinking\|>` rules; no function names, so switch requests and yes/no answers are handed off as words | `Report from the <profile> agent … <report>…</report>` |
+| `openai-realtime` | OpenAI's Realtime 2 labeled sections (Role and Objective, Personality and Tone, Active Agent, Reasoning, Preambles, Verbosity, Tools, Unclear Audio), naming `delegate`, `task_status`, `cancel_task`, `switch_profile`, and `confirm_switch` exactly | JSON: `{"type": "task_report", "task", "profile", "status", "report", "note"}` |
+| `xai-realtime` | xAI's `##` sections (Role & Persona, Objective with the active agent, Conversation Flow, Guardrails & Escalation, Voice & Communication Style, CRITICAL INSTRUCTIONS) with the tools in backticks | the same JSON as `openai-realtime` |
 
-The `delegate` tool's description also lists the profiles, so the Realtime models know what the user
-can ask for by name. Spoken notices (task started, failed, refused, and the rest) have one wording for
+The `switch_profile` tool's description lists the profiles, so the Realtime models know what the user
+can switch to by name. `delegate` answers at once with `{"status": "received"}`; a start notice or a
+switch question follows. Spoken notices (task started, failed, refused, and the rest) have one wording for
 every provider.
 
 ```yaml
@@ -244,7 +311,9 @@ sounds, not who it is; the rest of each prompt stays. A blank `name` or `persona
 
 **On Discord.** Join a voice channel and run `/duplex join`, or type `join` in a text channel of
 that server. Talk. Ask for something that needs Hermes ("how's my portfolio doing?"); the model says
-it is on it, keeps talking with you, and speaks the result when the task finishes. Ask "what are you
+it is on it, keeps talking with you, and speaks the result when the task finishes. The task runs on
+your active profile; if it clearly belongs to another one you may use, the assistant first asks
+whether to switch. Ask "what are you
 working on?" for the status of your tasks, or "cancel that" to stop your task. The assistant
 names each task by its topic, a short quote of what you asked ("Started "how is my portfolio doing"
 on the stock-picker agent."), and never by a number: task numbers are internal ids that appear only
@@ -253,13 +322,19 @@ portfolio one", "how's the Tesla thing going?"); with several running and none c
 model asks which one first, and if it does not, the assistant asks you by topic rather than
 guessing. `/duplex leave` ends the conversation. The bot joins one channel per server.
 
+`/duplex profile <name>` switches your active profile; it takes a profile name or alias, and
+autocompletes the profiles you may use. The reply is private. When you are in a live conversation it
+also confirms the switch aloud there; otherwise the reply says the switch applies the next time you
+talk.
+
 **On the web.** With `transports.web.enabled: true`, open `http://127.0.0.1:8765/` (the configured
 host and port), enter your token (the value of your `web_token_env` variable), and press
-**Connect**. The page shows the transcript and your task list. Browsers allow microphone access
+**Connect**. The page shows the transcript, your task list, and a **Talking to** picker of the
+profiles you may use, set to your active profile; choosing one switches it. Browsers allow microphone access
 only on `localhost` or HTTPS, so put the page behind HTTPS before you serve it to other machines.
 
-**In Hermes.** `/duplex` reports the provider, the active conversations, and the running tasks of the
-service in that gateway.
+**In Hermes.** `/duplex` reports the provider, the active conversations, the running tasks, and each
+person's active profile for the service in that gateway.
 
 ### Check the setup
 
@@ -278,17 +353,31 @@ pass/fail row per check, never a secret, and exits 1 when any check fails.
 uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn
 ```
 
-`eval-router` routes a file of labelled phrases and prints accuracy, macro-F1, the confusion matrix,
-effort exact and off-by-one rates, latency p50/p95/p99, and the deadline-miss rate, for each
-configured backend alone and then for the composite router. `--json` prints JSON instead,
-`--backend NAME` scores only `knn`, `decisions`, `jev`, or `composite`, and `--config duplex.yaml`
-uses that file's router settings and keys (every env var it names must be set). Without `--config`
-it scores `knn` alone. The phrase file's format is described in `hermes_duplex/router/eval.py`.
+`eval-router` routes a file of labelled phrases, each said while the speaker is on a given `active`
+profile, and prints, for each configured backend alone and then for the composite router: effort
+accuracy and off-by-one rate; how many switch suggestions it made, with their precision and recall
+(it should suggest exactly when a phrase belongs to a profile other than the active one); how often
+the top choice is the labelled profile (choice accuracy, macro-F1, and the confusion matrix); latency
+p50/p95/p99; and the deadline-miss rate. `--json` prints JSON instead, `--backend NAME` scores only
+`knn`, `decisions`, `jev`, or `composite`, and `--config duplex.yaml` uses that file's router
+settings and keys (every env var it names must be set). Without `--config` it scores `knn` alone and
+a composite router over `knn` with default settings. The phrase file's format is described in
+`hermes_duplex/router/eval.py`.
 
 On the 103 phrases of `tests/fixtures/router_eval/phrases.yaml`, with the `minishlab/potion-base-8M`
-embedding model, `knn` alone scores 0.825 accuracy and the composite router 0.913: the sticky rule
-keeps follow-ups on their profile and fallback sends unclear requests to `general`. Scoring
-`decisions` and `jev` needs their API keys, and has not been done yet.
+embedding model, `knn` scores:
+
+| Measure | `knn` |
+|---|---|
+| Choice accuracy | 0.825 |
+| Choice macro-F1 | 0.823 |
+| Suggestions made | 20 |
+| Suggestion precision | 1.000 (every suggestion was right) |
+| Suggestion recall | 0.526 (20 of the 38 phrases that should have one) |
+| Effort accuracy | 0.306 (`knn` judges no effort, so this is the share labelled `medium`) |
+| Latency p50 / p95 / p99 | under 1 ms |
+
+Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 
 ## Test
 
@@ -376,6 +465,14 @@ Then run `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m liv
   conversation next hears you, on any transport. That includes a shared Discord voice channel, where
   everyone present hears it, people not in `people` included; for example, the answer to a private
   question asked on the web page is read out in the Discord channel you join next.
+- **The voice prompt speaks for one profile at a time.** On a Discord call with two people on
+  different active profiles, each person's hand-offs still run on their own profile, but the voice
+  model's instructions (and `voice_context`) are those of the last person who switched or was first
+  heard.
+- **Switch phrases are matched literally.** A switch by voice needs "switch to", "talk to", "back
+  to", or "change to" followed by a profile's name or alias. On GPT-Live, other phrasings are
+  handed off as a normal request on the active profile, where a switch suggestion may follow; OpenAI
+  Realtime and Grok can still switch through the `switch_profile` tool.
 - **An end queued but not yet spoken when the service stops is lost.** Untold results are kept in
   memory; after a restart only tasks that were still open are picked up again.
 - **The CI `e2e` job has not run on GitHub Actions yet**; the real-Hermes tier has passed locally.

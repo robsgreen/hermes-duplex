@@ -5,11 +5,13 @@
 hermes-duplex is a Hermes Agent plugin that gives Hermes a full-duplex voice front end. People
 (config's `people`) join a conversation through a transport (the plugin's own Discord bot or a web
 page). Each conversation runs one `VoiceSession`, which joins it to one provider session on a
-realtime voice model (GPT-Live, OpenAI Realtime, or xAI Grok). When the voice model hands work off,
-the session credits the request to a person, the router picks a Hermes profile, an effort, and a
-model, the permission check confirms that person may use the profile, and the task runs on Hermes
-through its API server. The `TaskTracker` follows each task to its end, and the result is spoken back
-as a report.
+realtime voice model (GPT-Live, OpenAI Realtime, or xAI Grok). Each person has one active Hermes
+profile (`ActiveProfiles`), which changes only when they ask to switch. When the voice model hands
+work off, the session credits the request to a person, checks whether it is a switch request or an
+answer to a switch question, and otherwise asks the router for an effort (the model comes from the
+active profile's effort table) and an optional switch suggestion. The task runs on the speaker's
+active profile through the Hermes API server. The `TaskTracker` follows each task to its end, and the
+result is spoken back as a report.
 
 ## Backend/Dependencies
 
@@ -37,14 +39,15 @@ as a report.
 ```
 Transport (Discord | web) ──InputFrame──▶ VoiceSession ──audio──▶ RealtimeProvider (GPT-Live | Realtime)
                           ◀──PCM, flush──              ◀─events──
-VoiceSession ──text, speaker──▶ CompositeRouter ──profile, effort, model──▶ VoiceSession
-VoiceSession ──PermissionChecker──▶ TaskTracker + HermesApiClient ──▶ /p/<profile>/v1/runs
+VoiceSession ──switch request──▶ ActiveProfiles ──switched (notify live sessions, transports)──▶ VoiceSession
+VoiceSession ──text, speaker, active profile──▶ CompositeRouter ──effort, model, suggestion──▶ VoiceSession
+VoiceSession ──PermissionChecker──▶ TaskTracker + HermesApiClient ──▶ /p/<active profile>/v1/runs
 ```
 
 `build_service(config)` in `service.py` wires it all, the same way inside the gateway (the `duplex`
 gateway platform's `connect()` starts it) and standalone (`hermes-duplex serve`). The session adapts
-to a provider only through `ProviderCapabilities` and the provider's prompter, never its name. Full
-narrative: `docs/system/architecture.md`.
+to a provider only through `ProviderCapabilities` and the provider's prompter, never its name. The
+router never picks the profile a task runs on. Full narrative: `docs/system/architecture.md`.
 
 ## Before Making Changes
 
@@ -56,6 +59,7 @@ narrative: `docs/system/architecture.md`.
 | Providers | `hermes_duplex/providers/base.py`, then the provider's package (`adapter.py`) and `registry.py` |
 | Prompts, results, spoken notices | `docs/system/architecture.md` (Prompt strategy), `hermes_duplex/prompts/base.py` |
 | Router | `docs/system/architecture.md` (Router policy), `hermes_duplex/router/composite.py` |
+| Active profiles, switching, suggestions | `docs/system/architecture.md` (Active profiles and switching), `hermes_duplex/profiles.py`, `hermes_duplex/switching.py` |
 | Hermes client, error codes | `docs/system/architecture.md` (Dispatch to Hermes), `hermes_duplex/dispatch/hermes_api.py` |
 | Discord receive | `hermes_duplex/transports/discord/receiver.py` header, `NOTICE` |
 | Config keys | `hermes_duplex/config.py`, `duplex.example.yaml`, `README.md` (Configure) |
@@ -126,6 +130,8 @@ hermes_duplex/
   session.py                  VoiceSession
   tasks.py                    TaskTracker (+ $HERMES_HOME/duplex/tasks.jsonl)
   people.py                   PermissionChecker
+  profiles.py                 ActiveProfiles (+ $HERMES_HOME/duplex/active_profiles.json)
+  switching.py                switch-request parser, yes/no answers
   prompts/                    shared prompt pieces: base (VoicePrompter, PromptContext), blocks, notices
   audio/                      frames, resample (soxr), mixer + attribution, gate, pacer
   providers/                  base (interface), wire (WebSocket), registry (ProviderSpec per provider.name)
