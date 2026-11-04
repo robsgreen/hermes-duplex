@@ -10,13 +10,17 @@ provider:
 router:
   backend: knn
 profiles:
-  general: {}
+  general:
+    aliases: [assistant]
+    voice_context: Covers everyday questions such as the weather and reminders.
   stock-picker:
+    aliases: [stocks, stock bot]
+    voice_context: Covers Rob's portfolio, holdings, and trades. Always hand off price questions.
     models:
       medium: {provider: fake, model: stock-picker-medium}
       high: {provider: fake, model: stock-picker-high}
 people:
-  rob: {web_token_env: DUPLEX_E2E_TOKEN_ROB, profiles: ["*"]}
+  rob: {web_token_env: DUPLEX_E2E_TOKEN_ROB, profiles: ["*"], default_profile: general}
   alex: {web_token_env: DUPLEX_E2E_TOKEN_ALEX, profiles: [general]}
 transports:
   web: {enabled: true, host: 127.0.0.1, port: ${web_port}}

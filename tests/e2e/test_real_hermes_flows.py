@@ -1,11 +1,12 @@
-"""Against a real Hermes gateway with the plugin installed: requests on two topics that both run on
-the speaker's default profile, a status request that never reaches Hermes, and ``doctor`` checking the
-live API server.
+"""Against a real Hermes gateway with the plugin installed: a switch suggestion answered yes, a
+status request that never reaches Hermes, ``doctor`` checking the live API server, and an active
+profile that outlives a restart.
 
 The gateway runs its own provider script (written by the fixture): the portfolio question at 1.5 s of
-input, "what's the weather tomorrow" at 3.5 s, and "what are you working on" at 5.5 s. The knn
-router uses the real model2vec model; both profiles answer from ``tests/fakes/fake_llm.py``. The
-fixture also checks that the gateway is gone, and its home removed, once it ends.
+input, a ``confirm_switch`` call that accepts at 3.5 s, and "what are you working on" at 5.5 s. The
+knn router uses the real model2vec model, which suggests stock-picker for the portfolio question
+asked on general; both profiles answer from ``tests/fakes/fake_llm.py``. The fixture also checks
+that the gateway is gone, and its home removed, once it ends.
 """
 
 import asyncio
@@ -26,6 +27,7 @@ import numpy as np
 import pytest
 import yaml
 
+from hermes_duplex.prompts.notices import suggest_switch, switched_to
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.session import RESULT_CAP_TOKENS
 from hermes_duplex.transports.web.server import RATE
@@ -33,22 +35,26 @@ from tests.e2e.real_hermes import KEYS, REPO, TOKENS, RealHermes, hermes_command
 
 pytestmark = pytest.mark.e2e
 
+PORTFOLIO = "how is my portfolio doing"
 SCRIPT = [
     {
         "at_input_ms": 1500,
-        "event": {"type": "delegation", "id": "c1", "tool_args": {"task": "how is my portfolio doing"}},
+        "event": {"type": "delegation", "id": "c1", "tool_args": {"task": PORTFOLIO}},
     },
     {
         "at_input_ms": 3500,
-        "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "what's the weather tomorrow"}},
+        "event": {
+            "type": "delegation",
+            "id": "c2",
+            "target": "confirm_switch",
+            "tool_args": {"accept": True},
+        },
     },
     {
         "at_input_ms": 5500,
         "event": {"type": "delegation", "id": "c3", "tool_args": {"task": "what are you working on"}},
     },
 ]
-GENERAL_MODEL = "general-default"
-"""The general profile's default model in ``tests/fixtures/hermes_home/profiles/general/config.yaml``."""
 
 DOCTOR_ENV = {
     "DUPLEX_E2E_KEY_GENERAL": KEYS["general"],
@@ -99,6 +105,15 @@ async def provider_calls(hermes: RealHermes, method: str, count: int, timeout_s:
     return calls
 
 
+async def said_until(hermes: RealHermes, text: str, said_before: int, timeout_s: float = 60.0) -> list[str]:
+    """Wait until the fake provider was told to say ``text`` after its first ``said_before`` say calls,
+    and return everything it was told to say since then."""
+    async with asyncio.timeout(timeout_s):
+        while text not in (said := [call["text"] for call in hermes.provider_calls("say")[said_before:]]):
+            await asyncio.sleep(0.1)
+    return said
+
+
 def doctor(config: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Run ``hermes-duplex doctor --config config`` with only ``env``'s secrets set."""
     clean = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "DUPLEX_"))}
@@ -120,35 +135,40 @@ def doctor(config: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str
     )
 
 
-async def test_both_topics_run_on_the_default_profile_and_status_stays_local(hermes: RealHermes) -> None:
+async def test_a_yes_to_the_switch_suggestion_runs_the_request_on_stock_picker_and_status_stays_local(
+    hermes: RealHermes,
+) -> None:
+    assert hermes.active_profiles() == {}, "rob starts on his default, general"
+
     async with voice_call(hermes, "rob") as socket:
         await speak(socket, 2000)
-        await provider_calls(hermes, "deliver_result", 1)
+        await said_until(hermes, suggest_switch("stock-picker"), 0)
         await speak(socket, 2000)
-        results = await provider_calls(hermes, "deliver_result", 2)
+        results = await provider_calls(hermes, "deliver_result", 1)
         llm_calls = len(hermes.llm_requests())
-        said_before = len(hermes.provider_calls("say"))
         await speak(socket, 2000)
-        said = (await provider_calls(hermes, "say", said_before + 1))[said_before:]
+        said = await said_until(hermes, "You have no tasks running.", 0)
         await asyncio.sleep(1)  # time for a wrongly dispatched run to show up
 
     tasks = list(hermes.tasks().values())
     assert [(t["person"], t["profile"], t["text"], t["state"]) for t in tasks] == [
-        ("rob", "general", "how is my portfolio doing", "completed"),
-        ("rob", "general", "what's the weather tomorrow", "completed"),
+        ("rob", "stock-picker", PORTFOLIO, "completed"),
+    ], "the held request runs once, on the profile rob said yes to"
+    # Routed: the portfolio question on general (suggesting stock-picker) and the status request on
+    # stock-picker. The yes never reaches the router.
+    assert hermes.route_decisions() == [("rob", "general"), ("rob", "stock-picker")]
+    assert hermes.active_profiles() == {"rob": "stock-picker"}
+
+    reply = hermes.assert_ran_on_stock_picker(tasks[0])
+    assert results[0]["text"] == frame_result("stock-picker", reply, RESULT_CAP_TOKENS)
+    [confirmed] = [call for call in hermes.provider_calls("send_function_output") if call["call_id"] == "c2"]
+    assert confirmed["payload"]["status"] == "switched"
+    assert said == [
+        suggest_switch("stock-picker"),
+        switched_to("stock-picker"),
+        f'Started "{PORTFOLIO}" on the stock-picker agent.',
+        "You have no tasks running.",
     ]
-    assert hermes.route_decisions()[:2] == [("rob", "general")] * 2
-
-    for task in tasks:
-        assert task["model"] is None
-        status = hermes.run_status("general", task["run_id"])
-        assert status["status"] == "completed"
-        assert status["session_id"] == "duplex-rob-general"
-        assert status["output"] == f"{GENERAL_MODEL} says: done"
-    assert GENERAL_MODEL in {request["model"] for request in hermes.llm_requests()}
-
-    assert results[1]["text"] == frame_result("general", f"{GENERAL_MODEL} says: done", RESULT_CAP_TOKENS)
-    assert [call["text"] for call in said] == ["You have no tasks running."]
     assert len(hermes.llm_requests()) == llm_calls
 
 
@@ -179,3 +199,35 @@ def test_doctor_passes_against_the_gateway_and_names_what_fails(hermes: RealHerm
     assert unreachable.returncode == 1
     assert "cannot reach http://127.0.0.1:9/p/general/v1/models" in unreachable.stdout
     assert time.monotonic() - started < 30
+
+
+async def test_rob_keeps_his_active_profile_across_a_restart(hermes: RealHermes) -> None:
+    # The page's picker switches rob, unless the suggestion above already did.
+    async with voice_call(hermes, "rob") as socket:
+        await socket.send_str(json.dumps({"type": "profile", "name": "stock-picker"}))
+        async with asyncio.timeout(10):
+            while hermes.active_profiles().get("rob") != "stock-picker":
+                await asyncio.sleep(0.1)
+
+    hermes.restart()
+    tasks_before = hermes.tasks().keys()
+    decisions_before = len(hermes.route_decisions())
+    said_before = len(hermes.provider_calls("say"))
+    results_before = len(hermes.provider_calls("deliver_result"))
+
+    async with voice_call(hermes, "rob") as socket:
+        status = await socket.receive_json(timeout=10)
+        await speak(socket, 2000)
+        await provider_calls(hermes, "deliver_result", results_before + 1)
+
+    assert status == {
+        "type": "status",
+        "active_profile": "stock-picker",
+        "profiles": ["general", "stock-picker"],
+    }
+    [task] = [task for uuid, task in hermes.tasks().items() if uuid not in tasks_before]
+    assert (task["person"], task["profile"], task["text"]) == ("rob", "stock-picker", PORTFOLIO)
+    hermes.assert_ran_on_stock_picker(task)
+    assert hermes.route_decisions()[decisions_before:] == [("rob", "stock-picker")]
+    said = [call["text"] for call in hermes.provider_calls("say")[said_before:]]
+    assert suggest_switch("stock-picker") not in said, "the request ran at once, without a question"

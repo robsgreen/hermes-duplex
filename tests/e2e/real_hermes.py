@@ -3,9 +3,10 @@
 ``run_real_hermes`` builds a temporary ``HERMES_HOME`` from ``tests/fixtures/hermes_home/``, starts
 ``tests/fakes/fake_llm.py``, validates and installs the plugin with the ``hermes`` command, and runs
 ``hermes gateway run`` until the block ends. Starting takes up to a minute, mostly for the install,
-which builds an isolated Hermes runtime for the plugin.
+which builds an isolated Hermes runtime for the plugin; ``RealHermes.restart`` takes seconds.
 """
 
+import functools
 import json
 import os
 import re
@@ -57,9 +58,17 @@ ROUTE_LINE = re.compile(r" route speaker=(?P<speaker>\S+) profile=(?P<profile>\S
 
 
 class RealHermes:
-    """A running Hermes gateway with hermes-duplex in it, and what it and its fakes recorded."""
+    """A Hermes gateway with hermes-duplex in it, and what it and its fakes recorded."""
 
-    def __init__(self, home: Path, api_base: str, web_port: int, llm_record: Path) -> None:
+    def __init__(
+        self,
+        home: Path,
+        api_base: str,
+        web_port: int,
+        llm_record: Path,
+        start_gateway: Callable[[], subprocess.Popen[str]],
+    ) -> None:
+        """``start_gateway`` starts the gateway process and returns it once it serves."""
         self.home = home
         """The temporary ``HERMES_HOME``."""
         self.api_base = api_base
@@ -72,6 +81,24 @@ class RealHermes:
             (home / "duplex.yaml").read_text(encoding="utf-8")
         )["profiles"]["stock-picker"]["models"]
         """The stock-picker profile's model table: effort to ``{provider, model}``."""
+        self._start_gateway = start_gateway
+        self._gateway: subprocess.Popen[str] | None = None
+
+    def start(self) -> None:
+        """Start the gateway and return once it serves the API and the web transport."""
+        self._gateway = self._start_gateway()
+
+    def restart(self) -> None:
+        """Stop the gateway and start it again on the same home and ports, as after a reboot; the
+        plugin's service starts afresh from what it saved under ``home``."""
+        self.stop()
+        self.start()
+
+    def stop(self) -> None:
+        """Stop the gateway (SIGTERM, then SIGKILL after ``STOP_TIMEOUT_S``); a no-op when stopped."""
+        if self._gateway is not None:
+            _stop(self._gateway)
+            self._gateway = None
 
     def provider_calls(self, method: str) -> list[dict[str, Any]]:
         """The arguments of each fake provider call to ``method`` so far, across conversations."""
@@ -93,6 +120,29 @@ class RealHermes:
         """Every chat completion request body the fake LLM received, oldest first."""
         return _read_jsonl(self.llm_record)
 
+    def active_profiles(self) -> dict[str, str]:
+        """``$HERMES_HOME/duplex/active_profiles.json``: each person who switched, and their profile."""
+        path = self.home / "duplex" / "active_profiles.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+    def assert_ran_on_stock_picker(self, task: dict[str, Any]) -> str:
+        """Assert that ``task`` (a ``tasks`` record) completed on the stock-picker profile, in its
+        person's stock-picker session, with the model the model table gives its effort; return what
+        the fake LLM answered that model with."""
+        model = self.model_table[task["effort"]]
+        assert task["model"] == model
+        # The run exists on the stock-picker profile: /p/stock-picker/ answers for it with that key.
+        status = self.run_status("stock-picker", task["run_id"])
+        assert status["status"] == "completed"
+        assert status["session_id"] == f"duplex-{task['person']}-stock-picker"
+        assert status["runtime"]["requested"] == model
+        # No run status field carries the reasoning effort; the model request Hermes sent does.
+        sent = [request for request in self.llm_requests() if request["model"] == model["model"]]
+        assert task["effort"] in {request.get("reasoning_effort") for request in sent}
+        reply = LLM_REPLIES[model["model"]]
+        assert status["output"] == reply
+        return reply
+
     def run_status(self, profile: str, run_id: str) -> dict[str, Any]:
         """``GET /p/<profile>/v1/runs/<run_id>`` with the profile's key."""
         request = urllib.request.Request(
@@ -109,8 +159,9 @@ def run_real_hermes(hermes: str, configure: Callable[[Path], None] | None = None
 
     ``configure``, when given, is called with the temporary ``HERMES_HOME`` after the templates are
     rendered and before the plugin is installed, to change what the gateway and the plugin run with
-    (for example ``duplex.yaml`` or a profile's ``config.yaml``). Without it the plugin uses the fake
-    provider and the knn router, and every profile answers from the fake LLM.
+    (for example ``duplex.yaml`` or a profile's ``config.yaml``). Without it the plugin uses the knn
+    router and the fake provider replaying ``switch_to_stock_picker.jsonl``, and every profile
+    answers from the fake LLM.
 
     Asserts that ``hermes plugins validate`` accepts the repo. Installs a snapshot of the working
     tree, so uncommitted changes are what runs. On teardown stops the gateway (SIGTERM, then SIGKILL
@@ -126,6 +177,7 @@ def run_real_hermes(hermes: str, configure: Callable[[Path], None] | None = None
         "DUPLEX_E2E_TOKEN_ALEX": TOKENS["alex"],
     }
     processes: list[subprocess.Popen[str]] = []
+    running: RealHermes | None = None
     try:
         llm_record = home / "llm-requests.jsonl"
         llm, llm_url = _start_fake_llm(llm_record, home / "fake-llm.log")
@@ -141,7 +193,7 @@ def run_real_hermes(hermes: str, configure: Callable[[Path], None] | None = None
             api_base=api_base,
             llm_url=llm_url,
             web_port=str(web_port),
-            provider_script=str(FIXTURES / "provider_scripts" / "delegate_portfolio.jsonl"),
+            provider_script=str(FIXTURES / "provider_scripts" / "switch_to_stock_picker.jsonl"),
         )
         if configure is not None:
             configure(home)
@@ -155,20 +207,13 @@ def run_real_hermes(hermes: str, configure: Callable[[Path], None] | None = None
             f"hermes plugins install failed:\n{installed.stdout}"
         )
 
-        with (home / "gateway-output.log").open("w", encoding="utf-8") as output:
-            gateway = subprocess.Popen(
-                [hermes, "gateway", "run"],
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,
-            )
-        processes.append(gateway)
-        _wait_until_serving(gateway, home, api_base, web_port)
-        yield RealHermes(home, api_base, web_port, llm_record)
+        start_gateway = functools.partial(_start_gateway, hermes, env, home, api_base, web_port)
+        running = RealHermes(home, api_base, web_port, llm_record, start_gateway)
+        running.start()
+        yield running
     finally:
+        if running is not None:
+            running.stop()
         for process in reversed(processes):
             _stop(process)
         shutil.rmtree(home, ignore_errors=True)
@@ -261,6 +306,29 @@ def _run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess
         text=True,
         timeout=600,
     )
+
+
+def _start_gateway(
+    hermes: str, env: dict[str, str], home: Path, api_base: str, web_port: int
+) -> subprocess.Popen[str]:
+    """Run ``hermes gateway run`` in ``home``, its output appended to ``gateway-output.log``, and
+    return it once it serves; stop it and fail the test when it does not."""
+    with (home / "gateway-output.log").open("a", encoding="utf-8") as output:
+        gateway = subprocess.Popen(
+            [hermes, "gateway", "run"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    try:
+        _wait_until_serving(gateway, home, api_base, web_port)
+    except BaseException:
+        _stop(gateway)
+        raise
+    return gateway
 
 
 def _wait_until_serving(gateway: subprocess.Popen[str], home: Path, api_base: str, web_port: int) -> None:
