@@ -40,8 +40,11 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build constraints from hermes-agent pyproject.toml
         run: |
-          curl -fsSL -o hermes-pyproject.toml \
-            "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_AGENT_SHA}/pyproject.toml"
+          # Fetched with git, like the e2e job: raw.githubusercontent.com rate-limits runners (429).
+          hermes_src="${RUNNER_TEMP}/hermes-agent"
+          git init -q "${hermes_src}"
+          git -C "${hermes_src}" fetch -q --depth 1 https://github.com/NousResearch/hermes-agent "${HERMES_AGENT_SHA}"
+          git -C "${hermes_src}" show FETCH_HEAD:pyproject.toml > hermes-pyproject.toml
           python3 - <<'EOF'
           import tomllib
 
