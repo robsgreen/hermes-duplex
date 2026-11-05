@@ -144,6 +144,9 @@ class _QueueConversation:
         """Audio handed to ``play`` so far, in whole ms."""
         return self._played_bytes * 1000 // (2 * RATE)
 
+    def present(self, person: str) -> bool:
+        return True
+
     async def flush_playback(self) -> None:
         self.flushes += 1
 
@@ -252,11 +255,12 @@ class _Harness:
         }
 
     def announcements(self) -> list[str]:
-        """The text of every out-of-band announcement the session sent, oldest first."""
+        """The text of every announcement the session sent, oldest first: out of band, or a question
+        spoken in the conversation."""
         return [
             event["response"]["input"][0]["content"][0]["text"]
             for event in self.sent("response.create")
-            if event.get("response", {}).get("conversation") == "none"
+            if "input" in event.get("response", {})
         ]
 
     async def answer_requests(self) -> None:
@@ -634,7 +638,8 @@ async def test_a_context_change_replaces_only_the_instructions_in_place(
     tmp_path: Path, api: FakeHermesApi, dialect: Dialect
 ) -> None:
     # The conversation starts on general, the default profile; hearing Rob moves it to stock-picker.
-    async with FakeWsServer(STARTED) as server:
+    script = [*STARTED, {"wait_for": "session.update"}, {"type": "session.updated"}]
+    async with FakeWsServer(script) as server:
         harness = _Harness(tmp_path, api, server)
         harness.dialect = dialect
         harness.conversation.feed(200, _rob)
@@ -652,6 +657,7 @@ async def test_a_context_change_replaces_only_the_instructions_in_place(
     assert "tools" in connect["session"]
     assert update == {
         "type": "session.update",
+        "event_id": "duplex_instructions_1",
         "session": dialect.instructions_config(
             prompter.instructions(prompt_context(harness.config, "stock-picker"))
         ),
@@ -665,11 +671,13 @@ async def test_switch_profile_tool_switches_updates_the_instructions_and_confirm
 ) -> None:
     async with _session(tmp_path, api) as harness:
         await harness.wait_for(lambda: len(harness.sent("session.update")) == 2)  # Rob was heard
+        await harness.server.send({"type": "session.updated"})
 
         await harness.server.send(*_responding("call_1", "switch_profile", {"profile": "general"}))
         await harness.wait_for(lambda: "call_1" in harness.outputs())
         await harness.answer_requests()
         await harness.wait_for(lambda: bool(harness.announcements()))
+        await harness.wait_for(lambda: len(harness.sent("session.update")) == 3)
 
         assert harness.outputs()["call_1"] == {"status": "switched"}
         assert harness.announcements() == [switched_to("general")]

@@ -195,8 +195,10 @@ class GptLiveProvider:
         """Append ``text`` as commentary for the model to speak for the delegation (``_commentary``)."""
         await self._commentary(text, ref.delegation_id)
 
-    async def say(self, text: str) -> None:
-        """Append ``text`` as commentary for the model to speak, tied to no delegation (``_commentary``)."""
+    async def say(self, text: str, *, expects_answer: bool = False) -> None:
+        """Append ``text`` as commentary for the model to speak, tied to no delegation (``_commentary``).
+
+        Commentary is part of the conversation, so a question (``expects_answer``) needs nothing more."""
         await self._commentary(text, None)
 
     async def update_instructions(self, text: str) -> None:

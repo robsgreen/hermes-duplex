@@ -27,7 +27,8 @@ _BACKCHANNEL_POLICIES: dict[Backchannel, str] = {
 
 TASKS_CAPABILITY = (
     "Tasks: report how the user's running tasks are going, or cancel one. "
-    f"{blocks.CANCEL_POLICY} {blocks.TASKS_BY_TOPIC} Each task's start note says what it is about."
+    f"{blocks.CANCEL_POLICY} {blocks.CANCEL_QUESTION} Hand off their yes or no as they said it. "
+    f"{blocks.TASKS_BY_TOPIC} Each task's start note says what it is about."
 )
 """The backend capability this app answers itself: the status of a person's tasks, and cancelling.
 GPT-Live hands work off without arguments, so the app tells which task is meant from the user's words."""
@@ -74,7 +75,7 @@ Backend tools:
 
 Generate <|SpawnThinking|> when:
 - The request needs {blocks.NEEDS_HERMES}.
-- The user asks how their tasks are going, or asks to cancel one.
+- The user asks how their tasks are going, asks to cancel one, or answers your question about cancelling one.
 - The user asks to talk to a different agent, or answers your question about switching agents.
 - A correction changes the work already requested.
 

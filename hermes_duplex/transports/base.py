@@ -50,9 +50,14 @@ class Conversation(Protocol):
 
     @property
     def person(self) -> str | None:
-        """The name of the one person signed in to the conversation (web), whose active profile the
-        voice prompt starts on; None when anyone allowed may join (Discord), and the prompt starts on
-        the default profile."""
+        """The name of the person the conversation is for, whose active profile the voice prompt
+        starts on: the one person signed in (web), or the person who brought the bot into the voice
+        channel (Discord); None when there is none, and the prompt starts on the default profile."""
+        ...
+
+    def present(self, person: str) -> bool:
+        """Whether ``person`` (a name from config's ``people``) is in the conversation now: signed in
+        to it (web), or in its voice channel (Discord)."""
         ...
 
     def frames(self) -> AsyncIterator[InputFrame]:

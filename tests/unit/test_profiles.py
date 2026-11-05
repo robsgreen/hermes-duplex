@@ -1,5 +1,6 @@
 """ActiveProfiles: default resolution, persistence, fallback after config changes, switching, listeners."""
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -12,7 +13,11 @@ from hermes_duplex.config import Config, load_config
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles, SwitchResult
 
-PROFILES: dict[str, dict[str, Any]] = {"home": {}, "general": {}, "stock-picker": {}}
+PROFILES: dict[str, dict[str, Any]] = {
+    "home": {"aliases": ["the house"]},
+    "general": {},
+    "stock-picker": {"aliases": ["stocks", "the stock picker"]},
+}
 
 PEOPLE: dict[str, dict[str, Any]] = {
     # people.<p>.default_profile wins.
@@ -58,16 +63,19 @@ def store(tmp_path: Path, path: Path) -> ActiveProfiles:
 
 
 class _Recorder:
-    """A switch listener that records the profiles it is told about and can fail."""
+    """A switch listener that records the profiles it is told about, says whether it is live, and can
+    fail."""
 
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(self, error: Exception | None = None, *, live: bool = True) -> None:
         self.profiles: list[str] = []
         self._error = error
+        self._live = live
 
-    async def __call__(self, profile: str) -> None:
+    async def __call__(self, profile: str) -> bool:
         self.profiles.append(profile)
         if self._error is not None:
             raise self._error
+        return self._live
 
 
 # Default resolution
@@ -176,6 +184,45 @@ def test_an_unusable_saved_profile_falls_back_to_the_default_once(
     assert store.fallback_pending("rob") is None
 
 
+@pytest.mark.parametrize(
+    "saved", [{"alex": "retired", "sam": "home"}, {"gone": "home", "sam": "home"}], ids=["unusable", "gone"]
+)
+def test_load_rewrites_the_file_without_what_it_dropped(
+    tmp_path: Path, path: Path, saved: dict[str, str]
+) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    config = _config(tmp_path)
+    _store(config, path).load()
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"sam": "home"}
+    # So a restart announces no fallback again.
+    restarted = _store(config, path)
+    restarted.load()
+    assert restarted.fallback_pending("alex") is None
+    assert restarted.get("sam") == "home"
+
+
+async def test_a_profile_added_back_to_config_does_not_return_unasked(tmp_path: Path, path: Path) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"alex": "retired"}), encoding="utf-8")
+    _store(_config(tmp_path), path).load()
+
+    restored = _store(_config(tmp_path, profiles={**PROFILES, "retired": {}}), path)
+    restored.load()
+
+    assert restored.get("alex") == "general"
+
+
+def test_load_leaves_a_file_with_nothing_to_drop_alone(store: ActiveProfiles, path: Path) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text('{"sam":"home"}', encoding="utf-8")
+
+    store.load()
+
+    assert path.read_text(encoding="utf-8") == '{"sam":"home"}'
+
+
 def test_saved_entries_for_people_no_longer_in_config_are_ignored(store: ActiveProfiles, path: Path) -> None:
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"gone": "home", "sam": "home"}), encoding="utf-8")
@@ -213,6 +260,63 @@ async def test_switch_tells_that_persons_listeners_only(store: ActiveProfiles) -
     assert other.profiles == []
 
 
+async def test_a_switch_is_live_only_when_a_listener_says_so(store: ActiveProfiles) -> None:
+    shown, departed = _Recorder(live=False), _Recorder(live=False)
+    store.subscribe("alex", shown)
+    store.subscribe("alex", departed)
+
+    assert await store.switch("alex", "stock-picker") == SwitchResult("switched", notified_live=False)
+    assert shown.profiles == departed.profiles == ["stock-picker"]
+
+    store.subscribe("alex", _Recorder())
+    assert await store.switch("alex", "general") == SwitchResult("switched", notified_live=True)
+
+
+async def test_concurrent_switches_reach_every_listener_in_order(store: ActiveProfiles) -> None:
+    told: list[str] = []
+    release = asyncio.Event()
+
+    async def slow(profile: str) -> bool:
+        if profile == "stock-picker":
+            await release.wait()
+        told.append(profile)
+        return True
+
+    store.subscribe("rob", slow)
+    first = asyncio.create_task(store.switch("rob", "general"))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(store.switch("rob", "stock-picker"))
+    third = asyncio.create_task(store.switch("rob", "home"))
+    await asyncio.sleep(0.01)
+    release.set()
+    await asyncio.gather(first, second, third)
+
+    assert told == ["general", "stock-picker", "home"]
+    assert store.get("rob") == "home"
+
+
+@pytest.mark.parametrize(
+    ("words", "profile"),
+    [
+        ("stock-picker", "stock-picker"),
+        ("The Stock Picker", "stock-picker"),
+        ("stocks", "stock-picker"),
+        ("the house", "home"),
+        ("finance", None),
+    ],
+)
+def test_resolve_names_a_profile_by_name_or_alias(
+    store: ActiveProfiles, words: str, profile: str | None
+) -> None:
+    assert store.resolve(words) == profile
+
+
+def test_permitted_lists_a_persons_profiles_in_config_order(store: ActiveProfiles) -> None:
+    assert store.permitted("rob") == ["general", "home", "stock-picker"]  # the fixture sorts its keys
+    assert store.permitted("sam") == ["home", "stock-picker"]
+    assert store.permitted("stranger") == []
+
+
 async def test_unsubscribed_listeners_are_not_told(store: ActiveProfiles) -> None:
     listener = _Recorder()
     unsubscribe = store.subscribe("alex", listener)
@@ -235,7 +339,7 @@ async def test_a_failing_listener_does_not_block_the_switch_or_the_others(
     with caplog.at_level(logging.ERROR, logger="hermes_duplex.profiles"):
         result = await store.switch("alex", "stock-picker")
 
-    assert result == SwitchResult("switched", notified_live=True)
+    assert result == SwitchResult("switched", notified_live=True), "the working listener is live"
     assert working.profiles == ["stock-picker"]
     assert store.get("alex") == "stock-picker"
     assert json.loads(path.read_text(encoding="utf-8")) == {"alex": "stock-picker"}

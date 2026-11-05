@@ -169,6 +169,17 @@ async def _commentary_parts(server: FakeWsServer, count: int) -> list[dict[str, 
     return appends
 
 
+async def test_a_question_is_commentary_like_any_other_notice() -> None:
+    async with FakeWsServer(STARTED) as server:
+        provider = _provider(server)
+        await provider.connect(INSTRUCTIONS, None, None)
+        await provider.say("Want me to switch?", expects_answer=True)
+        await provider.close()
+
+    commentary = {"type": "session.commentary.append", "content": "Want me to switch?", "delegation_id": None}
+    assert commentary in server.client_events, "commentary already reaches the model's context"
+
+
 async def test_a_long_numeric_result_is_split_into_framed_parts_of_at_most_500_chars() -> None:
     text = "NVDA 131.42 +2.07% AAPL 228.10 -0.35% " * 33  # 1250 numeric characters
     framed = frame_result("stock-picker", text, 500)

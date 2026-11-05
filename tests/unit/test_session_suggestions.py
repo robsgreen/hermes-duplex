@@ -16,12 +16,12 @@ from hermes_duplex.config import Config, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
-from hermes_duplex.prompts.notices import NO_SWITCH_QUESTION, suggest_switch, switched_to
+from hermes_duplex.prompts.notices import NO_QUESTION_PENDING, suggest_switch, switched_to
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
 from hermes_duplex.router.base import BackendResult, Effort, ProfileSpec, RouteDecision, RouteRequest
 from hermes_duplex.router.composite import CompositeRouter
-from hermes_duplex.session import HOLD_TIMEOUT_S, Router, VoiceSession
+from hermes_duplex.session import QUESTION_TIMEOUT_S, Router, VoiceSession
 from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.base import InputFrame
 from tests.fakes.fake_hermes_api import FakeHermesApi, RecordedRequest
@@ -57,6 +57,9 @@ class _MemoryConversation:
 
     async def play(self, pcm16_mono: bytes, rate: int) -> None:
         pass
+
+    def present(self, person: str) -> bool:
+        return True
 
     async def flush_playback(self) -> None:
         pass
@@ -122,8 +125,8 @@ class _FixedBackend:
 
 
 class _Sleep:
-    """The session's ``sleep``: a hold's timeout waits until ``expire_holds`` is set; any other sleep is
-    real."""
+    """The session's ``sleep``: a question's timeout waits until ``expire_holds`` is set; any other
+    sleep is real."""
 
     def __init__(self) -> None:
         self.expire_holds = asyncio.Event()
@@ -131,7 +134,7 @@ class _Sleep:
 
     async def __call__(self, seconds: float) -> None:
         self.requested_s.append(seconds)
-        if seconds == HOLD_TIMEOUT_S:
+        if seconds == QUESTION_TIMEOUT_S:
             await self.expire_holds.wait()
         else:
             await asyncio.sleep(seconds)
@@ -200,8 +203,14 @@ class _Harness:
         self._hermes: HermesApiClient | None = None
         self._run: asyncio.Task[None] | None = None
 
-    def start(self, script: Iterable[Mapping[str, Any]], *, speaker: str = "rob") -> None:
-        self.provider = FakeProvider(script)
+    def start(
+        self,
+        script: Iterable[Mapping[str, Any]],
+        *,
+        speaker: str = "rob",
+        provider: FakeProvider | None = None,
+    ) -> None:
+        self.provider = provider or FakeProvider(script)
         self._conversation = _MemoryConversation(_frames(1000, speaker))
         self._hermes = HermesApiClient(self.api.api_base, KEYS.get)
         session = VoiceSession(
@@ -370,9 +379,79 @@ async def test_confirm_switch_with_no_question_pending_says_nothing_is_waiting(h
     await harness.wait_for(lambda: "call_1" in harness.outputs())
     await asyncio.sleep(0.1)
 
-    assert harness.outputs()["call_1"] == {"status": "nothing_pending", "message": NO_SWITCH_QUESTION}
+    assert harness.outputs()["call_1"] == {"status": "nothing_pending", "message": NO_QUESTION_PENDING}
     assert harness.active_profiles.get("rob") == "general"
     assert harness.runs() == [] and harness.said() == []
+
+
+class _SlowToSpeakProvider(FakeProvider):
+    """A fake provider whose ``say`` returns only once ``spoken`` is set, as when the floor is taken."""
+
+    def __init__(self, script: Iterable[Mapping[str, Any]]) -> None:
+        super().__init__(script)
+        self.spoken = asyncio.Event()
+
+    async def say(self, text: str, *, expects_answer: bool = False) -> None:
+        await super().say(text, expects_answer=expects_answer)
+        await self.spoken.wait()
+
+
+async def test_the_switch_question_is_said_to_be_answered_and_times_out_only_once_said(
+    harness: _Harness,
+) -> None:
+    provider = _SlowToSpeakProvider([_handoff("call_1", NVDA)])
+    harness.start([], provider=provider)
+    await harness.wait_for(lambda: bool(harness.said()))
+    await asyncio.sleep(0.1)
+
+    assert [call.args["expects_answer"] for call in harness.sent("say")] == [True]
+    assert QUESTION_TIMEOUT_S not in harness.sleep.requested_s, "not spoken yet"
+    provider.spoken.set()
+    await harness.wait_for(lambda: QUESTION_TIMEOUT_S in harness.sleep.requested_s)
+    assert harness.runs() == []
+
+
+@pytest.mark.parametrize("late", ["yes", "no thanks"])
+async def test_a_second_answer_after_the_question_was_settled_is_not_run(
+    harness: _Harness, late: str
+) -> None:
+    harness.start(
+        [
+            _handoff("call_1", NVDA),
+            _after_the_question(_call("call_2", "delegate", {"task": "yes"})),
+            _after_the_question(_call("call_3", "delegate", {"task": late})),  # after "You're now talking to"
+        ]
+    )
+
+    (run,) = await harness.wait_for_runs(1)
+    await harness.wait_for(lambda: NO_QUESTION_PENDING in harness.said())
+    await asyncio.sleep(0.1)
+
+    _assert_ran_on(run, "stock-picker")
+    assert harness.runs() == [run]
+    assert isinstance(harness.router, _SuggestingRouter)
+    assert harness.router.requests == [(NVDA, "general")], "neither answer is routed"
+    assert harness.active_profiles.get("rob") == "stock-picker"
+
+
+async def test_an_answer_after_the_question_timed_out_is_not_run(harness: _Harness) -> None:
+    harness.start(
+        [
+            _handoff("call_1", NVDA),
+            _after_the_question({"type": "output_transcript", "delta": "Want me to switch?"}),
+            _after_the_question(_call("call_2", "delegate", {"task": "yes"})),  # after the start notice
+        ]
+    )
+    await harness.wait_for(lambda: bool(harness.said()))
+    harness.sleep.expire_holds.set()
+
+    (run,) = await harness.wait_for_runs(1)
+    await harness.wait_for(lambda: NO_QUESTION_PENDING in harness.said())
+    await asyncio.sleep(0.1)
+
+    _assert_ran_on(run, "general")
+    assert harness.runs() == [run]
+    assert harness.active_profiles.get("rob") == "general", "a late yes switches nothing"
 
 
 async def test_no_answer_within_the_timeout_runs_on_the_active_profile(harness: _Harness) -> None:
@@ -380,7 +459,7 @@ async def test_no_answer_within_the_timeout_runs_on_the_active_profile(harness: 
     await harness.wait_for(lambda: bool(harness.said()))
     await asyncio.sleep(0.1)
     assert harness.runs() == []
-    assert HOLD_TIMEOUT_S in harness.sleep.requested_s
+    assert QUESTION_TIMEOUT_S in harness.sleep.requested_s
 
     harness.sleep.expire_holds.set()
     (run,) = await harness.wait_for_runs(1)

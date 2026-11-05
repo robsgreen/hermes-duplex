@@ -99,6 +99,9 @@ class _QueueConversation:
     async def play(self, pcm16_mono: bytes, rate: int) -> None:
         pass
 
+    def present(self, person: str) -> bool:
+        return True
+
     async def flush_playback(self) -> None:
         pass
 

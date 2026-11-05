@@ -69,6 +69,10 @@ SWITCH_QUESTION = (
 )
 """How a switch question is answered. Each prompter adds how its model passes the answer on."""
 
+CANCEL_QUESTION = "A yes to your question about cancelling a task cancels it, and a no leaves it running."
+"""How the question whether to cancel the only open task is answered. Each prompter adds how its model
+passes the answer on."""
+
 
 def agent_phrase(name: str, description: str | None) -> str:
     """One Hermes agent as a spoken-style phrase: ``name (description)``, or ``name`` alone when the

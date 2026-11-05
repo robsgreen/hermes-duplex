@@ -111,6 +111,9 @@ class _QueueConversation:
         assert rate == RATE
         self.played.append(pcm16_mono)
 
+    def present(self, person: str) -> bool:
+        return True
+
     async def flush_playback(self) -> None:
         self.flushes.append(self.frames_yielded)
 

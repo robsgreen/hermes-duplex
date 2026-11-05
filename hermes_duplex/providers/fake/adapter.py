@@ -279,9 +279,9 @@ class FakeProvider:
         self._respond()
         await self._record("deliver_result", {"ref": dataclasses.asdict(ref), "text": text})
 
-    async def say(self, text: str) -> None:
+    async def say(self, text: str, *, expects_answer: bool = False) -> None:
         self._respond()
-        await self._record("say", {"text": text})
+        await self._record("say", {"text": text, "expects_answer": expects_answer})
 
     async def update_instructions(self, text: str) -> None:
         """Record the call, whatever ``replaces_instructions`` says, so a test sees a misuse."""

@@ -51,7 +51,6 @@ def _transport(tmp_path: Path, **overrides: Any) -> DiscordTransport:
     permissions = PermissionChecker(config)
     arguments: dict[str, Any] = {
         "active_profiles": ActiveProfiles(tmp_path / "active_profiles.json", permissions, config),
-        "profile_aliases": {name: profile.aliases for name, profile in config.profiles.items()},
         "input_rate": 24000,
         "output_rate": 24000,
         **overrides,
@@ -194,6 +193,7 @@ async def test_join_joins_the_invokers_channel_once(
     [conversation] = consumer.conversations
     assert isinstance(conversation, DiscordConversation)
     assert conversation.channel is cast(discord.VoiceChannel, channel)
+    assert conversation.person == "rob", "the voice prompt starts on the active profile of who joined it"
     assert len(channel.voice_clients) == 1
     assert "already in" in await transport.join(_member(ROB_ID, channel))
     assert len(channel.voice_clients) == 1
@@ -242,8 +242,9 @@ async def test_profile_switch_heard_by_a_live_conversation_is_confirmed_there(
 ) -> None:
     heard: list[str] = []
 
-    async def live_conversation(profile: str) -> None:
+    async def live_conversation(profile: str) -> bool:
         heard.append(profile)
+        return True
 
     store.subscribe("rob", live_conversation)
     interaction = _interaction(_member(ROB_ID))

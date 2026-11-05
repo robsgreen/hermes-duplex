@@ -206,6 +206,9 @@ class _SilentConversation:
     async def play(self, pcm16_mono: bytes, rate: int) -> None:
         pass
 
+    def present(self, person: str) -> bool:
+        return True
+
     async def flush_playback(self) -> None:
         pass
 
@@ -262,7 +265,6 @@ async def _switch_through_a_session(
             active_profiles=store,
             prompt_context_for=lambda profile: service.prompt_context(config, profile),
             default_profile=config.router.default_profile,
-            profile_aliases={name: profile.aliases for name, profile in config.profiles.items()},
         )
         run = asyncio.create_task(session.run())
         try:

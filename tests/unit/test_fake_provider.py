@@ -295,6 +295,7 @@ async def test_records_every_call_in_memory_and_to_record_path(tmp_path: Path) -
     await provider.report_progress(ref, "looking it up")
     await provider.deliver_result(ref, "up 2%")
     await provider.say("task 3 is done")
+    await provider.say("Want me to switch?", expects_answer=True)
     await provider.update_instructions("be brief")
     await provider.close()
 
@@ -305,7 +306,8 @@ async def test_records_every_call_in_memory_and_to_record_path(tmp_path: Path) -
         SentCall("send_function_output", {"call_id": "call_1", "payload": {"status": "started"}}),
         SentCall("report_progress", {"ref": ref_args, "text": "looking it up"}),
         SentCall("deliver_result", {"ref": ref_args, "text": "up 2%"}),
-        SentCall("say", {"text": "task 3 is done"}),
+        SentCall("say", {"text": "task 3 is done", "expects_answer": False}),
+        SentCall("say", {"text": "Want me to switch?", "expects_answer": True}),
         SentCall("update_instructions", {"text": "be brief"}),
         SentCall("close", {}),
     ]

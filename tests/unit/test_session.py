@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from hermes_duplex import service
+from hermes_duplex import session as session_module
 from hermes_duplex.audio.frames import silent_frame
 from hermes_duplex.config import Config, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
@@ -20,6 +21,7 @@ from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.base import PromptContext, TaskReport, VoicePrompter
 from hermes_duplex.prompts.notices import (
+    NO_QUESTION_PENDING,
     NO_SUCH_TASK,
     NOTHING_TO_CANCEL,
     WHO_IS_ASKING,
@@ -67,6 +69,8 @@ class _MemoryConversation:
         self.played: list[bytes] = []
         self.notified: list[dict[str, Any]] = []
         self.closed_reason: str | None = None
+        self.departed: set[str] = set()
+        """People who have left; everyone else counts as present."""
 
     async def frames(self) -> AsyncIterator[InputFrame]:
         for frame in self._frames:
@@ -76,6 +80,9 @@ class _MemoryConversation:
     async def play(self, pcm16_mono: bytes, rate: int) -> None:
         assert rate == RATE
         self.played.append(pcm16_mono)
+
+    def present(self, person: str) -> bool:
+        return person not in self.departed
 
     async def flush_playback(self) -> None:
         pass
@@ -204,11 +211,13 @@ class _Harness:
         prompter: VoicePrompter | None = None,
         provider: FakeProvider | None = None,
         person: str | None = None,
+        conversation: _MemoryConversation | None = None,
     ) -> None:
         """Run a session on ``provider``, or else a fake provider playing ``script`` with
-        ``capabilities`` and ``prompter``; ``person`` is who is signed in to the conversation."""
+        ``capabilities`` and ``prompter``, in ``conversation``, or else one yielding ``frames``;
+        ``person`` is who is signed in to the conversation."""
         self.provider = provider or FakeProvider(script, capabilities=capabilities, prompter=prompter)
-        self.conversation = _MemoryConversation(frames)
+        self.conversation = conversation or _MemoryConversation(frames)
         self.conversation.person = person
         self._hermes = HermesApiClient(self.api_base, KEYS.get, sleep=lambda _s: asyncio.sleep(0.01))
         session = VoiceSession(
@@ -416,8 +425,9 @@ async def test_hearing_someone_on_the_profile_already_spoken_for_changes_nothing
 
 
 async def test_without_instruction_replacement_a_context_change_restarts_the_provider_with_the_summary(
-    harness: _Harness,
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)
     harness.start(
         [],
         _frames(400, _voiced("rob")),
@@ -438,9 +448,63 @@ async def test_without_instruction_replacement_a_context_change_restarts_the_pro
     assert harness.conversation is not None and harness.conversation.closed_reason is None
 
 
-async def test_a_failed_instruction_update_falls_back_to_a_restart(
-    harness: _Harness, caplog: pytest.LogCaptureFixture
+class _PacedConversation(_MemoryConversation):
+    """A ``_MemoryConversation`` that yields one frame every 20 ms, as a transport does."""
+
+    async def frames(self) -> AsyncIterator[InputFrame]:
+        for frame in self._frames:
+            yield frame
+            await asyncio.sleep(0.02)
+        await self._closed.wait()
+
+
+class _AudioCountingProvider(FakeProvider):
+    """A fake provider that counts the input frames each of its provider sessions received."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__([], **kwargs)
+        self.frames_per_session: list[int] = []
+
+    async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
+        await super().connect(instructions, voice, history_summary)
+        self.frames_per_session.append(0)
+
+    async def send_audio(self, pcm16: bytes) -> None:
+        await super().send_audio(pcm16)
+        self.frames_per_session[-1] += 1
+
+
+async def test_a_restart_for_a_person_first_heard_waits_until_they_stop_speaking(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.3)
+    provider = _AudioCountingProvider(
+        capabilities={
+            "replaces_instructions": False,
+            "emits_speech_events": False,
+            "delegation_style": "live",
+        },
+        prompter=_RecordingPrompter(),
+    )
+    voiced = 50  # one second of Rob speaking, whose profile differs from the one the call started on
+    harness.start(
+        [], [], provider=provider, conversation=_PacedConversation(_frames(voiced * 20, _voiced("rob")))
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=10)
+
+    assert provider.frames_per_session[0] == voiced, "the whole utterance reached one provider session"
+    first, second = harness.sent("connect")
+    assert (first.args["instructions"], second.args["instructions"]) == (
+        "instructions for general",
+        "instructions for stock-picker",
+    )
+
+
+async def test_a_failed_instruction_update_falls_back_to_a_restart(
+    harness: _Harness, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)
     provider = _FailingUpdateProvider(prompter=_RecordingPrompter())
     harness.start([], _frames(400, _voiced("rob")), provider=provider)
 
@@ -474,10 +538,10 @@ async def test_announces_start_after_the_task_is_on_disk(
     say = harness.provider.say
     states_at_announce: list[list[str]] = []
 
-    async def reading_history(text: str) -> None:
+    async def reading_history(text: str, *, expects_answer: bool = False) -> None:
         lines = harness.tracker.history_path.read_text(encoding="utf-8").splitlines()
         states_at_announce.append([json.loads(line)["state"] for line in lines])
-        await say(text)
+        await say(text, expects_answer=expects_answer)
 
     monkeypatch.setattr(harness.provider, "say", reading_history)
 
@@ -1238,6 +1302,97 @@ async def test_cancel_about_another_topic_asks_about_the_only_open_task(
     assert api.requests_to("POST", "/stop") == []
 
 
+async def test_the_cancel_question_is_said_to_be_answered(harness: _Harness, api: FakeHermesApi) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel the Tesla question"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    assert [call.args["expects_answer"] for call in harness.sent("say")] == [False, True]
+
+
+@pytest.mark.parametrize("answer", ["yes", "Yes, please."])
+async def test_yes_to_the_cancel_question_cancels_the_only_open_task(
+    harness: _Harness, api: FakeHermesApi, answer: str
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel the Tesla question"),
+            _after_say("c3", answer),  # handed off as said, as GPT-Live does
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+
+    assert harness.texts("say")[2] == CANCELLED_1
+    assert len(api.requests_to("POST", "/stop")) == 1
+    assert [request[0] for request in harness.stub.requests] == [
+        "how is my portfolio doing",
+        "cancel the Tesla question",
+    ], "the answer is never routed"
+
+
+async def test_no_to_the_cancel_question_keeps_the_task_and_a_second_answer_is_not_run(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel the Tesla question"),
+            _after_say("c3", "no"),
+            # Said before the next notice: the late "yes" below.
+            {"at_input_ms": 0, "event": {"type": "delegation", "id": "c4", "tool_args": {"task": "yes"}}},
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+    await asyncio.sleep(0.1)
+
+    portfolio = harness.tracker.get(1)
+    assert portfolio is not None and portfolio.state == "running"
+    assert harness.texts("say")[2:] == [NO_QUESTION_PENDING]
+    assert api.requests_to("POST", "/stop") == []
+    assert [request[0] for request in harness.stub.requests] == [
+        "how is my portfolio doing",
+        "cancel the Tesla question",
+    ]
+
+
+async def test_a_cancel_task_call_about_another_topic_asks_and_a_yes_cancels(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    cancel = {"type": "delegation", "id": "c2", "target": "cancel_task", "tool_args": {"about": "Tesla"}}
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {"on_sent": "say", "event": cancel},
+            {"on_sent": "send_function_output", "event": _after_say("c3", "yes")["event"]},
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    portfolio = harness.tracker.get(1)
+    assert portfolio is not None
+    outputs = {call.args["call_id"]: call.args["payload"] for call in harness.sent("send_function_output")}
+    assert outputs["c2"] == {"status": "ok", "message": only_one_running(portfolio)}
+    assert harness.texts("say")[1] == CANCELLED_1
+    assert len(api.requests_to("POST", "/stop")) == 1
+
+
 async def test_a_session_already_hearing_the_person_adopts_what_another_session_leaves(
     tmp_path: Path, api: FakeHermesApi
 ) -> None:
@@ -1264,6 +1419,30 @@ async def test_a_session_already_hearing_the_person_adopts_what_another_session_
         assert discord.texts("say") == [frame_result("stock-picker", "Up 2% today.", 500)]
         task = discord.tracker.get(1)
         assert task is not None and task.state == "completed"
+    finally:
+        await _close(web, discord)
+
+
+async def test_a_session_does_not_adopt_what_another_leaves_for_someone_who_left_it(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(RunScript(events=[{"event": "run.started"}]))
+    web = _Harness(tmp_path, api)
+    discord = _Harness(tmp_path, api)
+    discord.tracker = web.tracker
+    try:
+        web.start([_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob")))
+        await web.wait_for(lambda: bool(web.sent("say")))
+        discord.start([], _frames(200, _voiced("rob")))
+        await asyncio.sleep(0.1)
+        assert discord.conversation is not None and web.conversation is not None and web._run is not None
+        discord.conversation.departed.add("rob")  # Rob left the Discord channel
+        await web.conversation.close("rob left the web call")
+        await asyncio.wait_for(web._run, timeout=5)
+        await asyncio.sleep(0.2)
+
+        assert not any("tasks" in event for event in discord.conversation.notified)
+        assert [task.number for task in web.tracker.adopt("rob").open_tasks] == [1], "left for later"
     finally:
         await _close(web, discord)
 

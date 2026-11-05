@@ -450,7 +450,7 @@ def test_voice_context_that_is_not_text_is_rejected(tmp_path: Path, value: objec
     )
 
 
-@pytest.mark.parametrize("alias", ["stocks", "STOCKS", " the   stock picker "])
+@pytest.mark.parametrize("alias", ["stocks", "STOCKS", " the   STOCKS ", "Stocks!", "the stocks"])
 def test_alias_used_by_two_profiles_is_rejected(tmp_path: Path, alias: str) -> None:
     # The fixture is written with sorted keys, so "weather" is read after "stock-picker".
     error = _assert_error(
@@ -464,11 +464,28 @@ def test_alias_repeated_within_one_profile_is_accepted(tmp_path: Path) -> None:
     _load_mutated(tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=["chat", "Chat"]))
 
 
-def test_alias_may_equal_another_profiles_name(tmp_path: Path) -> None:
-    _load_mutated(tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=["stock-picker"]))
+def test_alias_may_equal_its_own_profiles_name(tmp_path: Path) -> None:
+    _load_mutated(tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=["General"]))
 
 
-@pytest.mark.parametrize("aliases", [["   "], [""], "stocks", [7]])
+@pytest.mark.parametrize("alias", ["stock-picker", "Stock Picker", " the   stock picker "])
+def test_alias_that_is_another_profiles_name_is_rejected(tmp_path: Path, alias: str) -> None:
+    # A switch resolves the name first, so the alias could never be used.
+    error = _assert_error(
+        tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=[alias]), "profiles.general.aliases"
+    )
+    assert f"'{alias}'" in str(error) and "'stock-picker'" in str(error)
+
+
+@pytest.mark.parametrize("alias", ["me", "you guys", "Us"])
+def test_alias_a_switch_could_never_name_is_rejected(tmp_path: Path, alias: str) -> None:
+    error = _assert_error(
+        tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=[alias]), "profiles.general.aliases"
+    )
+    assert f"'{alias}'" in str(error)
+
+
+@pytest.mark.parametrize("aliases", [["   "], [""], ["the"], ["?!"], "stocks", [7]])
 def test_invalid_aliases_are_rejected(tmp_path: Path, aliases: object) -> None:
     _assert_error(
         tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=aliases), "profiles.general.aliases"

@@ -61,7 +61,7 @@ def _config(tmp_path: Path) -> Config:
         "hermes": {"api_base": "http://127.0.0.1:8642"},
         "provider": {"name": "fake"},
         "router": {"backend": "knn"},
-        "profiles": {"general": {}, "stock-picker": {}},
+        "profiles": {"general": {}, "stock-picker": {"aliases": ["the stock picker", "stocks"]}},
         "people": {
             "rob": {"web_token_env": "TOKEN_ROB", "profiles": ["*"]},
             "alex": {"web_token_env": "TOKEN_ALEX", "profiles": ["general"]},
@@ -78,9 +78,7 @@ def _transport(tmp_path: Path, store: ActiveProfiles | None = None) -> WebTransp
     permissions = PermissionChecker(config)
     if store is None:
         store = ActiveProfiles(tmp_path / "active_profiles.json", permissions, config)
-    return WebTransport(
-        WebConfig(enabled=True, port=0), AudioConfig(), permissions, store, tuple(config.profiles)
-    )
+    return WebTransport(WebConfig(enabled=True, port=0), AudioConfig(), permissions, store)
 
 
 @pytest.fixture
@@ -190,7 +188,7 @@ async def test_upgrade_with_query_token_signs_in_that_person(
     async with http.ws_connect(f"{server.base_url}/ws?token={ENV['TOKEN_ALEX']}") as socket:
         conversation = await server.next_conversation()
 
-        assert conversation.person == conversation.signed_in.name == "alex"
+        assert conversation.person == "alex"
         assert socket.protocol is None
 
 
@@ -200,7 +198,7 @@ async def test_upgrade_with_bearer_protocol_echoes_bearer(
     async with await _connect(server, http) as socket:
         conversation = await server.next_conversation()
 
-        assert conversation.person == conversation.signed_in.name == "rob"
+        assert conversation.person == "rob"
         assert conversation.id.startswith("web-rob-")
         assert socket.protocol == "bearer"
 
@@ -396,11 +394,12 @@ async def test_connect_shows_the_active_profile_and_only_the_permitted_ones(
         }
 
 
+@pytest.mark.parametrize("name", ["stock-picker", "The Stock Picker", "stocks"])
 async def test_profile_frame_switches_and_every_page_of_that_person_follows(
-    server: Server, http: aiohttp.ClientSession, store: ActiveProfiles
+    server: Server, http: aiohttp.ClientSession, store: ActiveProfiles, name: str
 ) -> None:
     async with await _connect(server, http) as page, await _connect(server, http) as other_page:
-        await page.send_str(json.dumps({"type": "profile", "name": "stock-picker"}))
+        await page.send_str(json.dumps({"type": "profile", "name": name}))
 
         for socket in (page, other_page):
             assert await _receive_json(socket) == {
@@ -417,7 +416,7 @@ async def test_a_switch_from_elsewhere_moves_the_picker(
     async with await _connect(server, http) as page:
         result = await store.switch("rob", "stock-picker")
 
-        assert result.notified_live
+        assert not result.notified_live, "a page only shows the profile; a voice session reports itself"
         assert (await _receive_json(page))["active_profile"] == "stock-picker"
 
 

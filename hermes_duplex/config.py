@@ -19,6 +19,7 @@ import yaml
 
 from .prompts.base import BACKCHANNELS, Backchannel
 from .providers.base import ModelChoice
+from .switching import NOT_A_TARGET, spoken_form
 
 PROVIDER_NAMES = frozenset({"gpt-live", "openai-realtime", "xai-realtime", "fake"})
 ROUTER_BACKENDS = frozenset({"decisions", "jev", "knn"})
@@ -234,8 +235,9 @@ class ProfileConfig:
     """Model for efforts missing from ``models``; None means the Hermes profile's own default."""
 
     aliases: tuple[str, ...] = ()
-    """Other names people say for the profile, e.g. "the stock picker". No two profiles share an
-    alias, compared ignoring case and extra whitespace."""
+    """Other names people say for the profile, e.g. "the stock picker". Each is compared as it is said
+    (``switching.spoken_form``: case, punctuation, hyphens, and a leading "the" ignored); no two
+    profiles share one, none is another profile's name, and none starts with "me", "us", or "you"."""
 
     voice_context: str | None = None
     """Text, at most ``VOICE_CONTEXT_MAX_CHARS`` long, that the voice prompt carries while this is the
@@ -379,7 +381,8 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
     secret. Raises ``ConfigError`` naming the offending key when the file is missing or unreadable,
     a key is unknown or has the wrong type, a name is not one of the allowed values, a person or the
     router names an undefined profile, a person may use no profile or starts on one they may not use,
-    two profiles share an alias, a secret is written literally, or a named env var is unset or empty.
+    two profiles share an alias, an alias is another profile's name or starts with
+    "me", "us", or "you", a secret is written literally, or a named env var is unset or empty.
     Unset env vars are checked last: when only they are wrong, the error is a ``MissingEnvError`` that
     reports the first one, in file order, and lists them all.
     """
@@ -433,7 +436,11 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
 
 def _profiles(section: _Section) -> Mapping[str, ProfileConfig]:
     profiles: dict[str, ProfileConfig] = {}
-    alias_owners: dict[str, str] = {}  # spoken form of an alias -> the profile that claimed it first
+    # The spoken form of each alias -> the profile that claimed it first.
+    alias_owners: dict[tuple[str, ...], str] = {}
+    # A switch resolves a profile's own name before any alias, so an alias that is another profile's
+    # name could never be used.
+    spoken_names = {spoken_form(name): name for name in section.names()}
     for name in section.names():
         if name in _RESERVED_PROFILE_NAMES:
             raise ConfigError(section.child(name), f"'{name}' {_RESERVED_PROFILE_NAMES[name]}")
@@ -450,9 +457,19 @@ def _profiles(section: _Section) -> Mapping[str, ProfileConfig]:
         default_model = profile.optional_section("default_model")
         aliases = profile.texts("aliases")
         for alias in aliases:
-            spoken = _spoken_form(alias)
+            spoken = spoken_form(alias)
             if not spoken:
-                raise ConfigError(profile.child("aliases"), "aliases must contain more than whitespace")
+                raise ConfigError(profile.child("aliases"), f"alias '{alias}' must contain a word")
+            if spoken[0] in NOT_A_TARGET:
+                raise ConfigError(
+                    profile.child("aliases"),
+                    f"alias '{alias}' can't start with 'me', 'us', or 'you': \"talk to me\" is no switch",
+                )
+            if spoken_names.get(spoken, name) != name:
+                raise ConfigError(
+                    profile.child("aliases"),
+                    f"alias '{alias}' is the name of the profile '{spoken_names[spoken]}'",
+                )
             owner = alias_owners.setdefault(spoken, name)
             if owner != name:
                 raise ConfigError(
@@ -471,11 +488,6 @@ def _profiles(section: _Section) -> Mapping[str, ProfileConfig]:
     if not profiles:
         raise ConfigError(section.key, "at least one profile is required")
     return MappingProxyType(profiles)
-
-
-def _spoken_form(alias: str) -> str:
-    """``alias`` as people say it: lower case, with runs of whitespace collapsed to one space."""
-    return " ".join(alias.casefold().split())
 
 
 def _voice_context(profile: _Section) -> str | None:

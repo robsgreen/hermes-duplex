@@ -7,6 +7,7 @@ Every provider speaks the same wording; only results and instructions differ by 
 import re
 from collections.abc import Sequence
 
+from ..profiles import SwitchOutcome
 from ..tasks import ACTIVE_STATES, Task, TaskState
 from .base import fit_text, spoken_series
 
@@ -90,8 +91,8 @@ def which_to_cancel(tasks: Sequence[Task]) -> str:
 
 
 def only_one_running(task: Task) -> str:
-    """Question for a cancel request whose words name another topic than ``task``'s, the person's
-    only open task, so they can say whether to cancel it."""
+    """Yes-or-no question for a cancel request whose words name another topic than ``task``'s, the
+    person's only open task, so they can say whether to cancel it."""
     return f'The only one running is "{topic(task.text)}". Cancel that?'
 
 
@@ -194,14 +195,30 @@ def which_profile(permitted: Sequence[str]) -> str:
     return f"Sorry, which agent do you mean? You can switch to {spoken_series(permitted, 'or')}."
 
 
+def switch_reply(outcome: SwitchOutcome, profile: str | None, permitted: Sequence[str]) -> str:
+    """What a switch request to ``profile`` is answered with, by its ``outcome``: ``switched_to``,
+    ``already_active``, ``switch_refused``, or, for ``unknown`` (``profile`` may then be None: the
+    words named no single profile), ``which_profile`` listing the ``permitted`` profiles."""
+    match outcome:
+        case "switched" if profile is not None:
+            return switched_to(profile)
+        case "already_active" if profile is not None:
+            return already_active(profile)
+        case "refused" if profile is not None:
+            return switch_refused(profile)
+        case _:
+            return which_profile(permitted)
+
+
 def suggest_switch(profile: str) -> str:
-    """Question for a request that suits ``profile`` better than the active one, asking whether to
-    switch to it first."""
+    """Yes-or-no question for a request that suits ``profile`` better than the active one, asking
+    whether to switch to it first."""
     return f"That sounds like a {profile} question. Want me to switch?"
 
 
-NO_SWITCH_QUESTION = "There's no question about switching agents waiting for an answer."
-"""Function output message for a ``confirm_switch`` call while nothing waits on the person's answer."""
+NO_QUESTION_PENDING = "There's no question waiting for your answer right now."
+"""Notice, or function output message for a ``confirm_switch`` call, for a yes or no while no question
+of the speaker's waits on their answer."""
 
 
 def fallback_to_default(profile: str) -> str:

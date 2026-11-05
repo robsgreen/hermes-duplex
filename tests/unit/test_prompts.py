@@ -119,6 +119,11 @@ def test_every_prompter_states_the_shared_cancel_policy(prompter: VoicePrompter)
 
 
 @pytest.mark.parametrize("prompter", PROMPTERS, ids=_name)
+def test_every_prompter_says_how_a_yes_or_no_answers_the_cancel_question(prompter: VoicePrompter) -> None:
+    assert blocks.CANCEL_QUESTION in prompter.instructions(CONTEXT).replace("\n", " ")
+
+
+@pytest.mark.parametrize("prompter", PROMPTERS, ids=_name)
 def test_every_prompter_names_tasks_by_topic_and_never_says_numbers(prompter: VoicePrompter) -> None:
     text = prompter.instructions(CONTEXT).replace("\n", " ")
 
@@ -352,7 +357,7 @@ def test_realtime_switches_and_answers_switch_questions_with_their_tools() -> No
     assert (
         "Use only `delegate`, `task_status`, `cancel_task`, `switch_profile`, and `confirm_switch`." in text
     )
-    assert "- Do: pass the agent's name from the list above as `profile`." in text
+    assert "- Do: pass the user's words for the agent as `profile`, even a nickname." in text
     assert "- Do: pass their answer as `accept`: true for yes, false for no." in text
     assert "profile_hint" not in text
 
@@ -438,7 +443,7 @@ def test_grok_names_switch_profile_only_when_the_session_offers_it() -> None:
 def test_grok_switches_and_answers_switch_questions_with_their_tools() -> None:
     text = GrokPrompter().instructions(CONTEXT)
 
-    assert "call `switch_profile` with the agent's name as `profile`, even if they used a nickname." in text
+    assert "call `switch_profile` with the user's words for the agent as `profile`, even a nickname." in text
     assert "call `confirm_switch` with `accept` true for yes and false for no." in text
     assert "\nNEVER switch agents unless the user asks to.\n" in text.split("## CRITICAL INSTRUCTIONS")[1]
 

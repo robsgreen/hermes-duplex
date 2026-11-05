@@ -5,23 +5,28 @@ The store resolves a default for everyone from config, remembers explicit switch
 conversations listening for a person when that person switches.
 """
 
+import asyncio
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, NamedTuple
 
 from .config import Config
 from .people import PermissionChecker
+from .switching import resolve_profile
 
 logger = logging.getLogger(__name__)
 
 SwitchOutcome = Literal["switched", "already_active", "refused", "unknown"]
 """``unknown``: no profile by that name in config. ``refused``: the person may not use it."""
 
-SwitchListener = Callable[[str], Awaitable[None]]
-"""Called with the person's new active profile after they switch."""
+SwitchListener = Callable[[str], Awaitable[bool]]
+"""Called with the person's new active profile after they switch; returns whether a live voice
+conversation now uses it (False, for example, for a conversation the person has left, or for a page
+that only shows the profile)."""
 
 
 class SwitchResult(NamedTuple):
@@ -30,8 +35,8 @@ class SwitchResult(NamedTuple):
     outcome: SwitchOutcome
 
     notified_live: bool
-    """Whether at least one listener for the person was told, i.e. a live conversation now uses the
-    new profile; False means the switch only takes effect from the person's next conversation."""
+    """Whether a listener for the person reported that a live voice conversation now uses the new
+    profile; False means the switch only takes effect from the person's next conversation."""
 
 
 class ActiveProfiles:
@@ -41,7 +46,8 @@ class ActiveProfiles:
     the person may use it, else the first profile in the person's ``profiles`` list. Every method takes
     a person's name from config's ``people`` table; ``get`` raises ``KeyError`` for any other name.
 
-    Methods are meant to be called from one event loop thread.
+    Methods are meant to be called from one event loop thread. A person's switches run one at a time,
+    listeners included, so every listener hears them in the order they were made.
     """
 
     def __init__(self, path: Path, permissions: PermissionChecker, config: Config) -> None:
@@ -50,19 +56,27 @@ class ActiveProfiles:
         self._path = path
         self._permissions = permissions
         self._profiles = frozenset(config.profiles)
+        self.names: Mapping[str, Sequence[str]] = MappingProxyType(
+            {name: profile.aliases for name, profile in config.profiles.items()}
+        )
+        """Every configured profile, in config order, to the spoken aliases a switch may name it by."""
         self._defaults = {name: _default_profile(config, name, permissions) for name in config.people}
         self._saved: dict[str, str] = {}
         self._fallbacks: dict[str, str] = {}
         self._listeners: dict[str, list[SwitchListener]] = {}
+        self._switching: dict[str, asyncio.Lock] = {}
+        """Per person, held while one of their switches runs."""
 
     def load(self) -> None:
         """Replace the saved profiles with those in the file.
 
         Never raises: a missing file (nobody has switched yet) is normal, and an unreadable or corrupt
         one is logged as an error; either leaves everyone on their default until the next switch
-        writes the file. A saved profile that config no longer
-        defines, or that the person may no longer use, is dropped, and the person's default becomes
-        their ``fallback_pending``. Entries for people no longer in config are dropped.
+        writes the file. A saved profile that config no longer defines, or that the person may no
+        longer use, is dropped, and the person's default becomes their ``fallback_pending``. Entries
+        for people no longer in config are dropped. When anything was dropped, the file is rewritten
+        without it, so the fallback is announced once, not after every restart, and a profile added
+        back to config later does not return unasked.
         """
         self._saved = {}
         self._fallbacks = {}
@@ -94,10 +108,22 @@ class ActiveProfiles:
                     "%s's saved profile '%s' is no longer usable; back to '%s'", person, profile, default
                 )
                 self._fallbacks[person] = default
+        if self._saved != saved:
+            self._save()
 
     def get(self, person: str) -> str:
         """The profile ``person``'s requests run on: their last switch, else their default."""
         return self._saved.get(person) or self._defaults[person]
+
+    def permitted(self, person: str) -> list[str]:
+        """The profiles ``person`` may switch to, in config order; empty for anyone not in config."""
+        return [profile for profile in self.names if self._may_use(person, profile)]
+
+    def resolve(self, words: str) -> str | None:
+        """The profile ``words`` name ("stock-picker", "the stock picker"), matched exactly as a spoken
+        switch request's target is (``switching.resolve_profile``: a profile name first, then an alias);
+        None when they name no single profile."""
+        return resolve_profile(words, self.names)
 
     def fallback_pending(self, person: str) -> str | None:
         """The default ``person`` was moved back to by ``load`` because their saved profile became
@@ -111,25 +137,28 @@ class ActiveProfiles:
         Changes nothing for an ``unknown`` profile, one the person may not use (``refused``, also the
         answer for a person not in config), or the one already active (``already_active``). On
         ``switched``, a file that cannot be written is logged as an error and the switch still holds
-        until restart; a listener that raises is logged and does not stop the others.
+        until restart; a listener that raises is logged, counts as not live, and does not stop the
+        others. Waits for any switch of ``person``'s still running, so the last one made wins
+        everywhere.
         """
         if profile not in self._profiles:
             return SwitchResult("unknown", notified_live=False)
         if person not in self._defaults or not self._may_use(person, profile):
             return SwitchResult("refused", notified_live=False)
-        if profile == self.get(person):
-            return SwitchResult("already_active", notified_live=False)
 
-        self._saved[person] = profile
-        self._fallbacks.pop(person, None)
-        self._save()
-        listeners = list(self._listeners.get(person, ()))
-        for listener in listeners:
-            try:
-                await listener(profile)
-            except Exception:
-                logger.exception("a listener for %s's switch to '%s' failed", person, profile)
-        return SwitchResult("switched", notified_live=bool(listeners))
+        async with self._switching.setdefault(person, asyncio.Lock()):
+            if profile == self.get(person):
+                return SwitchResult("already_active", notified_live=False)
+            self._saved[person] = profile
+            self._fallbacks.pop(person, None)
+            self._save()
+            notified_live = False
+            for listener in list(self._listeners.get(person, ())):
+                try:
+                    notified_live = await listener(profile) or notified_live
+                except Exception:
+                    logger.exception("a listener for %s's switch to '%s' failed", person, profile)
+            return SwitchResult("switched", notified_live=notified_live)
 
     def subscribe(self, person: str, listener: SwitchListener) -> Callable[[], None]:
         """Call ``listener`` with ``person``'s new profile on each of their switches, until the returned

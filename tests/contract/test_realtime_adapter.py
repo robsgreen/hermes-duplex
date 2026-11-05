@@ -136,8 +136,9 @@ def test_session_tools_take_a_task_a_task_choice_a_profile_and_a_yes_or_no() -> 
     switch = tools["switch_profile"]["parameters"]
     assert list(switch["properties"]) == ["profile"]
     assert switch["properties"]["profile"]["type"] == "string"
-    assert switch["properties"]["profile"]["enum"] == ["stock-picker", "general"]
-    assert "alias" in switch["properties"]["profile"]["description"]
+    assert "enum" not in switch["properties"]["profile"], "the session resolves names and aliases"
+    assert "in their words" in switch["properties"]["profile"]["description"]
+    assert "nickname" in switch["properties"]["profile"]["description"]
     assert switch["required"] == ["profile"]
     confirm = tools["confirm_switch"]
     assert "question about switching" in confirm["description"]
@@ -208,7 +209,11 @@ async def test_update_instructions_replaces_only_the_instructions_and_the_tools_
 
     connect_update, instructions_update = server.client_events
     assert "tools" in connect_update["session"]
-    assert instructions_update == {"type": "session.update", "session": instructions_session}
+    assert instructions_update == {
+        "type": "session.update",
+        "event_id": "duplex_instructions_1",
+        "session": instructions_session,
+    }
     assert events == [
         SessionReady(),
         ResponseStarted(),
@@ -221,7 +226,8 @@ async def test_update_instructions_replaces_only_the_instructions_and_the_tools_
 
 
 async def test_announcements_after_update_instructions_use_the_new_instructions() -> None:
-    async with FakeWsServer(STARTED) as server:
+    script = [*STARTED, {"wait_for": "session.update"}, {"type": "session.updated", "event_id": "event_3"}]
+    async with FakeWsServer(script) as server:
         provider = _provider(server)
         await provider.connect(INSTRUCTIONS, None, None)
         await provider.update_instructions("Now on the stock-picker agent.")
@@ -231,6 +237,81 @@ async def test_announcements_after_update_instructions_use_the_new_instructions(
     announcement = server.client_events[-1]
     assert announcement["type"] == "response.create"
     assert announcement["response"]["instructions"] == "Now on the stock-picker agent."
+
+
+async def test_update_instructions_waits_for_session_updated_while_events_are_read() -> None:
+    script = [
+        *STARTED,
+        {"wait_for": "session.update"},
+        {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}},
+        {"type": "session.updated", "event_id": "event_3"},
+        {"type": "response.done", "response": {"id": "resp_1", "status": "completed"}},
+        {"close": {}},
+    ]
+    async with FakeWsServer(script) as server:
+        provider = _provider(server)
+        await provider.connect(INSTRUCTIONS, None, None)
+        reading = asyncio.create_task(_rest(provider.events()))
+        await provider.update_instructions("Now on the stock-picker agent.")
+        events = await reading
+
+    assert events == [SessionReady(), ResponseStarted(), OutputDone(), Closed("remote_hangup")]
+
+
+async def test_rejected_update_instructions_raises_and_is_not_reported_as_an_event() -> None:
+    script = [
+        *STARTED,
+        {"wait_for": "session.update"},
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_value",
+                "message": "Instructions are too long.",
+                "event_id": "duplex_instructions_1",
+            },
+        },
+        {"wait_for": "response.create"},
+        {"type": "error", "error": {"message": "Rate limited.", "code": "rate_limit"}},
+        {"close": {}},
+    ]
+    async with FakeWsServer(script) as server:
+        provider = _provider(server)
+        await provider.connect(INSTRUCTIONS, None, None)
+        events = provider.events()
+        assert await _next(events, 1) == [SessionReady()]
+        with pytest.raises(WireError, match="rejected the new instructions: Instructions are too long."):
+            await provider.update_instructions("Now on the stock-picker agent.")
+        await provider.say("Switched to stock-picker.")
+        rest = await _rest(events)
+
+    assert rest == [ProviderError(message="Rate limited.", code="rate_limit"), Closed("remote_hangup")], (
+        "only the error that names no update reaches the session, so the floor counts no refused response"
+    )
+    announcement = server.client_events[-1]
+    assert announcement["response"]["instructions"] == INSTRUCTIONS, "the old instructions stay"
+
+
+async def test_unconfirmed_update_instructions_raises_after_the_timeout() -> None:
+    async with FakeWsServer(STARTED) as server:
+        provider = _provider(server, update_timeout_s=0.1)
+        await provider.connect(INSTRUCTIONS, None, None)
+        with pytest.raises(WireError, match="did not confirm the new instructions"):
+            await provider.update_instructions("Now on the stock-picker agent.")
+        await provider.say("Switched to stock-picker.")
+        await provider.close()
+
+    assert server.client_events[-1]["response"]["instructions"] == INSTRUCTIONS
+
+
+async def test_update_instructions_raises_at_once_when_the_connection_ends() -> None:
+    script = [*STARTED, {"wait_for": "session.update"}, {"close": {}}]
+    async with FakeWsServer(script) as server:
+        provider = _provider(server, update_timeout_s=30)
+        await provider.connect(INSTRUCTIONS, None, None)
+        async with asyncio.timeout(5):
+            with pytest.raises(WireError, match="ended the session"):
+                await provider.update_instructions("Now on the stock-picker agent.")
 
 
 async def test_update_instructions_before_connect_raises() -> None:
@@ -470,6 +551,64 @@ async def test_announcements_are_out_of_band_responses_with_tools_disabled() -> 
         }
 
     assert server.client_events[1:] == [announcement(result), announcement("Task 1 was cancelled.")]
+
+
+async def test_a_question_is_a_response_in_the_default_conversation_with_tools_disabled() -> None:
+    question = "That sounds like a stock-picker question. Want me to switch?"
+    async with FakeWsServer(STARTED) as server:
+        provider = _provider(server)
+        await provider.connect(INSTRUCTIONS, None, None)
+        await provider.say(question, expects_answer=True)
+        await provider.close()
+
+    # Without "conversation": "none", the response and what it speaks join the default conversation,
+    # which the model reads when the user answers.
+    assert server.client_events[1:] == [
+        {
+            "type": "response.create",
+            "response": {
+                "tools": [],
+                "output_modalities": ["audio"],
+                "instructions": INSTRUCTIONS,
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": question}],
+                    }
+                ],
+            },
+        }
+    ]
+
+
+@pytest.mark.parametrize("dialect", [XAI, WITHOUT_OUT_OF_BAND])
+async def test_without_out_of_band_a_question_item_stays_in_the_conversation(dialect: Dialect) -> None:
+    question = "That sounds like a stock-picker question. Want me to switch?"
+    script = [
+        *STARTED,
+        {"wait_for": "response.create"},
+        {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}},
+        {"type": "response.done", "response": {"id": "resp_1", "status": "completed"}},
+        {"wait_for": "response.create"},
+        {"type": "response.created", "response": {"id": "resp_2", "status": "in_progress"}},
+        {"type": "response.done", "response": {"id": "resp_2", "status": "completed"}},
+        {"wait_for": "conversation.item.delete"},
+        {"close": {}},
+    ]
+    async with FakeWsServer(script) as server:
+        provider = _provider(server, dialect=dialect)
+        await provider.connect(INSTRUCTIONS, None, None)
+        events = provider.events()
+        await provider.say(question, expects_answer=True)
+        assert await _next(events, 3) == [SessionReady(), ResponseStarted(), OutputDone()]
+        await provider.say("Task 1 was cancelled.")
+        await _rest(events)
+
+    sent = server.client_events[1:]
+    assert sent[0] == _system_item("duplex_announcement_1", question)
+    deleted = [event["item_id"] for event in sent if event["type"] == "conversation.item.delete"]
+    assert deleted == ["duplex_announcement_2"], "the question stays; only the plain notice is deleted"
 
 
 async def test_announcement_without_out_of_band_uses_a_system_item_deleted_once_spoken() -> None:

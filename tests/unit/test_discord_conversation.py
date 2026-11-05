@@ -14,7 +14,7 @@ from hermes_duplex.audio.frames import frame_bytes, silent_frame
 from hermes_duplex.config import AudioConfig
 from hermes_duplex.transports.base import InputFrame
 from hermes_duplex.transports.discord.bot import DiscordConversation
-from tests.fakes.fake_discord import FakeVoiceChannel, ReceiverRecorder, allowlist
+from tests.fakes.fake_discord import ROB_ID, STRANGER_ID, FakeVoiceChannel, ReceiverRecorder, allowlist
 
 INPUT_RATE = 24000
 OUTPUT_RATE = 24000
@@ -87,8 +87,24 @@ def _queued_audio_frames(source: discord.AudioSource) -> int:
     return count
 
 
-async def test_a_channel_conversation_has_no_signed_in_person(conversation: DiscordConversation) -> None:
+async def test_a_conversation_started_by_nobody_known_has_no_person(
+    conversation: DiscordConversation,
+) -> None:
     assert conversation.person is None
+
+
+async def test_present_is_whoever_is_in_the_voice_channel_now(
+    conversation: DiscordConversation, channel: FakeVoiceChannel
+) -> None:
+    assert not conversation.present("rob")
+
+    channel.voice_states[ROB_ID] = object()
+    channel.voice_states[STRANGER_ID] = object()
+    assert conversation.present("rob")
+    assert not conversation.present("alex")
+
+    del channel.voice_states[ROB_ID]
+    assert not conversation.present("rob")
 
 
 async def test_start_receives_and_plays_on_the_voice_client(

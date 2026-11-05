@@ -36,8 +36,8 @@ class GrokPrompter:
         delegate, status, cancel = DELEGATE_TOOL, TASK_STATUS_TOOL, CANCEL_TASK_TOOL
         switch, confirm = SWITCH_PROFILE_TOOL, CONFIRM_SWITCH_TOOL
         switch_rule = (
-            f"\n- When the user asks to talk to a different agent, call `{switch}` with the agent's name as "
-            f"`profile`, even if they used a nickname. Agents: {blocks.agent_list(ctx.profiles)}. "
+            f"\n- When the user asks to talk to a different agent, call `{switch}` with the user's words for "
+            f"the agent as `profile`, even a nickname. Agents: {blocks.agent_list(ctx.profiles)}. "
             f"{blocks.SWITCH_WHEN_ASKED}"
             if ctx.profiles
             else ""
@@ -63,6 +63,8 @@ the user meanwhile.{switch_rule}
 - When the user asks how their tasks are going, call `{status}`. Speak the summary in its "message"; \
 its "tasks" list gives each task's "id" for later calls.
 - When the user asks you to stop a task, call `{cancel}`. {blocks.CANCEL_POLICY}
+- {blocks.CANCEL_QUESTION} For a yes, call `{cancel}` with the task's topic from your question as \
+`about`.
 - To name one task to `{status}` or `{cancel}`, pass `task_id` when an earlier `{status}` result gave \
 you its id; otherwise pass `about` with the user's words for the task, such as "the Tesla question".
 - {blocks.TASKS_BY_TOPIC}

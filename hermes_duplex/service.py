@@ -175,7 +175,6 @@ class DuplexService:
             active_profiles=self._active_profiles,
             prompt_context_for=lambda profile: prompt_context(self._config, profile),
             default_profile=self._config.router.default_profile,
-            profile_aliases=_profile_aliases(self._config),
             voice=self._config.provider.voice,
             pacer_lead_ms=self._config.audio.pacer_lead_ms,
             gate_threshold_dbfs=self._config.audio.gate_threshold_dbfs,
@@ -225,11 +224,7 @@ def build_service(config: Config, *, embed: Embedder | None = None) -> DuplexSer
     if config.transports.discord.enabled:
         transports.append(_discord_transport(config, permissions, active_profiles, providers))
     if config.transports.web.enabled:
-        transports.append(
-            WebTransport(
-                config.transports.web, config.audio, permissions, active_profiles, tuple(config.profiles)
-            )
-        )
+        transports.append(WebTransport(config.transports.web, config.audio, permissions, active_profiles))
 
     return DuplexService(
         config,
@@ -259,7 +254,6 @@ def _discord_transport(
         config.audio,
         permissions,
         active_profiles=active_profiles,
-        profile_aliases=_profile_aliases(config),
         input_rate=capabilities["input_rate"],
         output_rate=capabilities["output_rate"],
     )
@@ -280,11 +274,6 @@ def prompt_context(config: Config, active_profile: str | None = None) -> PromptC
         active_profile_description=active.description if active is not None else None,
         voice_context=active.voice_context if active is not None else None,
     )
-
-
-def _profile_aliases(config: Config) -> dict[str, tuple[str, ...]]:
-    """Every configured profile, in config order, to the spoken aliases a switch may name it by."""
-    return {name: profile.aliases for name, profile in config.profiles.items()}
 
 
 def _profile_key(config: Config, profile: str) -> str | None:

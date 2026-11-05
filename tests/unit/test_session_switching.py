@@ -43,6 +43,8 @@ class _MemoryConversation:
 
     def __init__(self, frames: Sequence[InputFrame], person: str | None) -> None:
         self.person = person
+        self.departed: set[str] = set()
+        """People who have left; everyone else counts as present."""
         self._frames = frames
         self._closed = asyncio.Event()
 
@@ -53,6 +55,9 @@ class _MemoryConversation:
 
     async def play(self, pcm16_mono: bytes, rate: int) -> None:
         pass
+
+    def present(self, person: str) -> bool:
+        return person not in self.departed
 
     async def flush_playback(self) -> None:
         pass
@@ -173,7 +178,6 @@ class _Harness:
             active_profiles=self.active_profiles,
             prompt_context_for=lambda profile: service.prompt_context(self.config, profile),
             default_profile=self.config.router.default_profile,
-            profile_aliases={name: profile.aliases for name, profile in self.config.profiles.items()},
         )
         self._run = asyncio.create_task(session.run())
 
@@ -326,6 +330,54 @@ async def test_a_request_after_a_switch_that_does_not_happen_is_dropped(
 
 @pytest.mark.parametrize(
     "words",
+    [
+        "Remind me to talk to Sarah",
+        "book flights back to London",
+        "should I switch to stocks from bonds",
+        "move my savings back to stocks",
+        "don't switch to stocks",
+        "talk to Sarah about the party tomorrow night",
+    ],
+)
+async def test_words_that_ask_for_no_switch_are_routed_and_run_as_a_task(
+    harness: _Harness, words: str
+) -> None:
+    harness.start([_handoff("call_1", words)], _frames(1000, "rob"))
+
+    await harness.wait_for(lambda: bool(harness.api.requests_to("POST", "/runs")))
+
+    (run,) = harness.api.requests_to("POST", "/runs")
+    assert (run.path, run.body["input"]) == ("/p/general/v1/runs", words)
+    assert harness.router.requests == [words]
+    assert harness.active_profiles.get("rob") == "general"
+    assert which_profile(EVERY_PROFILE) not in harness.said()
+
+
+async def test_talk_to_a_profile_about_something_switches_then_runs_it_there(harness: _Harness) -> None:
+    harness.start([_handoff("call_1", "talk to stocks about Tesla")], _frames(1000, "rob"))
+
+    await harness.wait_for(lambda: bool(harness.api.requests_to("POST", "/runs")))
+
+    (run,) = harness.api.requests_to("POST", "/runs")
+    assert (run.path, run.body["input"]) == ("/p/stock-picker/v1/runs", "Tesla")
+    assert harness.router.requests == ["Tesla"]
+    await harness.wait_for(lambda: len(harness.said()) == 2)
+    assert harness.said()[0] == switched_to("stock-picker")
+
+
+async def test_a_switch_to_the_active_profile_still_runs_the_request_after_it(harness: _Harness) -> None:
+    harness.start([_handoff("call_1", "go back to general and check the weather")], _frames(1000, "rob"))
+
+    await harness.wait_for(lambda: bool(harness.api.requests_to("POST", "/runs")))
+
+    (run,) = harness.api.requests_to("POST", "/runs")
+    assert (run.path, run.body["input"]) == ("/p/general/v1/runs", "check the weather")
+    await harness.wait_for(lambda: len(harness.said()) == 2)
+    assert harness.said()[0] == already_active("general")
+
+
+@pytest.mark.parametrize(
+    "words",
     ["switch to stock-picker please", "let me talk to the stock picker please", "switch to stocks, thanks"],
 )
 async def test_polite_words_after_a_switch_are_no_request(harness: _Harness, words: str) -> None:
@@ -358,6 +410,7 @@ async def test_switch_profile_call_switches_and_answers_with_the_outcome(harness
         ("alex", "stock-picker", "refused", switch_refused("stock-picker")),
         ("rob", "general", "already_active", already_active("general")),
         ("rob", "stocks", "switched", None),  # an alias resolves as a spoken one would
+        ("rob", "The Stock Picker", "switched", None),  # the user's words for the agent, as said
         ("rob", "finance", "unknown", which_profile(EVERY_PROFILE)),
         ("rob", 7, "unknown", which_profile(EVERY_PROFILE)),
     ],
@@ -392,6 +445,22 @@ async def test_a_switch_made_elsewhere_updates_the_instructions_and_is_confirmed
     ]
     # Nobody listens for Alex, who has not been heard here.
     assert not (await harness.active_profiles.switch("alex", "general")).notified_live
+
+
+async def test_a_switch_made_elsewhere_after_the_person_left_changes_nothing_here(harness: _Harness) -> None:
+    harness.start([], _frames(200, "rob"))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 1)
+    await asyncio.sleep(0.1)  # Rob has been heard
+    assert harness._conversation is not None
+    harness._conversation.departed.add("rob")
+
+    result = await harness.active_profiles.switch("rob", "stock-picker")
+    await asyncio.sleep(0.1)
+
+    assert not result.notified_live, "so Discord says it applies next time"
+    assert harness.said() == []
+    assert harness.sent("update_instructions") == []
+    assert harness.active_profiles.get("rob") == "stock-picker"
 
 
 async def test_the_signed_in_person_is_listened_for_before_they_are_heard(harness: _Harness) -> None:

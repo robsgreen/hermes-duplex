@@ -11,14 +11,15 @@ On the socket, binary messages carry PCM16 24 kHz mono audio both ways. The serv
 text messages: ``{"type": "interrupt"}`` tells the page to discard its queued playback, and
 ``{"type": "status", ...}`` carries transcript lines, the task list, and the person's active profile
 (first on connect, then after each of their switches from any path). The page sends one JSON text
-message, ``{"type": "profile", "name": <profile>}``, to switch the person's active profile.
+message, ``{"type": "profile", "name": <profile>}``, to switch the person's active profile; ``name``
+is a profile's name or one of its aliases.
 """
 
 import asyncio
 import itertools
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from ...audio.frames import FRAME_MS, FrameCarry, rms_dbfs
 from ...config import AudioConfig, WebConfig
 from ...people import PermissionChecker, Person
 from ...profiles import ActiveProfiles
-from ...prompts.notices import already_active, switch_refused, which_profile
+from ...prompts.notices import switch_reply
 from ..base import Conversation, InputFrame
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,8 @@ class WebConversation:
     within its lead, and ``flush_playback`` tells the page to discard it.
 
     Profile: a ``{"type": "profile", "name": ...}`` text message switches the person's active profile
-    in ``active_profiles``; ``show_profile`` tells the page which profile is active.
+    in ``active_profiles``, by a profile's name or alias; ``show_profile`` tells the page which profile
+    is active and which ones the person may switch to.
 
     After the socket closes, ``play``, ``flush_playback``, ``notify``, and ``show_profile`` do nothing.
     Use it from one event loop.
@@ -72,21 +74,20 @@ class WebConversation:
         socket: web.WebSocketResponse,
         audio: AudioConfig,
         active_profiles: ActiveProfiles,
-        profiles: Sequence[str],
     ) -> None:
-        """``profiles`` is every configured profile in config order; the page lists those ``person``
-        may use."""
         self.id = conversation_id
-        self.signed_in = person
-        """The signed-in person's entry in config's ``people``."""
         self.person = person.name
+        """The signed-in person's name in config's ``people``."""
         self._socket = socket
         self._active_profiles = active_profiles
-        self._permitted_profiles = [profile for profile in profiles if profile in person.profiles]
         self._gate_threshold_dbfs = audio.gate_threshold_dbfs
         self._carry = FrameCarry(RATE)
         self._frames: asyncio.Queue[InputFrame | None] = asyncio.Queue()
         self._frames_received = 0
+
+    def present(self, person: str) -> bool:
+        """Whether ``person`` is the signed-in person."""
+        return person == self.person
 
     async def frames(self) -> AsyncIterator[InputFrame]:
         """Yield the input frames in order until the socket closes. Iterate it from one consumer."""
@@ -115,7 +116,9 @@ class WebConversation:
     async def show_profile(self, active: str) -> None:
         """Tell the page that ``active`` is the person's active profile, with the profiles they may
         switch to: a status message ``{"active_profile": str, "profiles": [str, ...]}``."""
-        await self.notify({"active_profile": active, "profiles": self._permitted_profiles})
+        await self.notify(
+            {"active_profile": active, "profiles": self._active_profiles.permitted(self.person)}
+        )
 
     async def close(self, reason: str) -> None:
         """Close the socket with ``reason`` as its close reason and end ``frames()``. Idempotent."""
@@ -153,19 +156,16 @@ class WebConversation:
         if not isinstance(name, str):
             logger.warning("ignoring an unrecognised text message on web conversation %s", self.id)
             return
-        result = await self._active_profiles.switch(self.person, name)
-        logger.info("web switch of %s to profile %r: %s", self.person, name, result.outcome)
+        target = self._active_profiles.resolve(name)
+        outcome = (
+            "unknown" if target is None else (await self._active_profiles.switch(self.person, target)).outcome
+        )
+        logger.info("web switch of %s to profile %r: %s", self.person, name, outcome)
         # A switch reaches the page through the store's notification; anything else leaves the profile
         # as it was, so the page is told why and put back on it.
-        match result.outcome:
-            case "switched":
-                return
-            case "already_active":
-                reply = already_active(name)
-            case "refused":
-                reply = switch_refused(name)
-            case "unknown":
-                reply = which_profile(self._permitted_profiles)
+        if outcome == "switched":
+            return
+        reply = switch_reply(outcome, target, self._active_profiles.permitted(self.person))
         await self.notify({"message": reply})
         await self.show_profile(self._active_profiles.get(self.person))
 
@@ -211,15 +211,12 @@ class WebTransport:
         audio: AudioConfig,
         people: PermissionChecker,
         active_profiles: ActiveProfiles,
-        profiles: Sequence[str],
     ) -> None:
-        """Each page switches and shows its person's active profile in ``active_profiles``;
-        ``profiles`` is every configured profile in config order."""
+        """Each page switches and shows its person's active profile in ``active_profiles``."""
         self._config = config
         self._audio = audio
         self._people = people
         self._active_profiles = active_profiles
-        self._profiles = tuple(profiles)
         self._on_conversation: Callable[[Conversation], Awaitable[None]] | None = None
         self._runner: web.AppRunner | None = None
         self._conversations: set[WebConversation] = set()
@@ -271,13 +268,17 @@ class WebTransport:
             socket,
             self._audio,
             self._active_profiles,
-            self._profiles,
         )
         self._conversations.add(conversation)
         logger.info("web conversation %s started", conversation.id)
         await conversation.show_profile(self._active_profiles.get(person.name))
+
         # Every switch of the person's, from this page, another one, Discord, or by voice, moves the picker.
-        unsubscribe = self._active_profiles.subscribe(person.name, conversation.show_profile)
+        async def show(profile: str) -> bool:
+            await conversation.show_profile(profile)
+            return False  # the page only shows it; the conversation's voice session reports itself
+
+        unsubscribe = self._active_profiles.subscribe(person.name, show)
         consumer = asyncio.create_task(self._run_consumer(conversation))
         try:
             await conversation.receive()

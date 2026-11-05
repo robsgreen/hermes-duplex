@@ -4,8 +4,9 @@ The model hands work to this app by calling the ``delegate``, ``task_status``, `
 ``switch_profile``, and ``confirm_switch`` function tools; each call becomes a ``DelegationRequested``
 whose ``target`` is the tool's name. The session answers a call with ``send_function_output``, which
 lets the model go on talking once the response that made the call is done. Results and notices are
-spoken by announcement responses: out of band (outside the conversation, tools disabled) where the
-dialect supports it, otherwise through a system item that is deleted once spoken.
+spoken by announcement responses with tools disabled: out of band (outside the conversation) where the
+dialect supports it, otherwise through a system item that is deleted once spoken. A question the user
+is to answer stays in the conversation instead, so the model understands the answer.
 
 Dialects: ``openai-realtime`` (OpenAI Realtime GA, ``openai/``) and ``xai-realtime`` (xAI Grok Voice,
 ``xai/``, which speaks the GA event names with a flatter session shape and has no truncate or
@@ -20,6 +21,7 @@ import asyncio
 import base64
 import json
 import logging
+from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Self
@@ -55,6 +57,8 @@ from ..wire import CONNECT_TIMEOUT_S, WireClient, WireError
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
+UPDATE_TIMEOUT_S = 5.0
+"""Default bound on the wait for the server to confirm, or reject, an ``update_instructions``."""
 
 _TASK_CHOICE_PARAMETERS = {
     "type": "object",
@@ -78,8 +82,9 @@ def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
     """The function tools every Realtime session offers, in the flat Realtime tool shape.
 
     Always ``delegate``, ``task_status``, ``cancel_task``, and ``confirm_switch``; ``switch_profile``
-    too when ``ctx.profiles`` names any profile. Its ``profile`` argument is an enum of those names, and
-    its description lists them with their descriptions.
+    too when ``ctx.profiles`` names any profile. Its description lists those profiles with their
+    descriptions, and its ``profile`` argument is the user's own words for the agent, which the session
+    resolves to a profile by name or alias.
     """
     delegate = (
         f"Hand a request to Hermes. Returns at once with only {json.dumps(DELEGATE_RECEIPT)}: the request "
@@ -132,10 +137,8 @@ def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
                     "properties": {
                         "profile": {
                             "type": "string",
-                            "enum": [name for name, _ in ctx.profiles],
                             "description": (
-                                "The agent to switch to. The user may name it by a spoken alias or "
-                                "nickname; pass the agent's name from this list."
+                                "The agent the user asked for, in their words, such as a name or nickname."
                             ),
                         },
                     },
@@ -219,6 +222,7 @@ class RealtimeApiProvider:
         url: str | None = None,
         turn_detection: Mapping[str, Any] | None = None,
         start_timeout_s: float = CONNECT_TIMEOUT_S,
+        update_timeout_s: float = UPDATE_TIMEOUT_S,
         prompt_context: PromptContext | None = None,
     ) -> None:
         """Prepare a provider that speaks ``dialect`` to ``url`` with ``api_key`` and runs ``model``.
@@ -226,7 +230,8 @@ class RealtimeApiProvider:
         ``model`` and ``url`` None mean the dialect's defaults. ``turn_detection`` is passed to the
         provider as the dialect spells it (OpenAI always turns ``interrupt_response`` on); None means
         the dialect's default.
-        ``start_timeout_s`` bounds the wait for ``session.updated`` after the WebSocket opens.
+        ``start_timeout_s`` bounds the wait for ``session.updated`` after the WebSocket opens, and
+        ``update_timeout_s`` the wait for it after ``update_instructions``.
         ``prompt_context`` is the deployment the instructions describe (None: the defaults); its
         profiles are offered in the ``switch_profile`` tool.
         """
@@ -240,9 +245,15 @@ class RealtimeApiProvider:
         self._url = url or dialect.url
         self._turn_detection = turn_detection
         self._start_timeout_s = start_timeout_s
+        self._update_timeout_s = update_timeout_s
         self._instructions = ""
         self._wire: WireClient | None = None
-        self._incoming: AsyncIterator[dict[str, Any]] | None = None
+        self._received: asyncio.Queue[dict[str, Any] | None] | None = None
+        """Server events for ``events()``, filled by ``_read``; None marks the connection's end."""
+        self._reader: asyncio.Task[None] | None = None
+        self._updates = 0
+        self._pending_updates: deque[tuple[str, asyncio.Future[None]]] = deque()
+        """Instruction updates sent and not yet confirmed or rejected, oldest first, by event id."""
         self._input_samples = 0
         self._input_transcripts: dict[str, str] = {}
         self._announcements = 0
@@ -289,7 +300,7 @@ class RealtimeApiProvider:
         connection is closed in every such case.
         """
         await self.close()
-        self._wire = self._incoming = None
+        self._wire = self._received = self._reader = None
         self._instructions = instructions
         self._input_samples = 0
         self._input_transcripts = {}
@@ -323,7 +334,8 @@ class RealtimeApiProvider:
             await wire.close()
             raise
         self._wire = wire
-        self._incoming = incoming
+        self._received = asyncio.Queue()
+        self._reader = asyncio.create_task(self._read(incoming, self._received))
         logger.info("%s session started (model %s)", self.name, self._model)
 
     async def send_audio(self, pcm16: bytes) -> None:
@@ -342,9 +354,10 @@ class RealtimeApiProvider:
         adapter does not map (pings among them), and malformed ones, are skipped.
         """
         wire = self._open_wire()
-        assert self._incoming is not None
+        received = self._received
+        assert received is not None
         yield SessionReady()
-        async for raw in self._incoming:
+        while (raw := await received.get()) is not None:
             try:
                 event = self._map_event(raw)
             except (KeyError, TypeError, ValueError) as error:
@@ -402,37 +415,110 @@ class RealtimeApiProvider:
         """Have the model speak ``text`` (a result the prompter already marked as data) as an announcement."""
         await self._announce(text)
 
-    async def say(self, text: str) -> None:
-        """Have the model speak the notice ``text`` as an announcement."""
-        await self._announce(text)
+    async def say(self, text: str, *, expects_answer: bool = False) -> None:
+        """Have the model speak the notice ``text`` as an announcement (``_announce``)."""
+        await self._announce(text, expects_answer=expects_answer)
 
     async def update_instructions(self, text: str) -> None:
         """Replace the open session's instructions with ``text`` by a ``session.update`` that carries
-        only the instructions, so the tools, voice, audio settings, and conversation stay as they are.
+        only the instructions, so the tools, voice, audio settings, and conversation stay as they are,
+        and return once the server confirms it with ``session.updated``.
 
-        Later announcements use ``text`` too. Raises ``RuntimeError`` before ``connect`` has succeeded.
+        Later announcements use ``text`` too. Raises ``RuntimeError`` before ``connect`` has succeeded,
+        and ``WireError`` when the server rejects the update (an ``error`` naming its event id, which
+        ``events()`` then does not report), does not confirm it within ``update_timeout_s``, or ends
+        the connection first; later announcements then keep the old instructions.
         """
         wire = self._open_wire()
-        await wire.send({"type": "session.update", "session": self._dialect.instructions_config(text)})
+        self._updates += 1
+        event_id = f"duplex_instructions_{self._updates}"
+        settled = asyncio.get_running_loop().create_future()
+        self._pending_updates.append((event_id, settled))
+        session = self._dialect.instructions_config(text)
+        await wire.send({"type": "session.update", "event_id": event_id, "session": session})
+        try:
+            async with asyncio.timeout(self._update_timeout_s):
+                await settled
+        except TimeoutError:
+            raise WireError("the voice provider did not confirm the new instructions") from None
+        finally:
+            if (event_id, settled) in self._pending_updates:
+                self._pending_updates.remove((event_id, settled))
         self._instructions = text
 
     async def close(self) -> None:
         """Close the connection; safe to call more than once."""
         if self._wire is not None:
             await self._wire.close()
+        if self._reader is not None:
+            await asyncio.wait([self._reader])  # it ends with the connection; unlike await, never cancels it
 
-    async def _announce(self, text: str) -> None:
+    async def _read(
+        self, incoming: AsyncIterator[dict[str, Any]], received: asyncio.Queue[dict[str, Any] | None]
+    ) -> None:
+        """Pass the connection's server events to ``events()`` through ``received``, ending with None,
+        except those that settle an ``update_instructions``.
+
+        Reading here rather than in ``events()`` lets an update settle even while nobody iterates
+        ``events()``, or while its consumer is busy with an earlier event. When the connection ends,
+        updates still waiting fail.
+        """
+        try:
+            async for raw in incoming:
+                if not self._settle_update(raw):
+                    received.put_nowait(raw)
+        finally:
+            for _, settled in self._pending_updates:
+                settled.set_exception(WireError("the voice provider ended the session"))
+            received.put_nowait(None)
+
+    def _settle_update(self, raw: Mapping[str, Any]) -> bool:
+        """Settle the waiting ``update_instructions`` that ``raw`` answers, and return whether it did.
+
+        ``session.updated`` confirms the oldest waiting update, since the server answers session
+        updates in order; an ``error`` whose ``event_id`` names one rejects it. Without waiting
+        updates, nothing is settled.
+        """
+        match raw.get("type"):
+            case "session.updated" if self._pending_updates:
+                _, settled = self._pending_updates.popleft()
+                settled.set_result(None)
+                return True
+            case "error":
+                error = raw.get("error")
+                event_id = error.get("event_id") if isinstance(error, Mapping) else None
+                rejected = next(
+                    (pending for pending in self._pending_updates if pending[0] == event_id), None
+                )
+                if rejected is None:
+                    return False
+                self._pending_updates.remove(rejected)
+                message = _error_message(raw)
+                logger.warning("The voice provider rejected the new instructions: %s", message)
+                rejected[1].set_exception(
+                    WireError(f"the voice provider rejected the new instructions: {message}")
+                )
+                return True
+            case _:
+                return False
+
+    async def _announce(self, text: str, *, expects_answer: bool = False) -> None:
         """Start a response, with tools disabled, that speaks ``text`` without the model answering it.
 
         Out of band, the response has the session's instructions and ``text`` as its only input and
         leaves the conversation untouched. Otherwise ``text`` goes into the conversation as a system
         item that ``events()`` deletes when the response is done (see ``_follow_announcements``).
+
+        When ``expects_answer`` is true, what is said stays in the conversation, so the model
+        understands the user's answer to it: with out-of-band support the response belongs to the
+        default conversation (it still reads only the instructions and ``text``, and what it speaks is
+        added there), and otherwise the system item is kept.
         """
         wire = self._open_wire()
         self._response_requested = True
         if self.capabilities["supports_out_of_band_response"]:
             response = {
-                "conversation": "none",
+                **({} if expects_answer else {"conversation": "none"}),
                 "tools": [],
                 "output_modalities": ["audio"],
                 "instructions": self._instructions,
@@ -446,7 +532,8 @@ class RealtimeApiProvider:
             {"type": "conversation.item.create", "item": {"id": item_id, **_system_message(text)}}
         )
         await wire.send({"type": "response.create", "response": {"tool_choice": "none"}})
-        self._requested_announcements.append(item_id)
+        if not expects_answer:
+            self._requested_announcements.append(item_id)
 
     async def _follow_announcements(self, event_type: object) -> None:
         """Delete fallback announcement items once the response that spoke them is done.

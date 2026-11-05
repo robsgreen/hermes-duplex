@@ -43,11 +43,12 @@ Use only `delegate`, `task_status`, `cancel_task`, `switch_profile`, and `confir
 `cancel_task`
 - When: the user asks you to stop a task.
 - Do: pass `task_id` when an earlier `task_status` result gave you the task's id; otherwise pass `about` with the user's words for the task. Cancel right away when it is clear which task the user means by what it is about, or when only one is running; their request is the confirmation. If several are running and you cannot tell which one they mean, ask which one first, naming each by what it is about.
+- A yes to your question about cancelling a task cancels it, and a no leaves it running. For a yes, call `cancel_task` with the task's topic from your question as `about`.
 - Except: if you are unsure which tasks are running, call `task_status` first.
 
 `switch_profile`
 - When: the user asks to talk to a different Hermes agent, by its name or a nickname.
-- Do: pass the agent's name from the list above as `profile`. Switch agents only when the user asks to; hand off other work as usual, even when it sounds like another agent's.
+- Do: pass the user's words for the agent as `profile`, even a nickname. Switch agents only when the user asks to; hand off other work as usual, even when it sounds like another agent's.
 - The switch is confirmed to the user in a separate message.
 
 `confirm_switch`

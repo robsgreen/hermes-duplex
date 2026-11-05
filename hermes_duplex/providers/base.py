@@ -66,8 +66,8 @@ CANCEL_TASK_TOOL = "cancel_task"
 """Function tool that stops one of the user's tasks; its optional ``task_id`` names which."""
 
 SWITCH_PROFILE_TOOL = "switch_profile"
-"""Function tool that changes the speaker's active Hermes profile; its ``profile`` argument names the
-profile (the model maps a spoken alias to the profile's name)."""
+"""Function tool that changes the speaker's active Hermes profile; its ``profile`` argument is the
+user's words for the agent they asked for, which the session resolves by profile name or alias."""
 
 CONFIRM_SWITCH_TOOL = "confirm_switch"
 """Function tool that answers the assistant's question about switching profiles; its boolean ``accept``
@@ -280,16 +280,23 @@ class RealtimeProvider(Protocol):
         """Give the model a delegation's final result (already framed as data) to tell the user."""
         ...
 
-    async def say(self, text: str) -> None:
-        """Have the model speak a short notice, such as a refusal or status, with tools disabled."""
+    async def say(self, text: str, *, expects_answer: bool = False) -> None:
+        """Have the model speak a short notice, such as a refusal or status, with tools disabled.
+
+        ``expects_answer`` marks a question the user is to answer, such as whether to switch agents:
+        what is said then stays in the conversation the model reads, so it understands a following
+        yes or no. Other notices may be kept out of it.
+        """
         ...
 
     async def update_instructions(self, text: str) -> None:
         """Replace the open session's instructions with ``text``, keeping its tools, voice, and audio
-        settings, and the conversation so far.
+        settings, and the conversation so far, and return once the provider has accepted them.
 
         Call it only when ``capabilities["replaces_instructions"]`` is true; otherwise it sends nothing
-        and raises ``NotImplementedError``.
+        and raises ``NotImplementedError``. Raises when the provider rejects the update or does not
+        confirm it in time; the session then keeps its old instructions, and the rejection is not
+        reported as an event.
         """
         ...
 

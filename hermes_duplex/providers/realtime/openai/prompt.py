@@ -50,7 +50,7 @@ class OpenAiRealtimePrompter:
 
 `{switch}`
 - When: the user asks to talk to a different Hermes agent, by its name or a nickname.
-- Do: pass the agent's name from the list above as `profile`. {blocks.SWITCH_WHEN_ASKED}
+- Do: pass the user's words for the agent as `profile`, even a nickname. {blocks.SWITCH_WHEN_ASKED}
 - The switch is confirmed to the user in a separate message."""
             if ctx.profiles
             else ""
@@ -101,6 +101,8 @@ their tasks.
 - When: the user asks you to stop a task.
 - Do: pass `task_id` when an earlier `{status}` result gave you the task's id; otherwise pass `about` \
 with the user's words for the task. {blocks.CANCEL_POLICY}
+- {blocks.CANCEL_QUESTION} For a yes, call `{cancel}` with the task's topic from your question as \
+`about`.
 - Except: if you are unsure which tasks are running, call `{status}` first.{switch_tool}
 
 `{confirm}`

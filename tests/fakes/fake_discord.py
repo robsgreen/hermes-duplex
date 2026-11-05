@@ -46,6 +46,8 @@ class FakeVoiceChannel:
         self.connect_results: list[BaseException | None] = []
         self.voice_clients: list[FakeVoiceClient] = []
         self.sent: list[str] = []
+        self.voice_states: dict[int, Any] = {}
+        """Member id → voice state of each member in the channel; tests add and remove members."""
 
     async def connect(self, **kwargs: Any) -> discord.VoiceClient:
         if self.connect_results and (error := self.connect_results.pop(0)) is not None:

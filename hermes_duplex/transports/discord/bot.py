@@ -13,7 +13,7 @@ import itertools
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any, Protocol
 
 import discord
@@ -26,8 +26,7 @@ from ...audio.resample import StreamResampler
 from ...config import AudioConfig, ConfigError
 from ...people import PermissionChecker
 from ...profiles import ActiveProfiles
-from ...prompts.notices import already_active, switch_refused, switched_to, which_profile
-from ...switching import parse_switch_request
+from ...prompts.notices import switch_reply, switched_to
 from ..base import Conversation, InputFrame
 from .playback import DuplexAudioSource
 from .receiver import VoiceReceiver
@@ -103,6 +102,7 @@ class DiscordConversation:
         conversation_id: str,
         voice_client: discord.VoiceClient,
         *,
+        person: str | None = None,
         permissions: PermissionChecker,
         audio: AudioConfig,
         input_rate: int,
@@ -110,11 +110,13 @@ class DiscordConversation:
         receiver_factory: ReceiverFactory = VoiceReceiver,
         rejoin_delays_s: Sequence[float] = REJOIN_DELAYS_S,
     ) -> None:
-        """``voice_client`` must be connected. ``input_rate`` and ``output_rate`` are the provider's
-        mono sample rates in Hz; ``play`` accepts only ``output_rate``."""
+        """``voice_client`` must be connected. ``person`` is who brought the bot in, if known.
+        ``input_rate`` and ``output_rate`` are the provider's mono sample rates in Hz; ``play`` accepts
+        only ``output_rate``."""
         self.id = conversation_id
-        self.person: str | None = None
-        """Always None: everyone allowed in the channel shares the conversation."""
+        self.person = person
+        """Who brought the bot in (``/duplex join``), whose active profile the voice prompt starts on;
+        everyone allowed in the channel shares the conversation."""
         self._voice_client: discord.VoiceClient | None = voice_client
         self._channel: VocalGuildChannel = voice_client.channel
         self._permissions = permissions
@@ -123,9 +125,9 @@ class DiscordConversation:
         self._receiver: Receiver | None = None
 
         self._allowed = frozenset(
-            person.name
+            entry.name
             for discord_id in permissions.allowlisted_discord_ids
-            if (person := permissions.by_discord_id(discord_id)) is not None
+            if (entry := permissions.by_discord_id(discord_id)) is not None
         )
         self._voiced_threshold_dbfs = audio.gate_threshold_dbfs
         self._received: dict[str, deque[bytes]] = {}
@@ -152,6 +154,13 @@ class DiscordConversation:
     def closed(self) -> bool:
         """Whether ``close`` has run (the conversation left its channel and ``frames()`` is ending)."""
         return self._closed
+
+    def present(self, person: str) -> bool:
+        """Whether ``person`` is in the voice channel now, as the channel's voice states tell."""
+        return any(
+            (entry := self._permissions.by_discord_id(member_id)) is not None and entry.name == person
+            for member_id in self._channel.voice_states
+        )
 
     def start(self) -> None:
         """Start receiving and playing in the channel. Call it once, on the event loop."""
@@ -309,7 +318,6 @@ class DiscordTransport:
         permissions: PermissionChecker,
         *,
         active_profiles: ActiveProfiles,
-        profile_aliases: Mapping[str, Sequence[str]],
         input_rate: int,
         output_rate: int,
         receiver_factory: ReceiverFactory = VoiceReceiver,
@@ -317,14 +325,12 @@ class DiscordTransport:
     ) -> None:
         """``token`` is the bot's token; the rates are the provider's, in Hz.
 
-        ``/duplex profile`` switches in ``active_profiles``; ``profile_aliases`` maps every configured
-        profile, in config order, to its spoken aliases, which the command also accepts.
+        ``/duplex profile`` switches in ``active_profiles``, by a profile's name or one of its aliases.
         ``receiver_factory`` and ``rejoin_delays_s`` are passed to each conversation.
         """
         self._token = token
         self._permissions = permissions
         self._active_profiles = active_profiles
-        self._profile_aliases = profile_aliases
         self._new_conversation = functools.partial(
             DiscordConversation,
             permissions=permissions,
@@ -382,12 +388,13 @@ class DiscordTransport:
             self._gateway = None
 
     async def join(self, member: discord.Member | discord.User) -> str:
-        """Join ``member``'s current voice channel and start a conversation there.
+        """Join ``member``'s current voice channel and start a conversation there, whose voice prompt
+        starts on ``member``'s active profile.
 
         Returns the reply for ``member``: a refusal when they are not on the allowlist, a hint when
         they are not in a voice channel or the bot is already in one in that server, or what happened.
         """
-        if self._permissions.by_discord_id(member.id) is None:
+        if (person := self._permissions.by_discord_id(member.id)) is None:
             return REFUSAL
         voice = member.voice if isinstance(member, discord.Member) else None
         channel = voice.channel if voice is not None else None
@@ -402,7 +409,7 @@ class DiscordTransport:
             return f"I couldn't join {channel.mention}; try again in a moment."
 
         conversation = self._new_conversation(
-            f"discord-{channel.id}-{next(self._conversation_numbers)}", voice_client
+            f"discord-{channel.id}-{next(self._conversation_numbers)}", voice_client, person=person.name
         )
         self._conversations[channel.guild.id] = conversation
         conversation.start()
@@ -427,34 +434,26 @@ class DiscordTransport:
         """Make the profile ``name`` (a profile name or one of its aliases) ``member``'s active profile;
         returns the reply for ``member``.
 
-        Every live conversation that has heard ``member`` confirms the switch aloud. With none, the
-        switch is saved and the reply says it applies from their next conversation. A name that
-        fits no single profile is answered with the profiles they may use.
+        Every live conversation that has heard ``member`` and that they are still in confirms the
+        switch aloud. With none, the switch is saved and the reply says it applies from their next
+        conversation. A name that fits no single profile is answered with the profiles they may use.
         """
         person = self._permissions.by_discord_id(member.id)
         if person is None:
             return REFUSAL
-        target = parse_switch_request(f"switch to {name}", self._profile_aliases)
-        if target is not None and target != "ambiguous":
-            result = await self._active_profiles.switch(person.name, target)
-            logger.info("Discord switch of %s to profile %s: %s", person.name, target, result.outcome)
-            match result.outcome:
-                case "switched":
-                    return switched_to(target) if result.notified_live else switched_for_next_time(target)
-                case "already_active":
-                    return already_active(target)
-                case "refused":
-                    return switch_refused(target)
-                case "unknown":
-                    pass
-        return which_profile(self.permitted_profiles(member))
+        target = self._active_profiles.resolve(name)
+        if target is None:
+            return switch_reply("unknown", None, self._active_profiles.permitted(person.name))
+        result = await self._active_profiles.switch(person.name, target)
+        logger.info("Discord switch of %s to profile %s: %s", person.name, target, result.outcome)
+        if result.outcome == "switched" and not result.notified_live:
+            return switched_for_next_time(target)
+        return switch_reply(result.outcome, target, self._active_profiles.permitted(person.name))
 
     def permitted_profiles(self, member: discord.Member | discord.User) -> list[str]:
         """The profiles ``member`` may switch to, in config order; empty when they are not allowlisted."""
         person = self._permissions.by_discord_id(member.id)
-        if person is None:
-            return []
-        return [profile for profile in self._profile_aliases if self._permissions.allowed(person, profile)]
+        return [] if person is None else self._active_profiles.permitted(person.name)
 
     async def on_message(self, message: discord.Message) -> None:
         """discord.py event: a server message reading ``join`` from an allowlisted person joins their
