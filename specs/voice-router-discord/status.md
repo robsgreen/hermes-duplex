@@ -159,3 +159,7 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-05 00:21 - User: fix all round-8 findings; U1 = pass words through
 - 2026-11-05 00:49 - Round-8 Fix Once committed (gate clean, default tests pass; CORE coder e2e 5 passed). Open for user: bare 'switch to Celsius' still asks which agent. Next: docs, then scoped re-review
 - 2026-11-05 00:54 - Round-8 docs committed; scoped re-review (both seats) on 43b598f..HEAD
+- 2026-11-05 01:01 - Re-review 8 seat A: resolved P1,P2,P3(not live),P5,P7,P9-P14,U1; partial P4,P6,P8. New: N1 med (alias starting with another name -> wrong profile), N2 med (second speaker yes -> task), N3 med (return after absence not re-synced), N4 med (late-answer window swallows real yes to a later assistant question), N5 low (in-band question refused by active response, timeout still starts), L1 low parse_switch_request test-only, L2 low fallback lost if restart before heard. Waiting seat B.
+- 2026-11-05 01:03 - Re-review 8 consolidated (R1-R11) at fix-round cap; asking user: second fix round vs push with known issues
+- 2026-11-05 03:05 - User: one more fix round (R1-R6, R8, R11); dispatching coder
+- 2026-11-05 03:31 - Second fix round committed (gate clean, 1185 passed; coder e2e 5 passed x2). Scoped re-review both seats.

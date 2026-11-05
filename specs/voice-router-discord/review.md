@@ -206,3 +206,22 @@ Contract tier 3 (all seats). Contract-tier gate: none.
 ### User decisions (2026-11-05)
 - Fix scope: fix all (P1–P14) in one round, then scoped re-review.
 - U1: pass words through — switch_profile takes the user's words as said; the session resolves names and aliases (one matching rule everywhere).
+
+### Round 8 fix (da7454b, docs 914706f) — scoped re-review
+Both seats: P2, P3 (code; not live), P5, P7, P9–P14, U1 resolved; P10/P11 resolved. Seat A: P6 partial (re-entry), P8 partial (prefix alias). Seat B: P1 partial (opening + short unknown target swallows the rest), P6/P8 resolved. Both: P4 partial (second speaker's yes). Preserve notes held.
+New findings at the fix-round cap (observations unless the user asks for another round):
+- R1 medium (B, run) — switching.py:178-187: "Back to Tesla, what's it at?", "Switch to Celsius. What's the weather in Paris?" → ambiguous → which_profile, request lost; worse on GPT-Live's 30 s transcript windows. README limitation understates.
+- R2 medium (B, run) — switching.py lead-ins: natural alias switches now missed on GPT-Live ("Hmm, let me talk to stocks", "I need to talk to Warren", "Can we go back to the assistant"); exact names still switch anywhere.
+- R3 medium (A, B run by A) — session.py:1138-1147: a second Discord speaker's bare yes to another person's question is routed as a Hermes task "yes".
+- R4 medium (A run, B) — LATE_ANSWER_S swallows a real yes to a later assistant offer ("Want me to set an alert?") within 30 s.
+- R5 medium (A, run) — session.py _people_heard never cleared: a person who leaves, switches elsewhere, and returns isn't re-synced (prompt stays old, no adoption).
+- R6 medium (A, run) — switching._resolve name-prefix: alias "general news" (profile news) resolves to general via tool/Discord/web; voice routes it as a request. Config accepts it.
+- R7 low (A, not run) — realtime adapter: in-band question refused by an active VAD response is dropped, but the question timeout still starts → held request runs unasked after 30 s.
+- R8 low mechanical (B, run) — adapter _settle_update / _read finally: set_result on a future cancelled by the timeout raises InvalidStateError and can end the reader (false connection_lost or hang). Skip done() futures.
+- R9 low (B) — rest after a switch can be meaningless ("it", "not stocks", "Tesla?").
+- R10 low (A) — profiles.load rewrite: a second restart before the person is heard loses the fallback notice.
+- R11 low mechanical (A, B) — switching.parse_switch_request used only by tests.
+Gaps: live OpenAI in-band question context; Grok session.updated/event_id for instruction updates; GPT-Live transcript punctuation; GPT-Live _wait_for_quiet can't see a reply still being thought about.
+
+### User decision (2026-11-05): one more fix round
+Fix R1–R6 (medium) and R8, R11 (mechanical low); re-check with both seats; R7, R9, R10 go to the PR as known issues.
