@@ -170,3 +170,6 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-05 04:45 - User decision V6: keep option 1 (ask). User reports PR CI failing; investigating
 - 2026-11-05 04:52 - CI check job failed on test_gpt_live_barge_in_flushes_within_one_tick: test race (playback index read after wake). Reproduced 4/15 under load; fixed test, 0/30; committed locally, awaiting push yes
 - 2026-11-05 13:35 - Pushed 5b1ab17 (CI test fix) to PR #1 with user yes
+- 2026-11-05 13:39 - CI run 42037181312: check + e2e passed (test fix worked); deps-compat failed on curl 429 from raw.githubusercontent. Added curl retries; committed locally, awaiting push yes
+- 2026-11-05 13:43 - User chose git fetch for deps-compat; local commit amended, steps run locally (44 pins, resolved, no openai); awaiting push yes
+- 2026-11-05 14:22 - Pushed c731f12 (deps-compat git fetch) to PR #1 with user yes
