@@ -14,6 +14,7 @@ _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)*")
 """One word, apostrophes inside it included ("don't")."""
 _APOSTROPHES = re.compile(r"['’]")
 _SENTENCE_BREAK = re.compile(r"[.,;:!?]")
+_SENTENCE_END = re.compile(r"[.;!?]")
 
 _RETURN_PHRASE = ("back", "to")
 """The switch phrase people also use to return to a topic ("back to Tesla"), so with a target that is no
@@ -26,7 +27,7 @@ _ARTICLE = "the"
 _TARGET_NOUNS = frozenset({"profile", "agent"})
 """Words that may follow a target without making a request: "switch to the general profile"."""
 
-# What a person may say before a switch phrase that opens what they say, or one of its clauses ("let
+# What a person may say before a switch phrase that opens what they say, or one of its sentences ("let
 # me talk to stocks", "hmm, ok, go back to general"); lead-ins may follow one another. A phrase
 # anywhere else is a switch only when it names a profile exactly.
 _LEAD_INS = frozenset(
@@ -63,6 +64,10 @@ _LEAD_INS = frozenset(
         ("just",),
         ("actually",),
         ("hey",),
+        ("no",),
+        ("yes",),
+        ("yeah",),
+        ("sure",),
         ("oh",),
         ("hmm",),
         ("um",),
@@ -149,7 +154,7 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
     ("switch to", "talk to", "back to", "change to") followed by a target; a leading "the" before the
     target is ignored. Where the phrase stands decides what the target may be:
 
-    - When it opens what is said, or one of its sentences or clauses (after a comma too), after
+    - When it opens what is said or one of its sentences (after ".", ";", "!" or "?", not a comma), after
       lead-ins such as "let me", "can we", "I need to", "I'd rather", "please", "go", "hmm", or "ok",
       one after another or none, the target is a profile's name or one of its aliases
       (``resolve_profile``). A target that fits neither is ``"ambiguous"`` ("switch to finance") only
@@ -160,7 +165,7 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
     - Anywhere else, only a profile's exact name is a target: "remind me to talk to Sarah" and "should
       I move my savings back to stocks" make no request, even with an alias "stocks".
 
-    A phrase whose clause holds a negation before it ("don't switch to stocks", "I never want to talk
+    A phrase whose sentence holds a negation before it (a lone "no," interjection aside) ("don't switch to stocks", "I never want to talk
     to general") makes no request, nor does one followed by "me", "us", or "you" ("talk to me about
     Tesla"). After the target, the clause may hold only polite words, "profile" or "agent", or a joined
     further request (``SwitchRequest.rest``); anything else ("switch to stocks from bonds") makes no
@@ -174,15 +179,21 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
         for index in range(1, len(words))
         if _SENTENCE_BREAK.search(text, spans[index - 1].end(), spans[index].start())
     ]
-    openings = {_after_lead_ins(words, start) for start in (0, *breaks)}
+    sentence_starts = [
+        index for index in breaks if _SENTENCE_END.search(text, spans[index - 1].end(), spans[index].start())
+    ]
+    openings = {_after_lead_ins(words, start) for start in (0, *sentence_starts)}
     result: SwitchRequest | None = None
 
     for start in range(len(words) - 1):
         phrase = (words[start], words[start + 1])
         if phrase not in _SWITCH_PHRASES:
             continue
-        clause_start = max((index for index in breaks if index <= start), default=0)
-        if any(word in _NEGATIONS for word in words[clause_start:start]):
+        sentence_start = max((index for index in sentence_starts if index <= start), default=0)
+        if any(
+            word in _NEGATIONS and not (word == "no" and index + 1 in breaks)
+            for index, word in enumerate(words[sentence_start:start], sentence_start)
+        ):
             continue
         opening = start in openings
         target_start = start + 2

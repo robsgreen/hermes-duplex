@@ -195,14 +195,15 @@ There are four ways to switch:
 
 - **By voice**, on any provider: "switch to stock-picker", "let me talk to the stock picker", "ok,
   back to general". A switch phrase ("switch to", "talk to", "back to", "change to") that opens what
-  you say, or one of its sentences or clauses (after a comma too), after lead-ins such as "let me",
+  you say, or one of its sentences (a comma doesn't start one: "if rates fall, switch to stocks" is
+  a normal request), after lead-ins such as "let me",
   "can I", "can we", "I need to", "I'd rather", "please", "go", "hmm", "ok", "I'd like to", or
   "thanks" (one after another: "hmm, ok, let me talk to stocks"), followed by a profile's name or one
   of its `aliases`, switches; the request never reaches the router or Hermes. "Switch to stocks and
   check NVDA" switches, then hands off "check NVDA" on the new profile, and so does "talk to stocks
   about Tesla" with "Tesla".
   Mid-sentence only an exact profile name switches, never an alias. A phrase with a negation earlier
-  in its clause ("don't switch to stocks"), one followed by "me", "us", or "you" ("talk to me about
+  in its sentence ("don't switch to stocks"), one followed by "me", "us", or "you" ("talk to me about
   the weather"), or one whose target is followed by more words ("switch to stocks from bonds",
   "remind me to talk to Sarah") is no switch: it is handed off as a normal request.
 - **The `switch_profile` tool**, which OpenAI Realtime and Grok call when you ask by voice, passing
@@ -413,7 +414,7 @@ Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 | Tier | Command | Needs |
 |---|---|---|
 | Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | nothing |
-| Default (1185 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
+| Default (1193 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
 | Real Hermes end-to-end (5 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
 | Live (1 test) | `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` | hermes-agent, real API keys, the spoken WAV fixtures (below); spends money |
 | Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |

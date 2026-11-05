@@ -478,8 +478,9 @@ class RealtimeApiProvider:
 
         ``session.updated`` confirms the oldest waiting update, since the server answers session
         updates in order; an ``error`` whose ``event_id`` names one rejects it. Without waiting
-        updates, nothing is settled; an update whose waiter timed out or was cancelled before its
-        answer arrived is answered all the same, with nobody left to tell.
+        updates, nothing is settled. Waiters that already gave up are skipped; an update whose waiter
+        timed out has left the queue, so its late ``session.updated`` confirms the next waiting one (the
+        session restarts the provider after a timeout anyway).
         """
         match raw.get("type"):
             case "session.updated" if self._pending_updates:

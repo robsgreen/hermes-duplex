@@ -41,7 +41,7 @@ def _target(text: str, names: dict[str, list[str]]) -> str:
         ("Thanks. Now switch to the stock picker", "stock-picker"),
         ("Hmm, what a day. Okay, let me talk to stocks", "stock-picker"),
         ("could you change to the house please", "home"),
-        # Lead-ins, one after another, and clauses that open after a comma.
+        # Lead-ins, one after another (commas between them are fine; a comma never opens a switch).
         ("Hmm, let me talk to stocks", "stock-picker"),
         ("I need to talk to the stock picker", "stock-picker"),
         ("Can we go back to everyday", "general"),
@@ -51,8 +51,9 @@ def _target(text: str, names: dict[str, list[str]]) -> str:
         ("Sorry, I'd love to talk to the stock picker", "stock-picker"),
         ("Right, let's go back to everyday", "general"),
         ("um, uh, can we switch to stocks", "stock-picker"),
-        ("I'm done with this, talk to stocks", "stock-picker"),
         ("so I want to talk to the house", "home"),
+        ("No, switch to stocks", "stock-picker"),
+        ("Yeah, back to stocks", "stock-picker"),
         # An exact profile name counts wherever the phrase stands.
         ("should I switch to stock-picker", "stock-picker"),
         ("I'm done here so back to general", "general"),
@@ -104,6 +105,13 @@ def test_a_bare_switch_to_a_word_that_is_no_profile_still_asks_which() -> None:
         "not now, don't change to general",
         "no need to switch to stocks",
         "Hmm, don't switch to stocks",
+        "I'm done with this, talk to stocks",
+        "If rates fall, switch to stocks",
+        "Sell my bonds, switch to stocks",
+        "In my IRA, switch to stocks",
+        "my advisor said, switch to stocks",
+        "I don't want to, um, talk to stocks",
+        "I don't want to, uh, switch to stocks",
         "well, I never want to talk to the stock picker",
         # A target that is no profile, said with more than the switch, or after "back to".
         "Back to Tesla, what's it at?",

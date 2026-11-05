@@ -361,7 +361,7 @@ one `already_active` (`notices.switch_reply` words all three).
 "back to", "change to") followed by a target, a leading "the" dropped. Where the phrase stands decides
 what counts:
 
-- **Opening** what is said, or one of its sentences or clauses (a comma starts one too), after
+- **Opening** what is said, or one of its sentences (after `.`, `;`, `!` or `?`; a comma does not start one), after
   lead-ins, one after another or none, such as "let me", "can I", "can we", "I need to", "I'd
   rather", "please", "go", "hmm", "ok", "I'd like to", or "thanks": the target is a profile's name or
   alias. A target that fits neither asks which one is meant (`"ambiguous"`) only when the phrase is
