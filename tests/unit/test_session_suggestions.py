@@ -16,7 +16,7 @@ from hermes_duplex.config import Config, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
-from hermes_duplex.prompts.notices import NO_QUESTION_PENDING, suggest_switch, switched_to
+from hermes_duplex.prompts.notices import NO_QUESTION_PENDING, question_was_for, suggest_switch, switched_to
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
 from hermes_duplex.router.base import BackendResult, Effort, ProfileSpec, RouteDecision, RouteRequest
@@ -48,12 +48,18 @@ class _MemoryConversation:
 
     def __init__(self, frames: Sequence[InputFrame]) -> None:
         self._frames = frames
-        self._closed = asyncio.Event()
+        self._fed: asyncio.Queue[InputFrame | None] = asyncio.Queue()
 
     async def frames(self) -> AsyncIterator[InputFrame]:
         for frame in self._frames:
             yield frame
-        await self._closed.wait()
+        while (frame := await self._fed.get()) is not None:
+            yield frame
+
+    def feed(self, frames: Iterable[InputFrame]) -> None:
+        """Have ``frames`` follow the scripted ones and any fed before, as a person speaking again."""
+        for frame in frames:
+            self._fed.put_nowait(frame)
 
     async def play(self, pcm16_mono: bytes, rate: int) -> None:
         pass
@@ -68,7 +74,7 @@ class _MemoryConversation:
         pass
 
     async def close(self, reason: str) -> None:
-        self._closed.set()
+        self._fed.put_nowait(None)
 
 
 class _SuggestingRouter:
@@ -209,9 +215,10 @@ class _Harness:
         *,
         speaker: str = "rob",
         provider: FakeProvider | None = None,
+        frames: Sequence[InputFrame] | None = None,
     ) -> None:
         self.provider = provider or FakeProvider(script)
-        self._conversation = _MemoryConversation(_frames(1000, speaker))
+        self._conversation = _MemoryConversation(_frames(1000, speaker) if frames is None else frames)
         self._hermes = HermesApiClient(self.api.api_base, KEYS.get)
         session = VoiceSession(
             self._conversation,
@@ -452,6 +459,124 @@ async def test_an_answer_after_the_question_timed_out_is_not_run(harness: _Harne
     _assert_ran_on(run, "general")
     assert harness.runs() == [run]
     assert harness.active_profiles.get("rob") == "general", "a late yes switches nothing"
+
+
+def _rob_then_alex() -> list[InputFrame]:
+    """Rob speaks for the first second of input, then Alex for 1.4 seconds."""
+    rob = _frames(1000, "rob")
+    return [
+        *rob,
+        *(
+            InputFrame(frame.pcm16_mono, RATE, frozenset({"alex"}), frame.t_ms + 1000)
+            for frame in _frames(1400, "alex")
+        ),
+    ]
+
+
+def _by_alex(event: dict[str, Any]) -> dict[str, Any]:
+    """``event``, a call made while Alex speaks."""
+    return {**event, "offset_ms": 2000}
+
+
+async def test_a_yes_from_someone_else_while_a_question_waits_is_neither_an_answer_nor_run(
+    harness: _Harness,
+) -> None:
+    rob_asks = {**_call("call_1", "delegate", {"task": NVDA}), "offset_ms": 500}
+    harness.start(
+        [
+            {"at_input_ms": 2300, "event": rob_asks},
+            _after_the_question(_by_alex(_call("call_2", "delegate", {"task": "yes"}))),
+        ],
+        frames=_rob_then_alex(),
+    )
+
+    await harness.wait_for(lambda: question_was_for("rob") in harness.said())
+    await asyncio.sleep(0.1)
+
+    assert harness.said() == [suggest_switch("stock-picker"), question_was_for("rob")]
+    assert harness.runs() == [], "Rob's question still waits"
+    assert harness.active_profiles.get("rob") == "general"
+    assert isinstance(harness.router, _SuggestingRouter)
+    assert harness.router.requests == [(NVDA, "general")]
+
+
+async def test_a_yes_from_someone_else_just_after_a_question_was_answered_is_not_run(
+    harness: _Harness,
+) -> None:
+    rob_asks = {**_call("call_1", "delegate", {"task": NVDA}), "offset_ms": 500}
+    rob_answers = {**_call("call_2", "delegate", {"task": "yes"}), "offset_ms": 500}
+    harness.start(
+        [
+            {"at_input_ms": 2300, "event": rob_asks},
+            _after_the_question(rob_answers),
+            _after_the_question(_by_alex(_call("call_3", "delegate", {"task": "yeah"}))),
+        ],
+        frames=_rob_then_alex(),
+    )
+
+    (run,) = await harness.wait_for_runs(1)
+    await harness.wait_for(lambda: question_was_for("rob") in harness.said())
+    await asyncio.sleep(0.1)
+
+    _assert_ran_on(run, "stock-picker")
+    assert harness.runs() == [run]
+    assert isinstance(harness.router, _SuggestingRouter)
+    assert harness.router.requests == [(NVDA, "general")]
+
+
+async def test_a_yes_to_an_offer_made_after_the_question_ended_is_run(harness: _Harness) -> None:
+    offer = "NVDA is up 3%. Want me to set a price alert for it?"
+    harness.start(
+        [
+            _handoff("call_1", NVDA),
+            _after_the_question(_call("call_2", "delegate", {"task": "yes"})),
+            _after_the_question(
+                {"type": "output_transcript", "delta": offer}
+            ),  # after "You're now talking to"
+            _after_the_question(_call("call_3", "delegate", {"task": "yes"})),  # after the start notice
+        ]
+    )
+
+    runs = await harness.wait_for_runs(2)
+
+    assert [run.body["input"] for run in runs] == [NVDA, "yes"]
+    for run in runs:
+        _assert_ran_on(run, "stock-picker")
+    assert NO_QUESTION_PENDING not in harness.said()
+    assert isinstance(harness.router, _SuggestingRouter)
+    assert harness.router.requests == [(NVDA, "general"), ("yes", "stock-picker")]
+
+
+async def test_a_spoken_yes_to_an_offer_after_the_question_ended_runs_with_the_offer_as_context(
+    harness: _Harness,
+) -> None:
+    offer = "NVDA is up 3%. Want me to set a price alert for it?"
+    provider = FakeProvider(
+        [
+            # The question and its answer come as worded calls, anchored in Rob's first second of input.
+            {"at_input_ms": 500, "event": {**_call("call_1", "delegate", {"task": NVDA}), "offset_ms": 500}},
+            _after_the_question({**_call("call_2", "delegate", {"task": "yes"}), "offset_ms": 500}),
+            # After "You're now talking to stock-picker", the result's offer, then a yes worded live.
+            _after_the_question({"type": "output_transcript", "delta": offer}),
+            {"after_ms": 0, "event": {"type": "input_transcript", "delta": "Yes, do it."}},
+            {"after_ms": 0, "event": {"type": "delegation", "id": "del_3", "offset_ms": 1020}},
+        ],
+        capabilities={"delegation_style": "live"},
+    )
+    harness.start([], provider=provider)
+    await harness.wait_for(lambda: len(harness.said()) == 2)
+    await asyncio.sleep(0.1)
+    assert harness._conversation is not None
+    harness._conversation.feed(_frames(2000, "rob"))  # the input moves past the spoken hand-off
+
+    runs = await harness.wait_for_runs(2)
+
+    assert runs[1].body["input"] == (
+        "Yes, do it.\n\n(Context: just before this request, the voice assistant said: "
+        '"Want me to set a price alert for it?")'
+    )
+    _assert_ran_on(runs[1], "stock-picker")
+    assert NO_QUESTION_PENDING not in harness.said()
 
 
 async def test_no_answer_within_the_timeout_runs_on_the_active_profile(harness: _Harness) -> None:

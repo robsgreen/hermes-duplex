@@ -221,6 +221,12 @@ NO_QUESTION_PENDING = "There's no question waiting for your answer right now."
 of the speaker's waits on their answer."""
 
 
+def question_was_for(person: str) -> str:
+    """Notice for a yes or no from someone with no question of their own, while ``person``'s question
+    waits or has just ended: it is not taken as an answer, nor run as a request."""
+    return f"That question was for {person}."
+
+
 def fallback_to_default(profile: str) -> str:
     """Notice that the speaker's saved profile can no longer be used, so they are back on their
     default ``profile``."""

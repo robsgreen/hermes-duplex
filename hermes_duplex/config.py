@@ -237,7 +237,8 @@ class ProfileConfig:
     aliases: tuple[str, ...] = ()
     """Other names people say for the profile, e.g. "the stock picker". Each is compared as it is said
     (``switching.spoken_form``: case, punctuation, hyphens, and a leading "the" ignored); no two
-    profiles share one, none is another profile's name, and none starts with "me", "us", or "you"."""
+    profiles share one, none is or starts with another profile's name ("general news" while "general"
+    is a profile), and none starts with "me", "us", or "you"."""
 
     voice_context: str | None = None
     """Text, at most ``VOICE_CONTEXT_MAX_CHARS`` long, that the voice prompt carries while this is the
@@ -381,7 +382,7 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
     secret. Raises ``ConfigError`` naming the offending key when the file is missing or unreadable,
     a key is unknown or has the wrong type, a name is not one of the allowed values, a person or the
     router names an undefined profile, a person may use no profile or starts on one they may not use,
-    two profiles share an alias, an alias is another profile's name or starts with
+    two profiles share an alias, an alias is or starts with another profile's name or starts with
     "me", "us", or "you", a secret is written literally, or a named env var is unset or empty.
     Unset env vars are checked last: when only they are wrong, the error is a ``MissingEnvError`` that
     reports the first one, in file order, and lists them all.
@@ -438,8 +439,8 @@ def _profiles(section: _Section) -> Mapping[str, ProfileConfig]:
     profiles: dict[str, ProfileConfig] = {}
     # The spoken form of each alias -> the profile that claimed it first.
     alias_owners: dict[tuple[str, ...], str] = {}
-    # A switch resolves a profile's own name before any alias, so an alias that is another profile's
-    # name could never be used.
+    # Only a profile's exact name switches mid-sentence, so an alias that is, or starts with, another
+    # profile's name would switch to that profile there ("talk to general news" to general).
     spoken_names = {spoken_form(name): name for name in section.names()}
     for name in section.names():
         if name in _RESERVED_PROFILE_NAMES:
@@ -465,10 +466,18 @@ def _profiles(section: _Section) -> Mapping[str, ProfileConfig]:
                     profile.child("aliases"),
                     f"alias '{alias}' can't start with 'me', 'us', or 'you': \"talk to me\" is no switch",
                 )
-            if spoken_names.get(spoken, name) != name:
+            other = next(
+                (
+                    other
+                    for spoken_name, other in spoken_names.items()
+                    if other != name and spoken[: len(spoken_name)] == spoken_name
+                ),
+                None,
+            )
+            if other is not None:
                 raise ConfigError(
                     profile.child("aliases"),
-                    f"alias '{alias}' is the name of the profile '{spoken_names[spoken]}'",
+                    f"alias '{alias}' starts with the name of the profile '{other}'",
                 )
             owner = alias_owners.setdefault(spoken, name)
             if owner != name:

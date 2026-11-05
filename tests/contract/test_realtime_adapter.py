@@ -314,6 +314,36 @@ async def test_update_instructions_raises_at_once_when_the_connection_ends() -> 
                 await provider.update_instructions("Now on the stock-picker agent.")
 
 
+async def test_an_answer_to_an_update_whose_waiter_gave_up_is_consumed_without_error() -> None:
+    # The timeout cancels the waiter's future before ``update_instructions`` removes it from the queue,
+    # so an answer can arrive for a future that is already done.
+    provider = RealtimeApiProvider(API_KEY, dialect=OPENAI)
+    loop = asyncio.get_running_loop()
+    confirmed, rejected, ended = loop.create_future(), loop.create_future(), loop.create_future()
+    for future in (confirmed, rejected, ended):
+        future.cancel()
+    provider._pending_updates.extend(
+        [
+            ("duplex_instructions_1", confirmed),
+            ("duplex_instructions_2", rejected),
+            ("duplex_instructions_3", ended),
+        ]
+    )
+
+    assert provider._settle_update({"type": "session.updated"})
+    assert provider._settle_update({"type": "error", "error": {"event_id": "duplex_instructions_2"}})
+    received: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+    await provider._read(_no_events(), received)  # the connection ends with one update still waiting
+
+    assert received.get_nowait() is None, "the reader ends normally"
+    assert list(provider._pending_updates) == [("duplex_instructions_3", ended)]
+
+
+async def _no_events() -> AsyncIterator[dict[str, Any]]:
+    return
+    yield
+
+
 async def test_update_instructions_before_connect_raises() -> None:
     with pytest.raises(RuntimeError):
         await RealtimeApiProvider(API_KEY, dialect=OPENAI).update_instructions("hello")

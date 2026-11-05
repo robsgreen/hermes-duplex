@@ -300,6 +300,10 @@ provider each result is for. Start each on `general` (say "back to general" firs
 6. Say "don't switch to stocks", then "remind me to talk to Sarah tomorrow", then "should I move my
    savings back to stocks?"
 7. Say "talk to stocks about Tesla".
+8. Say "Hmm, can we go back to general?", then "Switch to Celsius. What's the weather in Paris?",
+   then "back to Tesla, what's it at?"
+9. On Discord: leave the voice channel, run `/duplex profile stock-picker`, rejoin, and say "what's
+   NVDA at?"
 
 Expected: step 1 is confirmed aloud ("You're now talking to stock-picker.") and the log shows `switch
 of <you> to profile stock-picker: switched` and `voice instructions now speak for profile
@@ -311,6 +315,11 @@ then runs the weather request there, with no switch question. In step 5 the requ
 `general`, the profile saved before the restart (`$HERMES_HOME/duplex/active_profiles.json`). In
 step 6 nothing switches: each is handed off as an ordinary request on `general` (the last may draw a
 switch question; answer no). Step 7 switches to `stock-picker` and then hands off "Tesla" there.
+In step 8 the first switches to `general` (on `gpt-live` too); the other two never get "which agent
+do you mean?": each is handed off whole as an ordinary request. In step 9 the reply says the switch
+applies next time; once you speak again the log shows `voice instructions now speak for profile
+stock-picker` (on `gpt-live` a restart once the call is quiet), no "You're now talking to" is spoken,
+and the request runs on `stock-picker`.
 
 ### 17. Switch suggestions
 
@@ -427,11 +436,17 @@ dropped profile). The next request runs on `general`. Restore the config afterwa
 3. Right after the cancel confirmation, say "yes" again.
 4. Start another slow task, say "cancel the weather one", and answer "no".
 5. Say "cancel the weather one" once more and say nothing for 30 seconds, then say "yes".
+6. On Discord with a second person B: ask "what did NVDA do today?" so the switch question comes,
+   and have B say "yes" before you answer; then answer "no" yourself.
+7. Ask something whose answer ends with an offer ("…Want me to set a price alert?"), right after a
+   question of yours was answered, and say "yes" to the offer.
 
 Expected: steps 1, 4, and 5 ask "The only one running is "research three dividend stocks…". Cancel
 that?" and stop nothing yet. In step 2 the task is cancelled (`Cancelled "…"`); on `openai-realtime`
 and `xai-realtime` the yes arrives as `confirm_switch` or as `cancel_task` with the task's topic as
 `about`, on `gpt-live` as a handed-off "yes". Step 3 answers "There's no question waiting for your
-answer right now." and starts no Hermes run (the log shows `answered 'yes' after their question
-ended; not run`). In step 4 the task keeps running. In step 5 the question ends after 30 s, the task
-keeps running, and the late "yes" gets the same "no question waiting" answer.
+answer right now." and starts no Hermes run (the log shows `<you>'s 'yes' is taken as an answer to
+<you>'s question; not run`). In step 4 the task keeps running. In step 5 the question ends after 30
+s, the task keeps running, and the late "yes" gets the same "no question waiting" answer. In step 6
+B's yes gets "That question was for <you>." and switches nothing; your "no" then runs the request
+on your active profile. In step 7 the "yes" is handed off as a request with the offer as context.

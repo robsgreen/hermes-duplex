@@ -469,7 +469,8 @@ class RealtimeApiProvider:
                     received.put_nowait(raw)
         finally:
             for _, settled in self._pending_updates:
-                settled.set_exception(WireError("the voice provider ended the session"))
+                if not settled.done():  # its waiter may have timed out or been cancelled already
+                    settled.set_exception(WireError("the voice provider ended the session"))
             received.put_nowait(None)
 
     def _settle_update(self, raw: Mapping[str, Any]) -> bool:
@@ -477,12 +478,14 @@ class RealtimeApiProvider:
 
         ``session.updated`` confirms the oldest waiting update, since the server answers session
         updates in order; an ``error`` whose ``event_id`` names one rejects it. Without waiting
-        updates, nothing is settled.
+        updates, nothing is settled; an update whose waiter timed out or was cancelled before its
+        answer arrived is answered all the same, with nobody left to tell.
         """
         match raw.get("type"):
             case "session.updated" if self._pending_updates:
                 _, settled = self._pending_updates.popleft()
-                settled.set_result(None)
+                if not settled.done():
+                    settled.set_result(None)
                 return True
             case "error":
                 error = raw.get("error")
@@ -495,9 +498,10 @@ class RealtimeApiProvider:
                 self._pending_updates.remove(rejected)
                 message = _error_message(raw)
                 logger.warning("The voice provider rejected the new instructions: %s", message)
-                rejected[1].set_exception(
-                    WireError(f"the voice provider rejected the new instructions: {message}")
-                )
+                if not rejected[1].done():
+                    rejected[1].set_exception(
+                        WireError(f"the voice provider rejected the new instructions: {message}")
+                    )
                 return True
             case _:
                 return False

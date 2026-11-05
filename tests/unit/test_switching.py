@@ -7,7 +7,6 @@ from hermes_duplex.switching import (
     SwitchRequest,
     is_affirmative,
     is_negative,
-    parse_switch_request,
     read_switch_request,
     resolve_profile,
     spoken_form,
@@ -18,6 +17,13 @@ NAMES = {
     "stock-picker": ["stocks", "the stock picker", "portfolio"],
     "home": ["the house"],
 }
+
+
+def _target(text: str, names: dict[str, list[str]]) -> str:
+    """The target of the switch request ``text`` makes, which must make one."""
+    request = read_switch_request(text, names)
+    assert request is not None, f"{text!r} makes no switch request"
+    return request.target
 
 
 @pytest.mark.parametrize(
@@ -35,25 +41,37 @@ NAMES = {
         ("Thanks. Now switch to the stock picker", "stock-picker"),
         ("Hmm, what a day. Okay, let me talk to stocks", "stock-picker"),
         ("could you change to the house please", "home"),
+        # Lead-ins, one after another, and clauses that open after a comma.
+        ("Hmm, let me talk to stocks", "stock-picker"),
+        ("I need to talk to the stock picker", "stock-picker"),
+        ("Can we go back to everyday", "general"),
+        ("hmm, ok, let me talk to portfolio", "stock-picker"),
+        ("Oh, could we change to the house", "home"),
+        ("Well, I'd rather talk to stocks", "stock-picker"),
+        ("Sorry, I'd love to talk to the stock picker", "stock-picker"),
+        ("Right, let's go back to everyday", "general"),
+        ("um, uh, can we switch to stocks", "stock-picker"),
+        ("I'm done with this, talk to stocks", "stock-picker"),
+        ("so I want to talk to the house", "home"),
         # An exact profile name counts wherever the phrase stands.
         ("should I switch to stock-picker", "stock-picker"),
         ("I'm done here so back to general", "general"),
     ],
 )
 def test_switch_phrase_names_a_profile(text: str, profile: str) -> None:
-    assert parse_switch_request(text, NAMES) == profile
+    assert _target(text, NAMES) == profile
 
 
 @pytest.mark.parametrize(
     "text", ["switch to finance", "let me talk to the finance agent", "Can I change to accounts, please?"]
 )
 def test_unknown_target_of_a_switch_that_opens_what_is_said_is_ambiguous(text: str) -> None:
-    assert parse_switch_request(text, NAMES) == "ambiguous"
+    assert read_switch_request(text, NAMES) == SwitchRequest("ambiguous", None)
 
 
 def test_a_bare_switch_to_a_word_that_is_no_profile_still_asks_which() -> None:
     # Indistinguishable from "switch to finance" without knowing what the word means.
-    assert parse_switch_request("switch to Celsius", NAMES) == "ambiguous"
+    assert read_switch_request("switch to Celsius", NAMES) == SwitchRequest("ambiguous", None)
 
 
 @pytest.mark.parametrize(
@@ -85,29 +103,51 @@ def test_a_bare_switch_to_a_word_that_is_no_profile_still_asks_which() -> None:
         "I don't want to talk to the stock picker",
         "not now, don't change to general",
         "no need to switch to stocks",
+        "Hmm, don't switch to stocks",
+        "well, I never want to talk to the stock picker",
+        # A target that is no profile, said with more than the switch, or after "back to".
+        "Back to Tesla, what's it at?",
+        "Switch to Celsius. What's the weather in Paris?",
+        "switch to Celsius and tell me the weather",
+        "change to metric, what's five miles in kilometres",
+        "talk to Sarah, she knows the address",
+        "Talk to Mom about dinner",
+        "what's the weather? Switch to Celsius",
+        "back to work",
+        "go back to bed",
+        "ok, back to the weather",
+        "switch to finance and check NVDA",
     ],
 )
 def test_a_phrase_that_asks_for_no_switch_is_none(text: str) -> None:
-    assert parse_switch_request(text, NAMES) is None
+    assert read_switch_request(text, NAMES) is None
 
 
 def test_alias_that_fits_two_profiles_is_ambiguous() -> None:
     names = {"stock-picker": ["the markets"], "news": ["the markets"]}
 
-    assert parse_switch_request("talk to the markets", names) == "ambiguous"
+    assert read_switch_request("talk to the markets", names) == SwitchRequest("ambiguous", None)
 
 
 def test_exact_name_wins_over_another_profiles_alias() -> None:
     names = {"general": [], "home": ["general"]}
 
-    assert parse_switch_request("switch to general", names) == "general"
+    assert _target("switch to general", names) == "general"
+
+
+def test_longest_fit_wins_across_names_and_aliases() -> None:
+    names = {"general": [], "news": ["general news"]}
+
+    assert _target("talk to general news", names) == "news"
+    assert _target("talk to general", names) == "general"
+    assert resolve_profile("General News", names) == "news"
 
 
 def test_longest_alias_wins() -> None:
     names = {"stock-picker": ["stocks"], "funds": ["stocks and funds"]}
 
-    assert parse_switch_request("talk to stocks and funds", names) == "funds"
-    assert parse_switch_request("talk to stocks about Tesla", names) == "stock-picker"
+    assert _target("talk to stocks and funds", names) == "funds"
+    assert _target("talk to stocks about Tesla", names) == "stock-picker"
 
 
 @pytest.mark.parametrize(
@@ -124,7 +164,7 @@ def test_longest_alias_wins() -> None:
     ],
 )
 def test_text_without_a_switch_request_is_none(text: str) -> None:
-    assert parse_switch_request(text, NAMES) is None
+    assert read_switch_request(text, NAMES) is None
 
 
 @pytest.mark.parametrize(
@@ -144,7 +184,6 @@ def test_request_after_the_target_is_the_rest(text: str, rest: str) -> None:
 
     assert request is not None
     assert request.rest == rest
-    assert parse_switch_request(text, NAMES) == request.target
 
 
 @pytest.mark.parametrize(
@@ -206,8 +245,9 @@ def test_spoken_form_is_how_a_name_is_said(name: str, spoken: tuple[str, ...]) -
     assert spoken_form(name) == spoken
 
 
-def test_ambiguous_target_carries_no_request() -> None:
-    assert read_switch_request("switch to finance and check NVDA", NAMES) == SwitchRequest("ambiguous", None)
+@pytest.mark.parametrize("text", ["ok, switch to finance please", "Hmm, can we talk to the finance agent?"])
+def test_an_unknown_target_said_alone_after_lead_ins_asks_which(text: str) -> None:
+    assert read_switch_request(text, NAMES) == SwitchRequest("ambiguous", None)
 
 
 @pytest.mark.parametrize(

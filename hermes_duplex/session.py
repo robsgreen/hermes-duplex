@@ -40,6 +40,7 @@ from .prompts.notices import (
     fallback_to_default,
     finished_while_away,
     only_one_running,
+    question_was_for,
     queued_behind,
     refusal,
     suggest_switch,
@@ -77,7 +78,7 @@ from .providers.base import (
 )
 from .providers.wire import WireError, retry_connect
 from .router.base import Effort, RouteDecision
-from .switching import is_affirmative, is_negative, read_switch_request
+from .switching import is_affirmative, is_negative, read_switch_request, spoken_form
 from .tasks import TERMINAL_STATES, Task, TaskState, TaskTracker
 from .transports.base import Conversation
 
@@ -134,8 +135,8 @@ QUESTION_TIMEOUT_S = 30.0
 runs on their active profile, and a task they were asked whether to cancel keeps running."""
 
 LATE_ANSWER_S = 30.0
-"""A bare yes or no from a speaker within this many seconds (on ``clock``) after their question was
-answered or ended is told that no question waits (``NO_QUESTION_PENDING``) instead of being run."""
+"""A bare yes or no within this many seconds (on ``clock``) after a question was answered or ended, with
+nothing else asked since, is taken for a late answer to it and is not run (``_whose_question``)."""
 
 RESTART_QUIET_S = 2.0
 """A prompt-context change from first hearing a person restarts a provider that cannot replace its
@@ -405,6 +406,11 @@ class _SwitchQuestion:
     def speaker(self) -> str:
         return self.request.speaker
 
+    @property
+    def text(self) -> str:
+        """The question as the model is given it to say."""
+        return suggest_switch(self.suggestion)
+
 
 @dataclass(eq=False)
 class _CancelQuestion:
@@ -413,12 +419,29 @@ class _CancelQuestion:
 
     speaker: str
     task_number: int
+    text: str
+    """The question as the model is given it to say."""
+
     expiry: asyncio.Task[None] | None = None
     """Ends the question unanswered after ``QUESTION_TIMEOUT_S``; None until it is spoken."""
 
 
 _Question = _SwitchQuestion | _CancelQuestion
 """A yes-or-no question put to one speaker; each speaker has at most one at a time."""
+
+
+@dataclass(frozen=True)
+class _EndedQuestion:
+    """A speaker's latest question that was answered or ended, kept to recognise a late answer to it."""
+
+    text: str
+    """The question as the model was given it to say."""
+
+    ended_s: float
+    """When (on ``clock``) it ended."""
+
+    asked_before: int
+    """How many question marks the assistant's output transcript held when it ended."""
 
 
 @dataclass(frozen=True)
@@ -487,13 +510,15 @@ class VoiceSession:
     to the suggestion and runs the held request there, or cancels the task; on no, or with no answer
     within ``QUESTION_TIMEOUT_S`` of the question being spoken, the held request runs on the speaker's
     active profile, and the task keeps running. A bare yes or no from them within ``LATE_ANSWER_S``
-    after their question ended is told that no question waits, and is not run either. Any other
-    hand-off or ``switch_profile`` call from the speaker ends their question unanswered, after its own
-    switch if it makes one, so a held request runs at the routed effort on whatever profile is active
-    then, with that profile's model (``Router.model_for``); a ``cancel_task`` call ends a cancel
-    question the same way. A new question replaces their earlier one. Held requests still pending
-    when the session ends start on the active profile and are left unattended like the session's
-    other open tasks.
+    after their question ended, with nothing else asked since, is told that no question waits
+    (``NO_QUESTION_PENDING``), and one from someone else while a person's question waits or just
+    ended is told whose question it was (``question_was_for``); neither is run (``_whose_question``).
+    Any other hand-off or ``switch_profile`` call from the speaker ends their question unanswered,
+    after its own switch if it makes one, so a held request runs at the routed effort on whatever
+    profile is active then, with that profile's model (``Router.model_for``); a ``cancel_task`` call
+    ends a cancel question the same way. A new question replaces their earlier one. Held requests
+    still pending when the session ends start on the active profile and are left unattended like
+    the session's other open tasks.
 
     Tool-style providers get exactly one function output per call. A ``delegate`` call is answered
     at once with ``DELEGATE_RECEIPT``, before routing, so the model can go on talking; the spoken
@@ -534,9 +559,11 @@ class VoiceSession:
     Tasks outlive their conversation. When the session ends, its open tasks are left unattended in
     the ``TaskTracker`` (their Hermes runs go on), and each task whose end it had not announced yet is
     left untold. The session adopts a person's unattended and untold tasks when it first hears that
-    person and whenever another session leaves some for a person it has heard, and follows each to its
-    end like its own. An end the person missed is announced as news ("While you were away, "how is my
-    portfolio doing" finished: …"); so is the end of an adopted run whose status could not be read.
+    person and whenever another session leaves some for a person it has heard; a person it finds has
+    left the conversation counts as not heard, so their return is taken in afresh (``_first_heard``).
+    It follows each adopted task to its end like its own. An end the person missed is announced as
+    news ("While you were away, "how is my portfolio doing" finished: …"); so is the end of an adopted
+    run whose status could not be read.
 
     ``clock`` returns seconds and times the progress throttle, the announcements' wait for the floor,
     and ``LATE_ANSWER_S``. ``sleep`` is how the session waits between reconnect attempts and for a
@@ -600,7 +627,8 @@ class VoiceSession:
         self._task_numbers: list[int] = []
         """Numbers of the tasks this session follows: the ones it started and the ones it adopted."""
         self._people_heard: set[str] = set()
-        """People voiced in this session so far, whose unattended and untold tasks it adopts."""
+        """People voiced in this session so far, whose unattended and untold tasks it adopts, less those
+        since found to have left (``Conversation.present``)."""
         self._untold: dict[int, str] = {}
         """Per task whose end is queued to be announced but not spoken yet, its ``away_notice``."""
         self._delegations: set[asyncio.Task[None]] = set()
@@ -625,8 +653,11 @@ class VoiceSession:
         """Per person the session listens to ``active_profiles`` for, how to stop listening."""
         self._questions: dict[str, _Question] = {}
         """Per speaker, the yes-or-no question waiting on their answer."""
-        self._question_ended_s: dict[str, float] = {}
-        """Per speaker, when (on ``clock``) their latest question was answered or ended."""
+        self._ended_questions: dict[str, _EndedQuestion] = {}
+        """Per speaker, their latest question that was answered or ended."""
+        self._question_marks = 0
+        """How many question marks the assistant's output transcript has held so far: one more since a
+        question ended means the assistant asked something else since."""
 
     async def run(self) -> None:
         """Connect the provider and run until the conversation or the provider session ends.
@@ -740,9 +771,10 @@ class VoiceSession:
                     self._input_advanced.notify_all()
 
     def _first_heard(self, person: str) -> None:
-        """Take in ``person``, voiced for the first time in this session: listen for their switches,
-        tell them when they were moved back to their default, move the instructions to their active
-        profile once the call is quiet, and adopt their unattended tasks."""
+        """Take in ``person``, voiced for the first time in this session or for the first time since
+        they were found to have left: listen for their switches, tell them when they were moved back to
+        their default, move the instructions to their active profile once the call is quiet, and adopt
+        their unattended tasks."""
         self._people_heard.add(person)
         self._listen_for_switches(person)
         if (fallback := self._active_profiles.fallback_pending(person)) is not None:
@@ -760,6 +792,7 @@ class VoiceSession:
         async def switched(profile: str) -> bool:
             if not self._conversation.present(person):
                 logger.info("%s switched to %s after leaving the conversation; ignored", person, profile)
+                self._people_heard.discard(person)  # so their return is taken in afresh
                 return False
             self._change_prompt_context(profile)
             self._announce(switched_to(profile))
@@ -769,13 +802,16 @@ class VoiceSession:
 
     async def _pump_adoptions(self) -> None:
         """Adopt the tasks other sessions leave unattended or untold for the people heard here who are
-        still in the conversation."""
+        still in the conversation; one who has left is forgotten, so their return is taken in afresh
+        (``_first_heard``)."""
         handovers = 0
         while True:
             handovers = await self._tracker.unattended_after(handovers)
-            for person in self._people_heard:
+            for person in list(self._people_heard):
                 if self._conversation.present(person):
                     self._adopt_tasks(person)
+                else:
+                    self._people_heard.discard(person)
 
     def _adopt_tasks(self, person: str) -> None:
         """Take over ``person``'s unattended tasks and follow each in the background, and announce how
@@ -859,6 +895,7 @@ class VoiceSession:
                             await self._end_input_line()
                     case OutputTranscript(delta=delta, start_ms=start_ms):
                         self._output_transcript.add(self._sent_ms if start_ms is None else start_ms, delta)
+                        self._question_marks += delta.count("?")
                         if lines_end_on_turns:
                             await self._end_input_line()
                         self._output_line += delta
@@ -1124,9 +1161,10 @@ class VoiceSession:
         context: str | None = None,
     ) -> None:
         """Handle ``speaker``'s hand-off ``text``: a bare yes or no settles their pending question, or,
-        shortly after one ended, is told that none waits; a switch request (``read_switch_request``) is
-        carried out before any routing, with its notice spoken, and any further request in it continues
-        on the new profile; anything else ends their question and is routed for its effort.
+        when it answers one of theirs that just ended or someone else's (``_whose_question``), is told
+        that the question is not waiting on it; a switch request (``read_switch_request``) is carried
+        out before any routing, with its notice spoken, and any further request in it continues on the
+        new profile; anything else ends their question and is routed for its effort.
 
         A routed status or cancel request is answered from the tracker. A request the router suggests
         another profile for is held while the speaker is asked whether to switch (``_hold``); any
@@ -1141,9 +1179,9 @@ class VoiceSession:
                 if settled[1] is not None:
                     self._announce(settled[1])
                 return
-            if self._question_ended_lately(speaker):
-                logger.info("%s answered %r after their question ended; not run", speaker, text)
-                self._announce(NO_QUESTION_PENDING)
+            if (owner := self._whose_question(speaker, context)) is not None:
+                logger.info("%s's %r is taken as an answer to %s's question; not run", speaker, text, owner)
+                self._announce(NO_QUESTION_PENDING if owner == speaker else question_was_for(owner))
                 return
 
         switch = read_switch_request(text, self._active_profiles.names)
@@ -1215,15 +1253,45 @@ class VoiceSession:
         ended (``LATE_ANSWER_S``); None when they have none."""
         question = self._questions.pop(speaker, None)
         if question is not None:
-            self._question_ended_s[speaker] = self._clock()
+            self._ended_questions[speaker] = _EndedQuestion(
+                question.text, self._clock(), self._question_marks
+            )
             if question.expiry is not None and question.expiry is not asyncio.current_task():
                 question.expiry.cancel()
         return question
 
-    def _question_ended_lately(self, speaker: str) -> bool:
-        """Whether ``speaker``'s latest question was answered or ended within ``LATE_ANSWER_S``."""
-        ended_s = self._question_ended_s.get(speaker)
-        return ended_s is not None and self._clock() - ended_s < LATE_ANSWER_S
+    def _whose_question(self, speaker: str, context: str | None) -> str | None:
+        """The person whose question a bare yes or no from ``speaker``, with no question of their own
+        pending, is taken to answer, so that it is not run as a request; None when it answers none.
+
+        That is ``speaker`` themselves for their latest question when it ended lately, else another
+        person whose question is pending or ended lately (on Discord, one person may answer what was
+        asked of another). A question ended lately when it was answered or ended within
+        ``LATE_ANSWER_S`` and the assistant has asked nothing since: no question mark in its output
+        transcript after the question ended, as a result's or the model's own offer would put there
+        ("Want me to set an alert?"). Either way, ``context``, what the assistant said just before
+        the yes or no, must not be another question: it is None, asks nothing, or is part of the
+        question.
+        """
+
+        def may_answer(question: str) -> bool:
+            if context is None or not context.rstrip().endswith("?"):
+                return True
+            said, asked = " ".join(spoken_form(context)), " ".join(spoken_form(question))
+            return f" {said} " in f" {asked} " or f" {asked} " in f" {said} "
+
+        def ended_lately(ended: _EndedQuestion) -> bool:
+            return (
+                self._clock() - ended.ended_s < LATE_ANSWER_S
+                and ended.asked_before == self._question_marks
+                and may_answer(ended.text)
+            )
+
+        if (own := self._ended_questions.get(speaker)) is not None and ended_lately(own):
+            return speaker
+        pending = (person for person, question in self._questions.items() if may_answer(question.text))
+        ended = (person for person, question in self._ended_questions.items() if ended_lately(question))
+        return next((person for person in (*pending, *ended) if person != speaker), None)
 
     async def _settle_question(self, speaker: str, *, accept: bool) -> tuple[str, str | None] | None:
         """Settle ``speaker``'s pending question with their answer, and return a status and the notice
@@ -1444,9 +1512,9 @@ class VoiceSession:
             return NOTHING_TO_CANCEL, None
         number = _resolve_task(active, words, task_id)
         if number is None and len(active) == 1:
-            question = _CancelQuestion(speaker, active[0].number)
+            question = _CancelQuestion(speaker, active[0].number, only_one_running(active[0]))
             self._pose(question)
-            return only_one_running(active[0]), question
+            return question.text, question
         if number is None:
             return which_to_cancel(active), None
         try:

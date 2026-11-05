@@ -468,9 +468,12 @@ def test_alias_may_equal_its_own_profiles_name(tmp_path: Path) -> None:
     _load_mutated(tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=["General"]))
 
 
-@pytest.mark.parametrize("alias", ["stock-picker", "Stock Picker", " the   stock picker "])
-def test_alias_that_is_another_profiles_name_is_rejected(tmp_path: Path, alias: str) -> None:
-    # A switch resolves the name first, so the alias could never be used.
+@pytest.mark.parametrize(
+    "alias",
+    ["stock-picker", "Stock Picker", " the   stock picker ", "stock picker news", "the Stock-Picker desk"],
+)
+def test_alias_that_is_or_starts_with_another_profiles_name_is_rejected(tmp_path: Path, alias: str) -> None:
+    # Mid-sentence only exact names switch, so "talk to stock picker news" would switch to stock-picker.
     error = _assert_error(
         tmp_path, lambda raw: raw["profiles"]["general"].update(aliases=[alias]), "profiles.general.aliases"
     )

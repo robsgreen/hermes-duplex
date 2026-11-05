@@ -47,11 +47,18 @@ class _MemoryConversation:
         """People who have left; everyone else counts as present."""
         self._frames = frames
         self._closed = asyncio.Event()
+        self._fed: asyncio.Queue[InputFrame | None] = asyncio.Queue()
 
     async def frames(self) -> AsyncIterator[InputFrame]:
         for frame in self._frames:
             yield frame
-        await self._closed.wait()
+        while (frame := await self._fed.get()) is not None:
+            yield frame
+
+    def feed(self, frames: Iterable[InputFrame]) -> None:
+        """Have ``frames`` follow the scripted ones and any fed before, as a person speaking again."""
+        for frame in frames:
+            self._fed.put_nowait(frame)
 
     async def play(self, pcm16_mono: bytes, rate: int) -> None:
         pass
@@ -67,6 +74,7 @@ class _MemoryConversation:
 
     async def close(self, reason: str) -> None:
         self._closed.set()
+        self._fed.put_nowait(None)
 
 
 class _RecordingRouter:
@@ -163,9 +171,14 @@ class _Harness:
         self._run: asyncio.Task[None] | None = None
 
     def start(
-        self, script: Iterable[Mapping[str, Any]], frames: Sequence[InputFrame], *, person: str | None = None
+        self,
+        script: Iterable[Mapping[str, Any]],
+        frames: Sequence[InputFrame],
+        *,
+        person: str | None = None,
+        capabilities: Mapping[str, object] | None = None,
     ) -> None:
-        self.provider = FakeProvider(script)
+        self.provider = FakeProvider(script, capabilities=capabilities)
         self._conversation = _MemoryConversation(frames, person)
         self._hermes = HermesApiClient(self.api.api_base, KEYS.get)
         session = VoiceSession(
@@ -239,6 +252,9 @@ async def harness(tmp_path: Path, api: FakeHermesApi) -> AsyncIterator[_Harness]
         ("general", "switch to stock-picker", "stock-picker"),
         ("general", "let me talk to the stock picker", "stock-picker"),
         ("stock-picker", "go back to general", "general"),
+        ("general", "Hmm, let me talk to stocks", "stock-picker"),
+        ("general", "I need to talk to stocks", "stock-picker"),
+        ("general", "Okay, can we switch to stocks?", "stock-picker"),
     ],
 )
 async def test_a_switch_request_switches_and_is_confirmed_without_routing_or_a_task(
@@ -313,7 +329,7 @@ async def test_a_switch_followed_by_a_request_switches_then_runs_the_request_the
     ("speaker", "words", "notice"),
     [
         ("alex", "switch to stock-picker and check NVDA", switch_refused("stock-picker")),
-        ("rob", "switch to finance and check NVDA", which_profile(EVERY_PROFILE)),
+        ("alex", "let me talk to stocks about Tesla", switch_refused("stock-picker")),
     ],
 )
 async def test_a_request_after_a_switch_that_does_not_happen_is_dropped(
@@ -337,6 +353,11 @@ async def test_a_request_after_a_switch_that_does_not_happen_is_dropped(
         "move my savings back to stocks",
         "don't switch to stocks",
         "talk to Sarah about the party tomorrow night",
+        # A target that is no profile, said with a request: the whole hand-off is the request.
+        "Back to Tesla, what's it at?",
+        "Switch to Celsius. What's the weather in Paris?",
+        "switch to finance and check NVDA",
+        "go back to bed",
     ],
 )
 async def test_words_that_ask_for_no_switch_are_routed_and_run_as_a_task(
@@ -350,6 +371,29 @@ async def test_words_that_ask_for_no_switch_are_routed_and_run_as_a_task(
     assert (run.path, run.body["input"]) == ("/p/general/v1/runs", words)
     assert harness.router.requests == [words]
     assert harness.active_profiles.get("rob") == "general"
+    assert which_profile(EVERY_PROFILE) not in harness.said()
+
+
+async def test_a_live_hand_off_that_opens_with_a_switch_to_no_profile_is_routed_whole(
+    harness: _Harness,
+) -> None:
+    # A live provider's words are the whole transcript window, so a stray phrase opens a longer one.
+    words = "Switch to Celsius. What's the weather in Paris?"
+    script = [
+        {"at_input_ms": 200, "event": {"type": "input_transcript", "delta": words}},
+        {"at_input_ms": 2900, "event": {"type": "delegation", "id": "del_1", "offset_ms": 2900}},
+    ]
+    live = {"delegation_style": "live", "emits_speech_events": False}
+    harness.start(script, _frames(3000, "rob"), capabilities=live)
+    await asyncio.sleep(0.2)
+    assert harness._conversation is not None
+    harness._conversation.feed(_frames(2000))  # the input moves past the delegation's grace
+
+    await harness.wait_for(lambda: bool(harness.api.requests_to("POST", "/runs")))
+
+    (run,) = harness.api.requests_to("POST", "/runs")
+    assert (run.path, run.body["input"]) == ("/p/general/v1/runs", words)
+    assert harness.router.requests == [words]
     assert which_profile(EVERY_PROFILE) not in harness.said()
 
 
@@ -461,6 +505,29 @@ async def test_a_switch_made_elsewhere_after_the_person_left_changes_nothing_her
     assert harness.said() == []
     assert harness.sent("update_instructions") == []
     assert harness.active_profiles.get("rob") == "stock-picker"
+
+
+async def test_a_person_who_left_and_switched_elsewhere_is_taken_in_afresh_once_they_are_back(
+    harness: _Harness,
+) -> None:
+    harness.start([], _frames(200, "rob"))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 1)
+    await asyncio.sleep(0.1)  # Rob has been heard
+    conversation = harness._conversation
+    assert conversation is not None
+    conversation.departed.add("rob")
+    assert not (await harness.active_profiles.switch("rob", "stock-picker")).notified_live
+
+    conversation.departed.discard("rob")  # Rob is back and speaks
+    conversation.feed(_frames(200, "rob"))
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))
+    await asyncio.sleep(0.1)
+
+    assert [call.args["text"] for call in harness.sent("update_instructions")] == [
+        harness.instructions_for("stock-picker")
+    ], "the instructions follow the switch made while he was away"
+    assert harness.said() == [], "first heard again, not switched here"
+    assert (await harness.active_profiles.switch("rob", "general")).notified_live, "still listened to"
 
 
 async def test_the_signed_in_person_is_listened_for_before_they_are_heard(harness: _Harness) -> None:

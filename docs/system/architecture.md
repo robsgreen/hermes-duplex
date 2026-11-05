@@ -19,7 +19,7 @@ switch, but never picks the profile.
 | `hermes_duplex/tasks.py` | `TaskTracker` and its `$HERMES_HOME/duplex/tasks.jsonl` history. |
 | `hermes_duplex/people.py` | `PermissionChecker`: Discord ids and web tokens to people, and who may use which profile. |
 | `hermes_duplex/profiles.py` | `ActiveProfiles`: each person's active profile, its default, `$HERMES_HOME/duplex/active_profiles.json`, and switch notifications. |
-| `hermes_duplex/switching.py` | Pure text helpers: `read_switch_request` / `parse_switch_request` (a spoken switch request and any request after it) and `is_affirmative` / `is_negative` (a short yes or no). |
+| `hermes_duplex/switching.py` | Pure text helpers: `read_switch_request` (a spoken switch request and any request after it) and `is_affirmative` / `is_negative` (a short yes or no). |
 | `hermes_duplex/prompts/` | The prompt pieces every provider shares: the `VoicePrompter` interface and its inputs (`base.py`), the shared rules (`blocks.py`), and every spoken notice (`notices.py`). Each provider family's prompter is its package's `prompt.py` under `providers/`. See Prompt strategy. |
 | `hermes_duplex/audio/` | 20 ms framing, resampling, the allowlist mixer and attribution ring, the loudness gate, and the output pacer. |
 | `hermes_duplex/transports/` | Sources of conversations (`Transport`, `Conversation`, `InputFrame` in `base.py`): the Discord bot (`discord/`) and the web page and `/ws` (`web/`). |
@@ -351,8 +351,8 @@ session, the Discord command, and the web page share.
   time;
 - the web page's `{"type": "profile", "name": ...}` text frame.
 
-Names resolve as Hermes Bot Mode resolves Bot names: an exact profile name first, then an alias,
-longest match first (`switching.resolve_profile`). Every path uses it, the web frame and the tool
+Names resolve to the longest profile name or alias the words start with, a name winning a tie with
+an alias (`switching.resolve_profile`). Every path uses it, the web frame and the tool
 included, so each accepts aliases. Words that name no single profile get `which_profile`, listing the
 profiles the speaker may use; a profile the person may not use gets `switch_refused`, and the active
 one `already_active` (`notices.switch_reply` words all three).
@@ -361,11 +361,16 @@ one `already_active` (`notices.switch_reply` words all three).
 "back to", "change to") followed by a target, a leading "the" dropped. Where the phrase stands decides
 what counts:
 
-- **Opening** what is said, or one of its sentences, after lead-ins such as "let me", "can I",
-  "please", "go", "ok", "I'd like to", or "thanks": the target is a profile's name or alias. A target
-  that fits neither asks which one is meant (`"ambiguous"`) when the rest of its clause, up to "and",
-  "then", or "so", holds at most `UNKNOWN_TARGET_MAX_WORDS` (3) words besides polite ones ("switch to
-  finance"); a longer one is an ordinary request.
+- **Opening** what is said, or one of its sentences or clauses (a comma starts one too), after
+  lead-ins, one after another or none, such as "let me", "can I", "can we", "I need to", "I'd
+  rather", "please", "go", "hmm", "ok", "I'd like to", or "thanks": the target is a profile's name or
+  alias. A target that fits neither asks which one is meant (`"ambiguous"`) only when the phrase is
+  all that is said: lead-ins before it, at most `UNKNOWN_TARGET_MAX_WORDS` (3) words besides polite
+  ones up to "and", "then", "so", "about", or a sentence break ("switch to finance"), and nothing
+  after but polite words. With anything more ("Switch to Celsius. What's the weather in Paris?",
+  "switch to finance and check NVDA"), or after "back to" ("back to Tesla, what's it at?"), the whole
+  hand-off is an ordinary request; this matters most on GPT-Live, whose hand-off words are a whole
+  transcript window.
 - **Anywhere else**, only an exact profile name is a target, never an alias: "should I move my
   savings back to stocks" makes no request even with an alias "stocks".
 
@@ -375,8 +380,9 @@ polite words, "profile" or "agent", or a joined request ("switch to stocks from 
 request, and the words are routed as usual. A joined request is what follows "and", "then", "so", or
 a sentence break, or, for an opening phrase, "about" ("talk to stocks about Tesla" switches and
 hands off "Tesla"). Config checks aliases with the parser's own spoken form (`switching.spoken_form`):
-each needs a word besides "the", none starts with "me", "us", or "you", none is another profile's
-name, and no two profiles share one.
+each needs a word besides "the", none starts with "me", "us", or "you", none is or starts with another
+profile's name (mid-sentence only names switch, so "general news" would switch to `general` there),
+and no two profiles share one.
 
 **Who hears a switch.** Each session subscribes to the store for every person it hears and for the
 conversation's `person`, until it ends. On a switch, wherever it was made, a session whose
@@ -386,15 +392,23 @@ the web page's signed-in person) moves its prompt context to the new profile, an
 ignores it. A Discord channel member the session has not heard yet has no subscription there, so
 their switch applies when they are first heard. The web conversation also subscribes for its person
 and sends the page a status frame with the new profile; that listener does not count as live.
-Adopting a person's unattended tasks likewise happens only while they are present.
+Adopting a person's unattended tasks likewise happens only while they are present. A person the switch
+listener or the adoption pump finds absent is forgotten as heard, so when they speak again they are
+first heard afresh: the prompt context moves to their active profile (in place, or a quiet restart),
+any fallback notice is spoken, and their unattended tasks are adopted.
 
 **A hand-off, step by step** (`VoiceSession._delegate`, for a `delegate` call after its receipt and
 for a live delegation's words):
 
 1. When the words are only a yes or a no (`is_affirmative`, `is_negative`), they answer the
-   speaker's pending question. With none pending but one settled or ended within `LATE_ANSWER_S`
-   (30 s), they get `NO_QUESTION_PENDING` ("There's no question waiting for your answer right now.").
-   Either way nothing is routed.
+   speaker's pending question. With none pending, `_whose_question` decides whether they are a late
+   or misplaced answer: the speaker's own question that ended within `LATE_ANSWER_S` (30 s) gets
+   `NO_QUESTION_PENDING` ("There's no question waiting for your answer right now."); another
+   person's question that is pending or ended within it gets `question_was_for` ("That question was
+   for rob."). Either way nothing is routed. An ended question counts only while the assistant has
+   asked nothing since (no "?" in its output transcript since it ended), and any question only when
+   the hand-off's context is None, no question, or part of that question; so a yes to a later offer
+   ("Want me to set a price alert?") is routed as usual, with the offer as its context.
 2. A switch request is carried out with its notice. Words after the target joined by "and", "then",
    "so", or a sentence break ("switch to stocks and check NVDA") are the rest of the request; when
    the switch happened or the profile was already active, the rest goes on to step 3 on the new

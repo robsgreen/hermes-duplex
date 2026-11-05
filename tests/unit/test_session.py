@@ -66,6 +66,7 @@ class _MemoryConversation:
     def __init__(self, frames: Sequence[InputFrame]) -> None:
         self._frames = frames
         self._closed = asyncio.Event()
+        self._fed: asyncio.Queue[InputFrame | None] = asyncio.Queue()
         self.played: list[bytes] = []
         self.notified: list[dict[str, Any]] = []
         self.closed_reason: str | None = None
@@ -75,7 +76,13 @@ class _MemoryConversation:
     async def frames(self) -> AsyncIterator[InputFrame]:
         for frame in self._frames:
             yield frame
-        await self._closed.wait()
+        while (frame := await self._fed.get()) is not None:
+            yield frame
+
+    def feed(self, frames: Iterable[InputFrame]) -> None:
+        """Have ``frames`` follow the scripted ones and any fed before, as a person speaking again."""
+        for frame in frames:
+            self._fed.put_nowait(frame)
 
     async def play(self, pcm16_mono: bytes, rate: int) -> None:
         assert rate == RATE
@@ -93,6 +100,7 @@ class _MemoryConversation:
     async def close(self, reason: str) -> None:
         self.closed_reason = reason
         self._closed.set()
+        self._fed.put_nowait(None)
 
 
 def _frames(duration_ms: int, voiced: Callable[[int], Iterable[str]] = lambda t_ms: ()) -> list[InputFrame]:
@@ -1443,6 +1451,38 @@ async def test_a_session_does_not_adopt_what_another_leaves_for_someone_who_left
 
         assert not any("tasks" in event for event in discord.conversation.notified)
         assert [task.number for task in web.tracker.adopt("rob").open_tasks] == [1], "left for later"
+    finally:
+        await _close(web, discord)
+
+
+async def test_a_person_who_left_adopts_what_was_left_for_them_meanwhile_once_they_are_back(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(RunScript(events=[{"event": "run.started"}]))
+    web = _Harness(tmp_path, api)
+    discord = _Harness(tmp_path, api)
+    discord.tracker = web.tracker
+    try:
+        web.start([_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob")))
+        await web.wait_for(lambda: bool(web.sent("say")))
+        discord.start([], _frames(200, _voiced("rob")))
+        await asyncio.sleep(0.1)
+        assert discord.conversation is not None and web.conversation is not None and web._run is not None
+        discord.conversation.departed.add("rob")  # Rob left the Discord channel
+        await web.conversation.close("rob left the web call")
+        await asyncio.wait_for(web._run, timeout=5)
+        await asyncio.sleep(0.2)
+        conversation = discord.conversation
+        assert not any("tasks" in event for event in conversation.notified)
+
+        conversation.departed.discard("rob")  # Rob is back in the channel and speaks
+        conversation.feed(_frames(200, _voiced("rob")))
+        await discord.wait_for(lambda: any("tasks" in event for event in conversation.notified))
+        await asyncio.sleep(0.1)  # its run is read as still going, and followed
+        _complete_run(api, "Up 2% today.")
+        await discord.wait_for(lambda: bool(discord.sent("say")))
+
+        assert discord.texts("say") == [frame_result("stock-picker", "Up 2% today.", 500)]
     finally:
         await _close(web, discord)
 
