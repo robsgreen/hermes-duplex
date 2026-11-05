@@ -167,3 +167,42 @@ Both seats: spoken paths carry no task numbers; privacy holds; no critical/high.
 - V4 low (A) — contraction/never-mind words count as topic words ("don", "won", "never", "mind").
 - V5 low mechanical (B) — adapter docstring "only one running" → "only one open".
 - Needs user decision V6 (both): single-open-task fallback cancels it even when the words name a different topic.
+
+## Review round 8 — active-profile amendment (f09eeb8..43b598f), revision to PR #1
+Panel: A=sdlc-reviewer/opus, B=sdlc-reviewer/opus; fan-out core (session, switching, profiles, router) and edges (config, providers, prompts, transports, service, docs).
+Check: ruff check → pass; ruff format --check → pass; pyright → pass; pytest default → pass (1037); pytest -m e2e (real Hermes) → pass (5); eval-router knn → pass.
+Contract tier 3 (all seats). Contract-tier gate: none.
+
+### Gating (high)
+- P1 high logic introduced (all 4 dispatches, run) — switching.py read_switch_request + session._delegate: any "talk to / back to / switch to / change to <non-profile>" anywhere in a hand-off returns "ambiguous" → which_profile spoken, request dropped ("Remind me to talk to Sarah", "flights back to London", "switch to Celsius"). An alias after the phrase switches without being asked ("should I switch to stocks from bonds"); negation ("don't switch to stocks") switches. README Known limitations says the opposite. Preserve: "switch to finance" → which_profile; real switches never routed; switch-then-rest.
+- P2 high logic introduced (B-core run, A-edges run, B-edges) — session._first_heard → _change_prompt_context → GPT-Live restart on a person's first voiced frame on Discord; frames during reconnect dropped (repro: 39 of 100 frames lost / ~0.5-0.8 s). Happens every Discord call for anyone whose active profile ≠ router.default_profile. Preserve: in-place update on Realtime/Grok; restart for explicit switches; restart not counted as short session.
+- P3 high logic introduced (B-edges, not run; grounded in OpenAI doc "out-of-band responses are not added to the default conversation state") — realtime/adapter.py _announce out-of-band: on OpenAI Realtime the suggest_switch question never enters the model's context, so a spoken "yes" may not become confirm_switch(true); hold times out and runs on the old profile.
+
+### Medium
+- P4 logic introduced (A-core run) — stray/late yes or no (no hold: timed out, settled, or a second Discord speaker) is routed as a Hermes task ("Started "yes" ..."); HOLD_TIMEOUT_S starts before the question is spoken (announcements may wait up to 20 s). Related P5.
+- P5 logic introduced (B-edges) — round-7 notice only_one_running "Cancel that?" has no yes/no handler; GPT-Live "yes" becomes a task, Realtime question is out-of-band (P3).
+- P6 logic introduced, extends K1 (A-core, B-core) — session subscribes for everyone ever heard; a departed person's switch elsewhere restarts/re-prompts the remaining call and announces switched_to to others; notified_live over-reports.
+- P7 logic introduced (B-edges, A-edges) — update_instructions returns without awaiting session.updated/error; server rejection arrives as ProviderError → floor.response_refused, _rendered_context already moved; the restart fallback only fires from a test double. architecture.md overstates.
+- P8 Red flag — Information Leakage (A-core medium; A-edges E5 low; B-edges low) — spoken-name normalisation differs between config._spoken_form and switching._target_words; config accepts aliases that the parser makes ambiguous or dead (alias = another profile's name, "the markets" vs "markets", punctuation-only).
+- P9 Red flag — Repetition (A-edges) — switch outcome → reply mapping, permitted-profiles list, and fake "switch to {name}" resolution duplicated in session, Discord bot, web server.
+
+### Low
+- P10 logic (A-core, B-core run) — profiles.load does not rewrite the file after a fallback: "You're back on general" repeats every restart; a re-added profile silently returns.
+- P11 logic (B-core) — concurrent switches for one person can leave listeners applying the older profile.
+- P12 logic (B-core) — "talk to stocks about Tesla" switches and drops "about Tesla".
+- P13 mechanical (A-core) — VoiceSession docstring: rest also runs on already_active; `sleep` now also times holds.
+- P14 mechanical (A-edges, B-edges) — WebConversation.signed_in used only by tests.
+
+### Needs user decision
+- U1 (B-edges) — Realtime/Grok never see aliases: switch_profile.profile is an enum of names; "switch to Warren" can't be mapped. Options: list aliases in the tool description/prompt, or have the model delegate the user's words for unknown names so the session parser resolves them.
+
+### Repro not confirmed
+- Repro not confirmed: P3 realtime/adapter.py:424 — B-edges — needs live OpenAI Realtime (checklist §17).
+- Repro not confirmed: P7 realtime/adapter.py:409 — B-edges, A-edges — needs a server rejecting session.update.
+- Repro not confirmed: P6 session.py:707 — A-core, B-core — multi-session Discord harness.
+### Gaps
+- xAI session.update merge semantics (instructions-only keeps tools/VAD?) unverified — live Grok check needed.
+
+### User decisions (2026-11-05)
+- Fix scope: fix all (P1–P14) in one round, then scoped re-review.
+- U1: pass words through — switch_profile takes the user's words as said; the session resolves names and aliases (one matching rule everywhere).
