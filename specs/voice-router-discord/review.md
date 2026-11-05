@@ -225,3 +225,14 @@ Gaps: live OpenAI in-band question context; Grok session.updated/event_id for in
 
 ### User decision (2026-11-05): one more fix round
 Fix R1–R6 (medium) and R8, R11 (mechanical low); re-check with both seats; R7, R9, R10 go to the PR as known issues.
+
+### Second fix (4da64ab) — final scoped re-review
+Seat A: R2–R6, R8, R11 resolved; R1 partial; Preserve notes held (comma-negation weakened). No medium+. New lows:
+- F1 low (run) — switching._asks_only_to_switch doesn't stop the target at a sentence break: "Switch to Celsius. What's it now?" → which agent? (also in 914706f); contradicts docstring/architecture.md.
+- F2 low (run) — negation before a comma-opened switch no longer blocks: "I don't want to, um, talk to stocks" switches.
+- F3 low (run) — while another person's question is pending, a second speaker's yes to a later offer is blocked with question_was_for.
+Seat B: R1, R2, R3, R5, R6, R8, R11 resolved; R4 partial; Preserve held. New:
+- N1 medium (run) — switching.py:177 comma clauses count as openings: "If rates fall, switch to stocks", "Sell my bonds, switch to stocks" switch and drop the instruction; contradicts README. Fix: openings at sentence ends only (lead-ins already chain across commas; reviewer verified all R2 phrases still switch). Same root as A's F2.
+- N2 low (run, fake) — GPT-Live: "?" counter read ~1.5 s after the yes; a model question in that window lets a stray late yes run.
+- N3 low mechanical — adapter _settle_update docstring wrong: a timed-out waiter's late session.updated confirms the next update.
+- trivial — duplex.example.yaml:77 alias comment predates R6.
