@@ -92,6 +92,8 @@ class _QueueConversation:
         self.played: list[bytes] = []
         self.flushes: list[int] = []
         """``frames_yielded`` at each ``flush_playback`` call."""
+        self.played_at_flushes: list[int] = []
+        """``len(played)`` at each ``flush_playback`` call, taken then, not when a test next looks."""
 
     def feed(
         self, duration_ms: int, voiced: Callable[[int], Iterable[str]], pcm: bytes | None = None
@@ -116,6 +118,7 @@ class _QueueConversation:
 
     async def flush_playback(self) -> None:
         self.flushes.append(self.frames_yielded)
+        self.played_at_flushes.append(len(self.played))
 
     async def notify(self, event: dict[str, Any]) -> None:
         pass
@@ -407,7 +410,9 @@ async def test_gpt_live_barge_in_flushes_within_one_tick(tmp_path: Path, api: Fa
         conversation.feed(quiet_frames * 20, _voiced())
         conversation.feed(loud_frames * 20, _voiced(("rob", 0, 10_000)), LOUD_FRAME)
         await harness.wait_for(lambda: bool(conversation.flushes))
-        played_before_flush = len(conversation.played)
+        # Taken at the flush itself: on a busy machine this test may wake only after the later reply
+        # has started playing, and counting that audio as "before" would leave too little after.
+        [played_before_flush] = conversation.played_at_flushes
 
         first_loud_frame = quiet_frames + 1
         [frames_at_flush] = conversation.flushes
