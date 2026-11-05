@@ -158,3 +158,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-04 19:49 - Review 8 consolidated (P1-P14, U1) in review.md; asking user fix scope + U1
 - 2026-11-05 00:21 - User: fix all round-8 findings; U1 = pass words through
 - 2026-11-05 00:49 - Round-8 Fix Once committed (gate clean, default tests pass; CORE coder e2e 5 passed). Open for user: bare 'switch to Celsius' still asks which agent. Next: docs, then scoped re-review
+- 2026-11-05 00:54 - Round-8 docs committed; scoped re-review (both seats) on 43b598f..HEAD
