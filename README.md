@@ -139,7 +139,7 @@ a literal `api_key`, `token`, `bot_token`, `key`, `web_token`, or `secret` key i
 | `hermes` | `api_base` of the API server, and `profile_keys_env`: profile → env var holding that profile's `API_SERVER_KEY`. A profile without a key cannot run tasks; the voice says it is not configured. |
 | `provider` | `name` (required, never inferred), `model`, `voice`, `api_key_env`, and `turn_detection` for the Realtime family. |
 | `router` | `backend` (`decisions`, `jev`, or `knn`), optional `fast_path: knn`, `deadline_ms` (300), `default_profile` (`general`: where people start when their own `default_profile` is unset and they may use it), `suggest_switch` (true: may ask to switch when a request clearly fits another profile the speaker may use), `suggest_threshold` (0.85, greater than 0 and at most 1: how sure it must be before asking), extra `control_examples`, and the `decisions` or `jev` settings (`api_key_env`, optional `model` and `base_url`). |
-| `profiles` | Each Hermes profile people can talk to: `description` and `examples` steer switch suggestions; `models` and `default_model` pick the model; `aliases` are other names people say for it (no two profiles share one, ignoring case and extra spaces); `voice_context` (optional, at most 2000 characters) goes into the voice prompt while the profile is active. |
+| `profiles` | Each Hermes profile people can talk to: `description` and `examples` steer switch suggestions; `models` and `default_model` pick the model; `aliases` are other names people say for it, compared as spoken (case, punctuation, hyphens, and a leading "the" ignored): each needs a word besides "the", none may start with "me", "us", or "you" or be another profile's name, and no two profiles share one; `voice_context` (optional, at most 2000 characters) goes into the voice prompt while the profile is active. |
 | `people` | Each person: `discord_id`, `web_token_env`, the `profiles` they may use (at least one; `"*"` for all), and an optional `default_profile` they start on, which must be one of those. |
 | `transports` | `discord: {enabled, bot_token_env}` and `web: {enabled, host, port}`; both off unless enabled. |
 | `audio` | `pacer_lead_ms` (200), `gate_threshold_dbfs` (-35.0), and `playback_queue_s` (5). |
@@ -193,25 +193,40 @@ it holds across conversations and restarts. Hand-offs run in the Hermes session
 
 There are four ways to switch:
 
-- **By voice**, on any provider: "switch to stock-picker", "let me talk to the stock picker", "back
-  to general". A switch phrase ("switch to", "talk to", "back to", "change to") followed by a
-  profile's name or one of its `aliases` switches; the request never reaches the router or Hermes.
-  "Switch to stocks and check NVDA" switches, then hands off "check NVDA" on the new profile.
-- **The `switch_profile` tool**, which OpenAI Realtime and Grok call when you ask by voice.
+- **By voice**, on any provider: "switch to stock-picker", "let me talk to the stock picker", "ok,
+  back to general". A switch phrase ("switch to", "talk to", "back to", "change to") that opens what
+  you say, or one of its sentences, after lead-ins such as "let me", "can I", "please", "go", "ok",
+  "I'd like to", or "thanks", followed by a profile's name or one of its `aliases`, switches; the
+  request never reaches the router or Hermes. "Switch to stocks and check NVDA" switches, then hands
+  off "check NVDA" on the new profile, and so does "talk to stocks about Tesla" with "Tesla".
+  Mid-sentence only an exact profile name switches, never an alias. A phrase with a negation earlier
+  in its clause ("don't switch to stocks"), one followed by "me", "us", or "you" ("talk to me about
+  the weather"), or one whose target is followed by more words ("switch to stocks from bonds",
+  "remind me to talk to Sarah") is no switch: it is handed off as a normal request.
+- **The `switch_profile` tool**, which OpenAI Realtime and Grok call when you ask by voice, passing
+  your words for the agent (a name or a nickname); the session resolves them as above.
 - **Discord:** `/duplex profile <name>` (see [Use it](#use-it)).
 - **Web:** the **Talking to** picker on the page.
 
-A name resolves to an exact profile name first, then to an alias. A name that fits no profile or
-several gets "Sorry, which agent do you mean?" with the profiles you may use; a profile you may not
+A name resolves to an exact profile name first, then to an alias. A short name that fits no
+profile (at most three words, as in "switch to finance") or fits several gets "Sorry, which agent do
+you mean?" with the profiles you may use; a profile you may not
 use gets "Sorry, you don't have access to the stock-picker agent, so I didn't switch." Every live
 conversation you are in confirms a switch aloud ("You're now talking to stock-picker."), wherever it
-was made. If your saved profile is removed from config or you lose access to it, you are moved back
-to your default and hear "You're back on general." the next time you are heard.
+was made; a conversation you have left (a Discord voice channel you are no longer in) ignores it. If
+your saved profile is removed from config or you lose access to it, you are moved back to your
+default and hear "You're back on general." the next time you are heard, once: the saved file is
+rewritten, so a restart does not announce it again.
 
 **Suggestions.** When a request clearly fits another profile you may use better than your active
 one, the assistant holds it and asks "That sounds like a stock-picker question. Want me to switch?"
 Say yes and it switches, then runs the request there. Say no, ask for something else, or say nothing
-for 30 seconds, and it runs on your active profile. Nothing switches without your yes. It asks only
+for 30 seconds after the question is spoken, and it runs on your active profile. Nothing switches
+without your yes. You have at most one yes-or-no question waiting at a time: a switch question, or,
+when you ask to cancel something that seems not to be your only running task, "The only one running
+is "…". Cancel that?" (yes cancels it, no leaves it running). A new question replaces the old one. A
+stray yes or no within 30 seconds after your question was settled or timed out gets "There's no
+question waiting for your answer right now." and is never handed to Hermes. It asks only
 when the other profile's probability is at least `router.suggest_threshold` (0.85) and at least 0.2
 above your active profile's; `router.suggest_switch: false` turns suggestions off. A held request
 still waiting when the conversation ends starts on your active profile.
@@ -231,10 +246,13 @@ profiles:
 ```
 
 The prompt speaks for one profile at a time. The web page starts on the signed-in person's active
-profile. A Discord call starts on `router.default_profile` and moves to each person's active profile
-when it first hears them, and to the new profile on every switch. On OpenAI Realtime and Grok the new
-instructions replace the old ones in place; GPT-Live cannot replace its instructions, so the session
-restarts it (about a second of pause) with the new ones and a summary of the conversation so far.
+profile. A Discord call starts on the active profile of the person who brought the bot in, moves to
+each other person's active profile when it first hears them, and to the new profile on every switch.
+On OpenAI Realtime and Grok the new instructions replace the old ones in place (if the provider does
+not confirm within 5 seconds, the session restarts instead); GPT-Live cannot replace its
+instructions, so the session restarts it (about a second of pause) with the new ones and a summary of
+the conversation so far. An explicit switch restarts at once; a change from first hearing someone
+waits until the call has been quiet for 2 seconds, so nobody is cut off.
 
 ### People and permissions
 
@@ -324,8 +342,9 @@ guessing. `/duplex leave` ends the conversation. The bot joins one channel per s
 
 `/duplex profile <name>` switches your active profile; it takes a profile name or alias, and
 autocompletes the profiles you may use. The reply is private. When you are in a live conversation it
-also confirms the switch aloud there; otherwise the reply says the switch applies the next time you
-talk.
+also confirms the switch aloud there. Otherwise, including when you have left the voice channel or
+are in it but have not spoken yet, the reply says the switch applies the next time you talk; in the
+call it takes effect when you are first heard.
 
 **On the web.** With `transports.web.enabled: true`, open `http://127.0.0.1:8765/` (the configured
 host and port), enter your token (the value of your `web_token_env` variable), and press
@@ -384,7 +403,7 @@ Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 | Tier | Command | Needs |
 |---|---|---|
 | Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | nothing |
-| Default (1037 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
+| Default (1142 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
 | Real Hermes end-to-end (5 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
 | Live (1 test) | `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` | hermes-agent, real API keys, the spoken WAV fixtures (below); spends money |
 | Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |
@@ -470,9 +489,12 @@ Then run `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m liv
   model's instructions (and `voice_context`) are those of the last person who switched or was first
   heard.
 - **Switch phrases are matched literally.** A switch by voice needs "switch to", "talk to", "back
-  to", or "change to" followed by a profile's name or alias. On GPT-Live, other phrasings are
+  to", or "change to" followed by a profile's name or alias (see
+  [Active profile and switching](#active-profile-and-switching)). On GPT-Live, other phrasings are
   handed off as a normal request on the active profile, where a switch suggestion may follow; OpenAI
-  Realtime and Grok can still switch through the `switch_profile` tool.
+  Realtime and Grok can still switch through the `switch_profile` tool. A short request that opens
+  with a switch phrase but names no profile, such as "switch to Celsius", is taken as a switch and
+  answered "Sorry, which agent do you mean?" instead of being handed off.
 - **An end queued but not yet spoken when the service stops is lost.** Untold results are kept in
   memory; after a restart only tasks that were still open are picked up again.
 - **The CI `e2e` job has not run on GitHub Actions yet**; the real-Hermes tier has passed locally.

@@ -73,10 +73,11 @@ router:
 # and `model`. Fill in your own models: the <fill> values below are placeholders. An effort missing
 # from `models` uses `default_model`; with neither, Hermes uses the profile's own default model.
 # `aliases` are other names people say for a profile ("switch to the stock picker"); matching ignores
-# case and extra spaces, and no two profiles may share one. To let people say a Bot's Desktop title,
-# copy it here by hand; it is not read from Hermes. `voice_context` (optional, at most 2000
-# characters) goes into the voice prompt while the profile is active: what it covers, what to always
-# hand off, how to say its words, and rules to follow.
+# case, punctuation, hyphens, and a leading "the". Each needs a word besides "the", may not start with
+# me, us, or you, may not be another profile's name, and no two profiles may share one. To let
+# people say a Bot's Desktop title, copy it here by hand; it is not read from Hermes. `voice_context`
+# (optional, at most 2000 characters) goes into the voice prompt while the profile is active: what it
+# covers, what to always hand off, how to say its words, and rules to follow.
 profiles:
   stock-picker:
     description: Portfolio, holdings, stock research, trades

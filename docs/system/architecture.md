@@ -147,8 +147,8 @@ GPT-Live sends no speech or response events, so they do not wait for the floor.
 OpenAI Realtime and Grok (`providers/realtime/`) are the `tool` delegation style. The session
 offers five function tools, built per provider from its `PromptContext` (`session_tools`):
 `delegate(task)`, `task_status(task_id?, about?)`, `cancel_task(task_id?, about?)`,
-`switch_profile(profile)` (an enum of the profile names; its description lists each with its
-description and says the model maps a spoken alias to the name), and `confirm_switch(accept)`. Each call arrives as `DelegationRequested` with the tool's name as `target`
+`switch_profile(profile)` (the user's own words for the agent, a name or nickname, which the session
+resolves; its description lists the profiles with their descriptions), and `confirm_switch(accept)`. Each call arrives as `DelegationRequested` with the tool's name as `target`
 and its arguments in `tool_args`; its `offset_ms` is how much input the adapter had sent when the
 call arrived.
 
@@ -212,7 +212,9 @@ good. Where `supports_out_of_band_response` holds (OpenAI), an announcement is a
 `response.create` with `conversation: "none"`, `tools: []`, the session's instructions, and the
 announcement text as its only input, so it leaves the conversation history alone. Otherwise (xAI) the text
 goes in as a system item, a `response.create` with `tool_choice: "none"` speaks it, and the adapter
-deletes the item with `conversation.item.delete` when that response is done.
+deletes the item with `conversation.item.delete` when that response is done. A question the user is
+to answer (a switch or cancel question) stays in the conversation instead: see Questions under Active
+profiles and switching.
 
 ## Interruptions
 
@@ -329,73 +331,121 @@ switches are saved to `$HERMES_HOME/duplex/active_profiles.json`, written atomic
 an error and everyone starts on their default; the start never stops for it. A saved profile that
 config no longer defines, or that the person may no longer use, is dropped, and the person's default
 becomes their `fallback_pending`, announced once ("You're back on general.") when a session first
-hears them. `switch(person, profile)` returns `switched`, `already_active`, `refused` (the person may
-not use it), or `unknown`, and on `switched` awaits every listener subscribed for that person;
-`SwitchResult.notified_live` says whether any was.
+hears them; `load()` then rewrites the file without the dropped entries, so a restart does not
+announce it again. `switch(person, profile)` returns `switched`, `already_active`, `refused` (the
+person may not use it), or `unknown`, and on `switched` awaits every listener subscribed for that
+person. A person's switches run one at a time (a per-person lock), listeners included, so every
+listener hears them in order. Each listener returns whether a live voice conversation now uses the
+profile; `SwitchResult.notified_live` is true only when one did. `names` (each profile to its
+aliases), `resolve(words)`, and `permitted(person)` are the one resolver and permitted list the
+session, the Discord command, and the web page share.
 
 **Ways to switch.** Every path ends in `ActiveProfiles.switch`, and none creates a Hermes task:
 
-- a `switch_profile` tool call (OpenAI Realtime, Grok);
-- hand-off words that `read_switch_request` recognises: a switch phrase ("switch to", "talk to",
-  "back to", "change to") followed by a profile's name or one of its `aliases` (GPT-Live, and any
-  provider's `delegate` text);
+- a `switch_profile` tool call (OpenAI Realtime, Grok), whose `profile` is the user's words,
+  resolved by `ActiveProfiles.resolve`;
+- hand-off words that `read_switch_request` recognises (GPT-Live, and any provider's `delegate`
+  text), below;
 - Discord `/duplex profile <name>`, which autocompletes the profiles the caller may use and replies
-  privately: `switched_to`, or, when no live conversation was notified, that it applies next time;
+  privately: `switched_to`, or, when no live voice conversation took the switch, that it applies next
+  time;
 - the web page's `{"type": "profile", "name": ...}` text frame.
 
 Names resolve as Hermes Bot Mode resolves Bot names: an exact profile name first, then an alias,
-longest match first. A name that fits several profiles or none gets `which_profile`, listing the
-profiles the speaker may use; the tool, the Discord command, and the voice path all read the name as
-a spoken switch request, so they resolve it the same way. The web frame names a profile exactly. A
-profile the person may not use gets `switch_refused`, and the active one `already_active`.
+longest match first (`switching.resolve_profile`). Every path uses it, the web frame and the tool
+included, so each accepts aliases. Words that name no single profile get `which_profile`, listing the
+profiles the speaker may use; a profile the person may not use gets `switch_refused`, and the active
+one `already_active` (`notices.switch_reply` words all three).
 
-Each session subscribes to the store for every person it hears and for the conversation's signed-in
-`person`, until it ends. On a switch, wherever it was made, the session moves its prompt context to
-the new profile and announces `switched_to` ("You're now talking to stock-picker."). The web
-conversation also subscribes for its person and sends the page a status frame with the new profile.
+**Spoken switch requests.** `read_switch_request` looks for a switch phrase ("switch to", "talk to",
+"back to", "change to") followed by a target, a leading "the" dropped. Where the phrase stands decides
+what counts:
+
+- **Opening** what is said, or one of its sentences, after lead-ins such as "let me", "can I",
+  "please", "go", "ok", "I'd like to", or "thanks": the target is a profile's name or alias. A target
+  that fits neither asks which one is meant (`"ambiguous"`) when the rest of its clause, up to "and",
+  "then", or "so", holds at most `UNKNOWN_TARGET_MAX_WORDS` (3) words besides polite ones ("switch to
+  finance"); a longer one is an ordinary request.
+- **Anywhere else**, only an exact profile name is a target, never an alias: "should I move my
+  savings back to stocks" makes no request even with an alias "stocks".
+
+A phrase with a negation earlier in its clause ("don't switch to stocks"), one followed by "me",
+"us", or "you" ("talk to me about Tesla"), or one whose target is followed by anything other than
+polite words, "profile" or "agent", or a joined request ("switch to stocks from bonds") is no switch
+request, and the words are routed as usual. A joined request is what follows "and", "then", "so", or
+a sentence break, or, for an opening phrase, "about" ("talk to stocks about Tesla" switches and
+hands off "Tesla"). Config checks aliases with the parser's own spoken form (`switching.spoken_form`):
+each needs a word besides "the", none starts with "me", "us", or "you", none is another profile's
+name, and no two profiles share one.
+
+**Who hears a switch.** Each session subscribes to the store for every person it hears and for the
+conversation's `person`, until it ends. On a switch, wherever it was made, a session whose
+conversation still has that person present (`Conversation.present`: in the Discord voice channel, or
+the web page's signed-in person) moves its prompt context to the new profile, announces `switched_to`
+("You're now talking to stock-picker."), and reports itself live; a session the person has left
+ignores it. A Discord channel member the session has not heard yet has no subscription there, so
+their switch applies when they are first heard. The web conversation also subscribes for its person
+and sends the page a status frame with the new profile; that listener does not count as live.
+Adopting a person's unattended tasks likewise happens only while they are present.
 
 **A hand-off, step by step** (`VoiceSession._delegate`, for a `delegate` call after its receipt and
 for a live delegation's words):
 
-1. When the speaker has a held request and the words are only a yes or a no (`is_affirmative`,
-   `is_negative`), they answer the switch question; nothing is routed.
+1. When the words are only a yes or a no (`is_affirmative`, `is_negative`), they answer the
+   speaker's pending question. With none pending but one settled or ended within `LATE_ANSWER_S`
+   (30 s), they get `NO_QUESTION_PENDING` ("There's no question waiting for your answer right now.").
+   Either way nothing is routed.
 2. A switch request is carried out with its notice. Words after the target joined by "and", "then",
    "so", or a sentence break ("switch to stocks and check NVDA") are the rest of the request; when
    the switch happened or the profile was already active, the rest goes on to step 3 on the new
    profile, with no suggestion; otherwise it is dropped.
-3. Any other hand-off from the speaker first ends their hold, which then runs as it is. The request
-   is routed with the speaker's active profile. A `_control` intent is answered from the tracker.
+3. Any other hand-off from the speaker first ends their pending question unanswered. The request is
+   routed with the speaker's active profile. A `_control` intent is answered from the tracker.
 4. A suggestion for a profile the speaker may use holds the request (below). Otherwise the task runs
    at once on the active profile, in the Hermes session `duplex-<person>-<profile>`.
 
-**Held requests.** On a suggestion the session holds the request, one per speaker, and speaks
-`suggest_switch` ("That sounds like a stock-picker question. Want me to switch?"). The hold is
-settled by:
+**Questions.** A speaker has at most one yes-or-no question pending; a new one replaces the old,
+which ends unanswered. There are two kinds:
 
-- a `confirm_switch(accept)` call or a spoken yes or no: yes switches to the suggestion, then the
-  request runs there; no runs it on the active profile;
-- any other hand-off or `switch_profile` call from the same speaker, after its own switch if it makes
-  one: the held request runs on the profile active then;
-- no answer within `HOLD_TIMEOUT_S` (30 s): it runs on the active profile;
-- the session ending: it starts on the active profile and is left unattended with the session's
-  other tasks.
+- **Switch question.** On a suggestion the session holds the request and speaks `suggest_switch`
+  ("That sounds like a stock-picker question. Want me to switch?"). Yes switches to the suggestion,
+  then the request runs there; no, or ending unanswered, runs it on the active profile.
+- **Cancel question.** A cancel request whose words name another topic than the speaker's only open
+  task gets `only_one_running` ("The only one running is "…". Cancel that?"). Yes cancels that task;
+  no, or ending unanswered, leaves it running.
 
-A held request runs at its routed effort, with the model of the profile it finally runs on.
+The answer is a `confirm_switch(accept)` call (it settles either kind) or a spoken yes or no; on
+OpenAI Realtime and Grok the prompts also say to answer a yes to the cancel question with
+`cancel_task(about=<the topic>)`. A question ends unanswered on any other hand-off or `switch_profile`
+call from the same speaker (after its own switch, if it makes one; a `cancel_task` call ends a cancel
+question the same way), `QUESTION_TIMEOUT_S` (30 s) after it was spoken, or when the session ends,
+where a held request starts on the active profile and is left unattended with the session's other
+tasks. A held request runs at its routed effort, with the model of the profile it finally runs on.
+
+Questions are spoken with `say(text, expects_answer=True)`, so the model keeps them in mind for the
+answer: OpenAI's announcement response then joins the default conversation (still with tools off and
+only the instructions and the question as input) instead of `conversation: "none"`, xAI keeps the
+system item instead of deleting it, and GPT-Live's commentary is already part of its conversation.
 
 **Prompt context.** The instructions speak for one active profile at a time: the session's current
 `PromptContext` (`service.prompt_context(config, profile)`), which carries that profile's name,
 description, and `voice_context`, and which every connect and reconnect renders. It starts on the
-conversation's signed-in `person`'s active profile (web), or on `router.default_profile` when the
-conversation has none (Discord). It moves to a person's active profile when the session first hears
-that person and it differs, and to the new profile on every switch it is notified of. When it changes
-while a provider session is open:
+active profile of the conversation's `person`: the signed-in person (web), or the person who brought
+the bot in with `/duplex join` or a typed `join` (Discord); on `router.default_profile` when there is
+none. It moves to a person's active profile when the session first hears that person and it differs,
+and to the new profile on every switch it is notified of. When it changes while a provider session is
+open:
 
 | Provider | `replaces_instructions` | On a prompt-context change |
 |---|---|---|
-| OpenAI Realtime, xAI Grok | true | `update_instructions`: a `session.update` carrying only `instructions`; tools, voice, audio settings, and the conversation stay. Later announcements use the new instructions. |
+| OpenAI Realtime, xAI Grok | true | `update_instructions`: a `session.update` carrying only `instructions` and an `event_id`, meant to leave tools, voice, audio settings, and the conversation as they are. It waits up to `UPDATE_TIMEOUT_S` (5 s) for `session.updated`; an `error` naming its event id, a timeout, or the connection ending raises, the old instructions stay, and the session restarts instead. The rejection is not passed on as a provider error, so it does not count as a refused response. |
 | GPT-Live | false | The session closes the provider session and reconnects it with the new instructions and the reconnect summary (see Reconnect and re-seed). The restart counts neither as short-lived nor as a failure; Hermes tasks keep running. |
 
-A failed `update_instructions` is logged and falls back to the restart. GPT-Live can only append to
+A restart for an explicit switch happens at once. One for a person first heard (on GPT-Live, or
+after a failed update on Realtime or Grok) first waits until the call is quiet: nobody voiced for
+`RESTART_QUIET_S` (2 s, longer than the live hand-off's transcript grace), no output held or
+playing, and, where the provider emits speech events, the floor free, so it cuts off nobody's words.
+GPT-Live can only append to
 its instructions mid-call, and it drops the appends when it replaces its engine in a long call, so a
 fresh session is the reliable way to change the profile; it costs about a second of pause.
 
@@ -592,7 +642,8 @@ opening, so a provider that accepts the connection and drops it at once is not r
 
 **Discord** (`transports/discord/`). The plugin's own bot logs in with `transports.discord.bot_token_env`
 and registers `/duplex join`, `/duplex leave`, and `/duplex profile <name>` (see Active profiles and
-switching); an allowlisted person can also type `join`. It
+switching); an allowlisted person can also type `join`. The conversation's `person` is whoever
+joined it, and `present(person)` reads the channel's voice states. It
 needs the guilds, voice states, guild messages, and message content intents, and joins one voice
 channel per server. `receiver.py` is adapted from Hermes's Discord `VoiceReceiver` (attribution in
 `NOTICE`): it hooks discord.py's voice socket, removes the transport encryption (NaCl), decrypts DAVE
@@ -623,8 +674,8 @@ both ways; JSON text messages from the server are `{"type": "interrupt"}` and `{
 ...}` with transcript lines, the task list, a `message`, or `{"active_profile": str, "profiles":
 [...]}` (the person's active profile and the profiles they may use, sent on connect and after each of
 their switches from any path, and after a switch that did not happen, with the reason as `message`).
-The page sends one kind of text message, `{"type": "profile", "name": <profile>}`, from its
-**Talking to** picker. The page captures the microphone with an AudioWorklet
+The page sends one kind of text message, `{"type": "profile", "name": <profile>}` (a profile's name
+or alias), from its **Talking to** picker. The page captures the microphone with an AudioWorklet
 and keeps the token in `sessionStorage`. The server writes no access log, so a `?token=` query string
 never reaches the logs.
 

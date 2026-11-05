@@ -287,7 +287,7 @@ most 500 characters), ending with "…more in Hermes" when it was cut to 1250 ch
 
 ## Profiles
 
-Run items 16 to 19 with `gpt-live`, then `openai-realtime`, then `xai-realtime`, and note which
+Run items 16 to 19 and 24 with `gpt-live`, then `openai-realtime`, then `xai-realtime`, and note which
 provider each result is for. Start each on `general` (say "back to general" first if needed).
 
 ### 16. Switch by voice
@@ -297,6 +297,9 @@ provider each result is for. Start each on `general` (say "back to general" firs
 3. Say "switch to finance".
 4. Say "back to general and what's the weather tomorrow?"
 5. Stop the service, start it again, rejoin, and ask "what's the weather?"
+6. Say "don't switch to stocks", then "remind me to talk to Sarah tomorrow", then "should I move my
+   savings back to stocks?"
+7. Say "talk to stocks about Tesla".
 
 Expected: step 1 is confirmed aloud ("You're now talking to stock-picker.") and the log shows `switch
 of <you> to profile stock-picker: switched` and `voice instructions now speak for profile
@@ -305,7 +308,9 @@ stock-picker`; no Hermes run starts. On `openai-realtime` and `xai-realtime` the
 answers "You're already talking to stock-picker." Step 3 answers "Sorry, which agent do you mean?
 You can switch to stock-picker or general." and nothing changes. Step 4 switches to `general` and
 then runs the weather request there, with no switch question. In step 5 the request runs on
-`general`, the profile saved before the restart (`$HERMES_HOME/duplex/active_profiles.json`).
+`general`, the profile saved before the restart (`$HERMES_HOME/duplex/active_profiles.json`). In
+step 6 nothing switches: each is handed off as an ordinary request on `general` (the last may draw a
+switch question; answer no). Step 7 switches to `stock-picker` and then hands off "Tesla" there.
 
 ### 17. Switch suggestions
 
@@ -316,10 +321,12 @@ then runs the weather request there, with no switch question. In step 5 the requ
 
 Expected: each time the assistant asks "That sounds like a stock-picker question. Want me to
 switch?" and the log shows `holding a request of <you> while asking to switch to stock-picker`. On
-`openai-realtime` and `xai-realtime` the answer arrives as a `confirm_switch` call; on `gpt-live` as
-a handed-off "yes" or "no". In step 1 the switch is confirmed and the NVDA request runs on
-`stock-picker`. In step 2 it runs on `general` and nothing switches. In step 3, after 30 s, the log
-shows `did not answer the switch question` and it runs on `general`. In step 4 the NVDA request runs
+`openai-realtime` and `xai-realtime` the answer arrives as a `confirm_switch` call (on
+`openai-realtime`, "yes" must give `confirm_switch` with `accept: true`, not a `delegate` call); on
+`gpt-live` as a handed-off "yes" or "no". In step 1 the switch is confirmed and the NVDA request runs
+on `stock-picker`. In step 2 it runs on `general` and nothing switches. In step 3, 30 s after the
+question was spoken, the log shows `did not answer their question; ending it` and it runs on
+`general`. In step 4 the NVDA request runs
 on `general` without an answer, and the weather request is handled as a new request. No answer is
 ever started as a Hermes run of its own. If no question comes in step 1, record the `route` line's
 `top3` and `source`: the suggestion needs `stock-picker` at 0.85 or more and 0.2 above `general`.
@@ -347,7 +354,11 @@ the voice provider` within about a second; the pause is short and the conversati
 model remembers the recent conversation, the slow task's result is still spoken when it finishes,
 and the conversation does not end even after several switches in a row. With `openai-realtime` and
 `xai-realtime` the same switch causes no restart: the log shows no `restarting the voice provider`
-line, and no `voice provider error` follows the instructions update.
+line and no `rejected the new instructions` warning, and the switch is confirmed without a 5 s
+delay. On `xai-realtime` this checks that Grok acknowledges an instructions-only `session.update`
+with `session.updated`; if every switch logs `could not update the voice instructions; restarting
+the provider` after 5 s, it does not. After the switch, ask "what are you working on?" and start a
+task: the tools (`task_status`, `delegate`) still work.
 
 ### 20. `/duplex profile` on Discord
 
@@ -357,13 +368,20 @@ line, and no `voice provider error` follows the instructions update.
    of a profile) in a text channel while still in the call.
 3. As a person with `profiles: [general]`, run `/duplex profile stock-picker`.
 4. In Hermes, run `/duplex`.
+5. Leave the voice channel while the bot stays in it with someone else, then run `/duplex profile
+   stock-picker`.
+6. Have a third allowlisted person, who has not spoken in this call yet, join the channel, stay
+   silent, and run `/duplex profile stock-picker`. Then have them speak.
 
 Expected: autocomplete lists only the profiles you may use. Step 1 replies privately "You're now
 talking to stock-picker. You're not in a voice conversation, so it applies the next time you talk to
 me.", and step 2's request runs on `stock-picker`. The switch in step 2 replies privately "You're now
 talking to general." and the call confirms it aloud. Step 3 replies "Sorry, you don't have access to
 the stock-picker agent, so I didn't switch." Step 4 lists each person's active profile under
-`Active profiles:`.
+`Active profiles:`. Step 5 replies with the "applies the next time you talk to me" text and the call
+says nothing (the log shows `switched to stock-picker after leaving the conversation; ignored`). In
+step 6 the reply also says it applies next time, since the call has not heard them; when they speak,
+the instructions move to their profile (`voice instructions now speak for profile stock-picker`).
 
 ### 21. Web picker
 
@@ -379,12 +397,15 @@ to `general` and the page confirms the switch aloud.
 
 Two allowlisted people on one Discord call: A on `stock-picker`, B on `general`.
 
-1. Join with A speaking first, then B.
+1. A runs `/duplex join`; then A speaks, then B, with `gpt-live` and again with `openai-realtime`.
 2. A asks "how's my portfolio doing?"; then B asks "what's the weather tomorrow?"
 3. A says "back to general".
 
-Expected: in step 1 the log's `voice instructions now speak for profile` lines move to
-`stock-picker` when A is first heard and to `general` when B is. In step 2 A's request runs on
+Expected: in step 1 the voice prompt starts on `stock-picker`, the profile of A, who brought the bot
+in (no `voice instructions now speak for profile` line when A speaks), and moves to `general` when B
+is first heard. On `gpt-live` that move restarts the provider only after about 2 s of quiet
+(`restarting the voice provider for profile general` after B stops), so B's first words are not
+cut off and B's request, if any, is still handed off; on `openai-realtime` it is updated in place. In step 2 A's request runs on
 `stock-picker` and B's on `general`, each in their own Hermes session, whatever the voice prompt
 speaks for. Step 3 is confirmed aloud and changes nothing for B. This is the documented limitation:
 the prompt speaks for one profile at a time, the last one a person was first heard on or switched to.
@@ -396,4 +417,21 @@ the prompt speaks for one profile at a time, the last one a person was first hea
 3. Start a call and say anything.
 
 Expected: the person hears "You're back on general." once, when first heard, and not again later in
-the call or in the next call. The next request runs on `general`. Restore the config afterwards.
+the call, nor after another restart and call (the service rewrote `active_profiles.json` without the
+dropped profile). The next request runs on `general`. Restore the config afterwards.
+
+### 24. "Cancel that?" and late answers
+
+1. Start a slow task ("research three dividend stocks in depth"), then say "cancel the weather one".
+2. Answer "yes".
+3. Right after the cancel confirmation, say "yes" again.
+4. Start another slow task, say "cancel the weather one", and answer "no".
+5. Say "cancel the weather one" once more and say nothing for 30 seconds, then say "yes".
+
+Expected: steps 1, 4, and 5 ask "The only one running is "research three dividend stocks…". Cancel
+that?" and stop nothing yet. In step 2 the task is cancelled (`Cancelled "…"`); on `openai-realtime`
+and `xai-realtime` the yes arrives as `confirm_switch` or as `cancel_task` with the task's topic as
+`about`, on `gpt-live` as a handed-off "yes". Step 3 answers "There's no question waiting for your
+answer right now." and starts no Hermes run (the log shows `answered 'yes' after their question
+ended; not run`). In step 4 the task keeps running. In step 5 the question ends after 30 s, the task
+keeps running, and the late "yes" gets the same "no question waiting" answer.
