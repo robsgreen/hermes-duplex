@@ -236,3 +236,6 @@ Seat B: R1, R2, R3, R5, R6, R8, R11 resolved; R4 partial; Preserve held. New:
 - N2 low (run, fake) — GPT-Live: "?" counter read ~1.5 s after the yes; a model question in that window lets a stray late yes run.
 - N3 low mechanical — adapter _settle_update docstring wrong: a timed-out waiter's late session.updated confirms the next update.
 - trivial — duplex.example.yaml:77 alias comment predates R6.
+
+### User decision V6 (2026-11-05)
+Keep "ask": with one open task and words naming a different topic, nothing stops; the voice asks "The only one running is <topic>. Cancel that?".

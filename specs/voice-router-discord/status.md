@@ -167,3 +167,6 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-05 03:38 - Final re-review seat B: N1 medium (comma openings), lows. Asking user at PR gate.
 - 2026-11-05 04:13 - User: small comma fix then push. Committed (1193 default, 5 e2e real Hermes, gate clean).
 - 2026-11-05 04:15 - Pushed 21 commits (9cf9bc3..1d641d2) to PR #1 (draft) with user approval; PR title/body updated
+- 2026-11-05 04:45 - User decision V6: keep option 1 (ask). User reports PR CI failing; investigating
+- 2026-11-05 04:52 - CI check job failed on test_gpt_live_barge_in_flushes_within_one_tick: test race (playback index read after wake). Reproduced 4/15 under load; fixed test, 0/30; committed locally, awaiting push yes
+- 2026-11-05 13:35 - Pushed 5b1ab17 (CI test fix) to PR #1 with user yes
