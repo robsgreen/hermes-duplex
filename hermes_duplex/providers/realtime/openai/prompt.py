@@ -3,7 +3,9 @@
 The guide asks for short labeled sections, only those the product needs, in its order: here Role and
 Objective, Personality and Tone, Reasoning, Preambles, Verbosity, Tools, and Unclear Audio. An Active
 Agent section, which the guide does not name, follows Personality and Tone when a profile is active,
-with that profile's voice context. Rules are written as trigger, action, and exception, with few
+with that profile's voice context. A Context section, the guide's place for background, comes last
+when there is Hermes background on the agent or the person, saying that it is background and these
+instructions win. Rules are written as trigger, action, and exception, with few
 must/never/always words, since Realtime 2 follows instructions literally. Tools are named exactly as
 the session offers them.
 """
@@ -33,7 +35,8 @@ class OpenAiRealtimePrompter:
     def instructions(self, ctx: PromptContext) -> str:
         """The sections filled in for ``ctx``. Role and Objective names ``ctx.assistant_name``;
         ``ctx.persona`` replaces Personality and Tone. Only the tools the session offers for ``ctx`` are
-        named: ``switch_profile`` only when ``ctx.profiles`` names any profile."""
+        named: ``switch_profile`` only when ``ctx.profiles`` names any profile. A Context section ends
+        it when ``ctx`` carries Hermes background or notes on the person."""
         agents = blocks.agent_list(ctx.profiles)
         agents_line = f"\nHermes agents: {agents}." if agents else ""
         personality = ctx.persona or (
@@ -125,7 +128,7 @@ and how it ended, with Hermes's words in "report".
 
 # Unclear Audio
 - Only respond to clear audio.
-- {blocks.UNCLEAR_AUDIO} Do not reason, add a preamble, or call tools on unclear audio."""
+- {blocks.UNCLEAR_AUDIO} Do not reason, add a preamble, or call tools on unclear audio.{_context(ctx)}"""
 
     def result(self, report: TaskReport, cap_tokens: int) -> str:
         """``report`` as a ``task_report`` JSON object (``base.json_report``)."""
@@ -144,3 +147,15 @@ def _active_agent(ctx: PromptContext) -> str:
     agent = blocks.agent_phrase(ctx.active_profile, ctx.active_profile_description)
     voice_context = f"{ctx.voice_context.strip()}\n" if ctx.voice_context else ""
     return f"\n# Active Agent\nThe active agent is {agent}. {blocks.ACTIVE_AGENT_SCOPE}\n{voice_context}"
+
+
+def _context(ctx: PromptContext) -> str:
+    """The Context section: ``## Active Agent Background`` (``blocks.agent_background``) and ``## About
+    <person>`` (``blocks.person_background``), each paragraph a bullet, after a blank line; empty when
+    ``ctx`` carries none of them."""
+    parts = []
+    if (agent := blocks.agent_background(ctx)) is not None:
+        parts.append(f"## Active Agent Background\n- {agent}")
+    if about := blocks.person_background(ctx):
+        parts.append(f"## About {ctx.person}" + "".join(f"\n- {part}" for part in about))
+    return "".join(f"\n\n{part}" for part in ["# Context", *parts]) if parts else ""

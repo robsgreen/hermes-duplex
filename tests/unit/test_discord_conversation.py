@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import discord
@@ -14,7 +15,14 @@ from hermes_duplex.audio.frames import frame_bytes, silent_frame
 from hermes_duplex.config import AudioConfig
 from hermes_duplex.transports.base import InputFrame
 from hermes_duplex.transports.discord.bot import DiscordConversation
-from tests.fakes.fake_discord import ROB_ID, STRANGER_ID, FakeVoiceChannel, ReceiverRecorder, allowlist
+from tests.fakes.fake_discord import (
+    ALEX_ID,
+    ROB_ID,
+    STRANGER_ID,
+    FakeVoiceChannel,
+    ReceiverRecorder,
+    allowlist,
+)
 
 INPUT_RATE = 24000
 OUTPUT_RATE = 24000
@@ -105,6 +113,27 @@ async def test_present_is_whoever_is_in_the_voice_channel_now(
 
     del channel.voice_states[ROB_ID]
     assert not conversation.present("rob")
+
+
+async def test_alone_is_the_person_with_only_bots_besides_them_in_the_voice_channel(
+    conversation: DiscordConversation, channel: FakeVoiceChannel
+) -> None:
+    bot_id, other_bot_id = 1, 2
+    channel.guild.members = {bot_id: SimpleNamespace(bot=True), other_bot_id: SimpleNamespace(bot=True)}
+    channel.voice_states[bot_id] = object()
+    assert not conversation.alone("rob")
+
+    channel.voice_states[ROB_ID] = object()
+    channel.voice_states[other_bot_id] = object()
+    assert conversation.alone("rob")
+    assert not conversation.alone("alex")
+
+    channel.voice_states[STRANGER_ID] = object()  # not in the member cache: counts as a person
+    assert not conversation.alone("rob")
+    del channel.voice_states[STRANGER_ID]
+    channel.voice_states[ALEX_ID] = object()
+    channel.guild.members[ALEX_ID] = SimpleNamespace(bot=False)
+    assert not conversation.alone("rob")
 
 
 async def test_start_receives_and_plays_on_the_voice_client(

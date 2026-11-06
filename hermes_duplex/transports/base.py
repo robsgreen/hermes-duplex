@@ -60,6 +60,12 @@ class Conversation(Protocol):
         to it (web), or in its voice channel (Discord)."""
         ...
 
+    def alone(self, person: str) -> bool:
+        """Whether ``person`` is in the conversation with nobody else: signed in to it (web, where a
+        conversation is one person's), or in its voice channel where every other member is a bot
+        (Discord). Someone it cannot tell is a bot counts as somebody else."""
+        ...
+
     def frames(self) -> AsyncIterator[InputFrame]:
         """Yield one ``InputFrame`` per 20 ms tick until the conversation ends."""
         ...

@@ -31,6 +31,17 @@ class FakeVoiceClient:
         self.disconnected = True
 
 
+class FakeGuild:
+    """A guild whose member cache tests fill: ``members`` maps a member id to an object with ``bot``."""
+
+    def __init__(self, guild_id: int) -> None:
+        self.id = guild_id
+        self.members: dict[int, Any] = {}
+
+    def get_member(self, member_id: int) -> Any:
+        return self.members.get(member_id)
+
+
 class FakeVoiceChannel:
     """A voice channel whose ``connect`` attempts follow a script, and whose text chat is recorded.
 
@@ -42,7 +53,7 @@ class FakeVoiceChannel:
         self.id = channel_id
         self.name = name
         self.mention = f"<#{channel_id}>"
-        self.guild = discord.Object(guild_id)
+        self.guild = FakeGuild(guild_id)
         self.connect_results: list[BaseException | None] = []
         self.voice_clients: list[FakeVoiceClient] = []
         self.sent: list[str] = []

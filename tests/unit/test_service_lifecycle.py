@@ -7,6 +7,7 @@ import os
 import signal
 import time
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -18,7 +19,8 @@ import yaml
 from aiohttp import web
 
 from hermes_duplex import cli, service
-from hermes_duplex.config import Config, ProviderConfig, Secrets, load_config
+from hermes_duplex.config import Config, ContextKind, ProviderConfig, Secrets, load_config
+from hermes_duplex.hermes_context import HermesContextFiles
 from hermes_duplex.prompts.base import PromptContext
 from hermes_duplex.providers.base import RealtimeProvider
 from hermes_duplex.providers.fake.adapter import FakeProvider
@@ -27,7 +29,7 @@ from hermes_duplex.router.decisions import DecisionsBackend
 from hermes_duplex.router.factory import build_backends
 from hermes_duplex.router.knn import Embedder
 from hermes_duplex.service import STOP_TIMEOUT_S, DuplexService, build_service
-from hermes_duplex.tasks import TaskTracker
+from hermes_duplex.tasks import Task, TaskTracker
 from hermes_duplex.transports.discord.bot import DiscordTransport
 from hermes_duplex.transports.web.server import WebTransport
 from tests.fakes.fake_embedder import fake_embed
@@ -123,6 +125,91 @@ def test_prompt_context_comes_from_the_assistant_section_and_the_profiles(tmp_pa
         backchannel="none",
         profiles=(("general", "Anything"), ("notes", "")),
     )
+
+
+def _context_config(tmp_path: Path) -> Config:
+    """rob, the Hermes owner, and alex, with every Hermes context text on, and each file on disk."""
+    for relative, text in (
+        ("profiles/general/SOUL.md", "The general agent handles anything."),
+        ("profiles/general/memories/USER.md", "Rob lives in Lisbon."),
+    ):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text(text, encoding="utf-8")
+    return _config(
+        tmp_path,
+        hermes={"api_base": "http://127.0.0.1:9", "voice_context_files": ["soul", "user", "briefing"]},
+        people={
+            "rob": {"web_token_env": "TOKEN_ROB", "profiles": ["*"], "hermes_owner": True},
+            "alex": {"profiles": ["*"], "voice_context": "Alex is Rob's partner."},
+        },
+    )
+
+
+async def _with_briefing(config: Config) -> HermesContextFiles:
+    """The config's context files, with a briefing for general cached."""
+
+    async def write(profile: str, kind: ContextKind, source: str | None, max_chars: int) -> str:
+        return "Rob is moving house."
+
+    files = HermesContextFiles(
+        config.hermes_home, config.hermes.voice_context_files, config.hermes.voice_context_max_chars, write
+    )
+    assert await files.refresh("general", "briefing") == "rewritten"
+    return files
+
+
+def _task(number: int, person: str, text: str) -> Task:
+    moment = datetime(2026, 11, 6, tzinfo=UTC)
+    return Task(
+        number=number,
+        uuid=f"u{number}",
+        person=person,
+        profile="general",
+        effort="medium",
+        model=None,
+        text=text,
+        state="running",
+        run_id=None,
+        created_at=moment,
+        updated_at=moment,
+    )
+
+
+async def test_prompt_context_carries_the_owners_texts_only_while_they_are_alone(tmp_path: Path) -> None:
+    config = _context_config(tmp_path)
+    files = await _with_briefing(config)
+
+    alone = service.prompt_context(config, "general", "rob", True, context_files=files)
+    together = service.prompt_context(config, "general", "rob", False, context_files=files)
+
+    assert alone.hermes_soul == together.hermes_soul == "The general agent handles anything."
+    assert (alone.person, alone.hermes_user, alone.hermes_briefing) == (
+        "rob",
+        "Rob lives in Lisbon.",
+        "Rob is moving house.",
+    )
+    assert (together.person, together.hermes_user, together.hermes_briefing) == (None, None, None)
+
+
+async def test_prompt_context_never_gives_the_owners_texts_to_anyone_else(tmp_path: Path) -> None:
+    config = _context_config(tmp_path)
+    files = await _with_briefing(config)
+
+    alex = service.prompt_context(config, "general", "alex", True, context_files=files)
+
+    assert (alex.person, alex.person_voice_context) == ("alex", "Alex is Rob's partner.")
+    assert (alex.hermes_user, alex.hermes_briefing) == (None, None)
+
+
+def test_prompt_context_lists_the_newest_open_tasks_by_topic_and_profile(tmp_path: Path) -> None:
+    config = _context_config(tmp_path)
+    tasks = [_task(n, "rob", f"please check item {n}") for n in range(1, 13)]
+
+    context = service.prompt_context(config, "general", "rob", False, open_tasks=tasks)
+
+    assert context.person == "rob"
+    assert context.open_tasks == tuple((f"check item {n}", "general") for n in range(3, 13))
+    assert service.prompt_context(config, "general", None, False, open_tasks=tasks).person is None
 
 
 class _HangingCloseProvider(FakeProvider):

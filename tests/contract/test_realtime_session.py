@@ -147,6 +147,9 @@ class _QueueConversation:
     def present(self, person: str) -> bool:
         return True
 
+    def alone(self, person: str) -> bool:
+        return False
+
     async def flush_playback(self) -> None:
         self.flushes += 1
 
@@ -228,7 +231,7 @@ class _Harness:
             tracker=self.tracker,
             permissions=self._permissions,
             active_profiles=self.active_profiles,
-            prompt_context_for=lambda profile: prompt_context(self.config, profile),
+            prompt_context_for=lambda profile, *_: prompt_context(self.config, profile),
             default_profile=self.config.router.default_profile,
             clock=self.clock,
         )

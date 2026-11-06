@@ -63,6 +63,7 @@ router never picks the profile a task runs on. Full narrative: `docs/system/arch
 | Hermes client, error codes | `docs/system/architecture.md` (Dispatch to Hermes), `hermes_duplex/dispatch/hermes_api.py` |
 | Discord receive | `hermes_duplex/transports/discord/receiver.py` header, `NOTICE` |
 | Config keys | `hermes_duplex/config.py`, `duplex.example.yaml`, `README.md` (Configure) |
+| Hermes context (SOUL.md, USER.md, briefing, open tasks) | `docs/system/architecture.md` (Hermes context), `hermes_duplex/hermes_context.py` |
 | Manual checks | `docs/live-checklist.md` |
 
 ## Key Conventions
@@ -105,11 +106,12 @@ router never picks the profile a task runs on. Full narrative: `docs/system/arch
 ```bash
 uv sync --frozen                                   # install (Python 3.14)
 uv run ruff check . && uv run ruff format --check . && uv run pyright
-uv run pytest -m "not live and not e2e"            # 1210 tests: unit, contract, in-process end-to-end
-uv run pytest -m e2e -rs                           # 5 tests, real Hermes gateway; skip without `hermes` on PATH
+uv run pytest -m "not live and not e2e"            # 1285 tests: unit, contract, in-process end-to-end
+uv run pytest -m e2e -rs                           # 6 tests, real Hermes gateway; skip without `hermes` on PATH
 HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs     # real keys and WAV fixtures, spends money
 uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn
 uv run hermes-duplex doctor --config duplex.yaml
+uv run hermes-duplex voice-context show <profile> --config duplex.yaml   # what the voice model reads
 uv run hermes-duplex serve --config duplex.yaml
 ```
 
@@ -124,11 +126,12 @@ plugin.yaml, __init__.py      Hermes manifest and entry point (repo root is the 
 duplex.example.yaml           documented example config
 hermes_duplex/
   plugin.py                   register(ctx): /duplex, `hermes duplex`, the duplex gateway platform
-  cli.py, doctor.py           serve | eval-router | doctor
+  cli.py, doctor.py           serve | eval-router | doctor | voice-context show/refresh
   config.py                   duplex.yaml loading and validation
   service.py                  build_service, DuplexService
   session.py                  VoiceSession
   tasks.py                    TaskTracker (+ $HERMES_HOME/duplex/tasks.jsonl)
+  hermes_context.py           SOUL.md, USER.md, briefing for the voice prompt (+ duplex/voice_context/)
   people.py                   PermissionChecker
   profiles.py                 ActiveProfiles (+ $HERMES_HOME/duplex/active_profiles.json)
   switching.py                switch-request parser, yes/no answers

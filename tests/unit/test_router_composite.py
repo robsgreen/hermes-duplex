@@ -154,7 +154,7 @@ async def test_choices_always_include_every_profile_and_control(stub: _StubBacke
     assert [spec.name for spec in stub.configured] == ["stock-picker", "general", CONTROL_PROFILE]
     control = stub.configured[-1]
     assert isinstance(control, ControlSpec)
-    assert control.description == "status or cancel of running voice tasks"
+    assert control.description == "progress of a task already running, or cancelling it"
     assert control.examples == (
         "what are you working on",
         "any updates",

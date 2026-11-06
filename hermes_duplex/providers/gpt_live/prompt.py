@@ -47,7 +47,8 @@ class GptLivePrompter:
     def instructions(self, ctx: PromptContext) -> str:
         """The template filled in for ``ctx``. The opening line names ``ctx.assistant_name``;
         ``ctx.persona`` replaces the persona lines after it; an "Active agent" paragraph with the
-        active profile's voice context follows them when ``ctx.active_profile`` is set."""
+        active profile's voice context follows them when ``ctx.active_profile`` is set, then the
+        Hermes background on the agent and the person, when ``ctx`` carries any."""
         persona = ctx.persona or (
             "Be calm, friendly, clear, and direct, not overly cheerful.\n"
             "Speak warmly and naturally, at an unhurried pace.\n"
@@ -63,7 +64,7 @@ You are {ctx.assistant_name}, a voice assistant for the people on this call.
 {blocks.SEVERAL_PEOPLE}
 {blocks.SPOKEN_STYLE}
 {blocks.UNCLEAR_AUDIO}
-{_active_agent(ctx)}
+{_active_agent(ctx)}{_background(ctx)}
 Backchannel policy: {_BACKCHANNEL_POLICIES[ctx.backchannel]}
 
 Interruption policy: Stop speaking when the user interrupts. Listen to what they say.
@@ -107,6 +108,18 @@ def _active_agent(ctx: PromptContext) -> str:
     agent = blocks.agent_phrase(ctx.active_profile, ctx.active_profile_description)
     voice_context = f"{ctx.voice_context.strip()}\n" if ctx.voice_context else ""
     return f"\nActive agent: {agent}. {blocks.ACTIVE_AGENT_SCOPE}\n{voice_context}"
+
+
+def _background(ctx: PromptContext) -> str:
+    """The "Agent background" paragraph (``blocks.agent_background``) and the "About <person>"
+    paragraph (``blocks.person_background``), each line ending in a newline and each paragraph's first
+    line blank; empty when ``ctx`` carries none of them."""
+    paragraphs = []
+    if (agent := blocks.agent_background(ctx)) is not None:
+        paragraphs.append(f"Agent background: {agent}\n")
+    if about := blocks.person_background(ctx):
+        paragraphs.append(f"About {ctx.person}:\n" + "".join(f"{part}\n" for part in about))
+    return "".join(f"\n{paragraph}" for paragraph in paragraphs)
 
 
 def frame_result(profile: str, text: str, cap_tokens: int) -> str:

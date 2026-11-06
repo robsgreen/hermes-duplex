@@ -33,8 +33,18 @@ CONTEXT = PromptContext(
         "Say tickers letter by letter (NVDA as N-V-D-A).\n"
         "Confirm before handing off any request to buy or sell.\n"
     ),
+    hermes_soul=(
+        "The stock-picker agent manages Rob's portfolio. It reads live prices, researches companies, and "
+        "places trades only after Rob confirms.\nHand it anything about holdings, prices, or trades."
+    ),
+    person="rob",
+    person_voice_context='Rob likes short answers and calls the portfolio "the book".',
+    hermes_user="Rob lives in Lisbon and works as a software engineer. Address him as Rob.",
+    hermes_briefing="Rob is rebalancing toward index funds this month. His tax filing is due on the 15th.",
+    open_tasks=(("how is my portfolio doing", "stock-picker"), ("book a table for Friday", "general")),
 )
-"""The example config's deployment, with the default assistant, while stock-picker is active."""
+"""The example config's deployment, with the default assistant, while stock-picker is active and rob,
+the Hermes owner, is alone on the call with two tasks running, with every Hermes context text."""
 
 
 def _bound_prompter(name: str) -> VoicePrompter:

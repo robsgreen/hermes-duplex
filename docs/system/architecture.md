@@ -17,6 +17,7 @@ switch, but never picks the profile.
 | `hermes_duplex/router/` | `CompositeRouter` (`composite.py`: both paths, deadline, circuit breaker, effort, switch suggestion, `_control`, model table, decision log) over the `knn`, `decisions`, and `jev` backends; `factory.py` builds them from config; `eval.py` scores them. |
 | `hermes_duplex/dispatch/hermes_api.py` | `HermesApiClient` for `/p/<profile>/v1/runs`: start, follow, stop. |
 | `hermes_duplex/tasks.py` | `TaskTracker` and its `$HERMES_HOME/duplex/tasks.jsonl` history. |
+| `hermes_duplex/hermes_context.py` | `HermesContextFiles`: each profile's `SOUL.md`, `USER.md`, and briefing for the voice prompt, Hermes's rewrites of them cached under `$HERMES_HOME/duplex/voice_context/`, and their background refreshes; `HermesWriter` asks the profile through the API server. |
 | `hermes_duplex/people.py` | `PermissionChecker`: Discord ids and web tokens to people, and who may use which profile. |
 | `hermes_duplex/profiles.py` | `ActiveProfiles`: each person's active profile, its default, `$HERMES_HOME/duplex/active_profiles.json`, and switch notifications. |
 | `hermes_duplex/switching.py` | Pure text helpers: `read_switch_request` (a spoken switch request and any request after it) and `is_affirmative` / `is_negative` (a short yes or no). |
@@ -25,7 +26,7 @@ switch, but never picks the profile.
 | `hermes_duplex/transports/` | Sources of conversations (`Transport`, `Conversation`, `InputFrame` in `base.py`): the Discord bot (`discord/`) and the web page and `/ws` (`web/`). |
 | `hermes_duplex/config.py` | Loads and validates `duplex.yaml`, failing closed; secrets come only from the env vars it names. |
 | `hermes_duplex/plugin.py` | `register(ctx)`: `/duplex`, `hermes duplex`, and the in-gateway lifecycle. |
-| `hermes_duplex/cli.py`, `doctor.py` | `hermes-duplex serve`, `eval-router`, and `doctor`, the same for `hermes duplex`; `doctor` holds the checks. |
+| `hermes_duplex/cli.py`, `doctor.py` | `hermes-duplex serve`, `eval-router`, `doctor`, and `voice-context show` / `refresh`, the same for `hermes duplex`; `doctor` holds the checks. |
 
 ## Layers
 
@@ -67,7 +68,8 @@ Four layers sit around the session core, each behind a small interface:
   A conversation yields 20 ms `InputFrame`s (mono PCM16 at the provider's input rate, the people
   voiced in that tick, and `t_ms`, which is informational: the session keys attribution by its own
   input timeline per provider session), plays mono PCM16 as it arrives, flushes playback within one
-  20 ms tick, and shows transcript and task updates where it has a screen. Output pacing is the
+  20 ms tick, shows transcript and task updates where it has a screen, and tells whether a person
+  is in it (`present`) and whether they are there with nobody else (`alone`). Output pacing is the
   session's alone (see Interruptions).
 - **Provider** (`providers/base.py`). A `RealtimeProvider` opens a provider session, takes audio,
   and yields normalized events: `SessionReady`, `SpeechStarted`, `SpeechStopped`, `ResponseStarted`,
@@ -262,6 +264,8 @@ score is left out and the choice answer still counts; only a refused choice ques
 path.
 
 The choices are every configured profile plus `_control`, whatever the speaker may use. `_control`
+is described as "progress of a task already running, or cancelling it" (`CONTROL_DESCRIPTION`, worded
+so that a new request does not read as one) and
 holds built-in status phrases ("what are you working on", "any updates", "how's that task going") and
 cancel phrases ("cancel that", "stop that task", "never mind"), plus `router.control_examples`.
 
@@ -450,27 +454,83 @@ answer: OpenAI's announcement response then joins the default conversation (stil
 only the instructions and the question as input) instead of `conversation: "none"`, xAI keeps the
 system item instead of deleting it, and GPT-Live's commentary is already part of its conversation.
 
-**Prompt context.** The instructions speak for one active profile at a time: the session's current
-`PromptContext` (`service.prompt_context(config, profile)`), which carries that profile's name,
-description, and `voice_context`, and which every connect and reconnect renders. It starts on the
-active profile of the conversation's `person`: the signed-in person (web), or the person who brought
-the bot in with `/duplex join` or a typed `join` (Discord); on `router.default_profile` when there is
-none. It moves to a person's active profile when the session first hears that person and it differs,
-and to the new profile on every switch it is notified of. When it changes while a provider session is
-open:
+**Prompt context.** The instructions speak for one active profile and to one person at a time: the
+session's current `PromptContext` (`service.prompt_context(config, profile, person, person_alone)`),
+which carries that profile's name, description, `voice_context`, and Hermes context, and what is known
+about the person (see Hermes context below). Every connect and reconnect builds it afresh, re-reading
+Hermes's files and the person's open tasks, and renders it. It starts on the conversation's `person`
+and their active profile: the signed-in person (web), or the person who brought the bot in with
+`/duplex join` or a typed `join` (Discord); on `router.default_profile` and no person when there is
+none. It moves to a person and their active profile when the session first hears that person, and to
+the switching person and their new profile on every switch it is notified of. On every input frame
+the session also checks whether that person is alone in the conversation (`Conversation.alone`: the
+signed-in person on the web; on Discord, in the voice channel with only bots, a member missing from
+the guild's member cache counting as a person); when that flips, the context is built again. And on
+every task change it sends the conversation's user interface, it builds the context again for the
+open tasks. A rebuilt context that renders the same instructions changes nothing; on GPT-Live, one
+that differs only in the open tasks changes nothing either, since a restart is not worth it (the
+spoken notices tell of task changes, and the next restart or reconnect lists them). When it changes
+while a provider session is open:
 
 | Provider | `replaces_instructions` | On a prompt-context change |
 |---|---|---|
 | OpenAI Realtime, xAI Grok | true | `update_instructions`: a `session.update` carrying only `instructions` and an `event_id`, meant to leave tools, voice, audio settings, and the conversation as they are. It waits up to `UPDATE_TIMEOUT_S` (5 s) for `session.updated`; an `error` naming its event id, a timeout, or the connection ending raises, the old instructions stay, and the session restarts instead. The rejection is not passed on as a provider error, so it does not count as a refused response. |
 | GPT-Live | false | The session closes the provider session and reconnects it with the new instructions and the reconnect summary (see Reconnect and re-seed). The restart counts neither as short-lived nor as a failure; Hermes tasks keep running. |
 
-A restart for an explicit switch happens at once. One for a person first heard (on GPT-Live, or
-after a failed update on Realtime or Grok) first waits until the call is quiet: nobody voiced for
+A restart for an explicit switch, or for someone joining the owner, happens at once. One for a person
+first heard or for the owner alone again (on GPT-Live, or after a failed update on Realtime or Grok)
+first waits until the call is quiet: nobody voiced for
 `RESTART_QUIET_S` (2 s, longer than the live hand-off's transcript grace), no output held or
 playing, and, where the provider emits speech events, the floor free, so it cuts off nobody's words.
 GPT-Live can only append to
 its instructions mid-call, and it drops the appends when it replaces its engine in a long call, so a
 fresh session is the reliable way to change the profile; it costs about a second of pause.
+
+**Hermes context.** `hermes_context.HermesContextFiles` reads, for the active profile, the kinds
+`hermes.voice_context_files` lists: `soul` (`SOUL.md`), `user` (`memories/USER.md`), and `briefing`.
+A duplex profile's name is its Hermes profile's: `default` reads `$HERMES_HOME/SOUL.md` and
+`$HERMES_HOME/memories/USER.md`, any other `$HERMES_HOME/profiles/<name, lowercased>/` (config
+requires Hermes profile ids when the feature is on). `prompt_context` puts in:
+
+| Field | From | When |
+|---|---|---|
+| `hermes_soul` | the active profile's `SOUL.md`, as Hermes rewrote it for voice, or the file cut to size | `soul` listed |
+| `person`, `person_voice_context` | `people.<p>.voice_context` | the context has a person |
+| `hermes_user` | the active profile's `USER.md`, rewritten or cut to size | `user` listed, the person is the `hermes_owner`, and alone |
+| `hermes_briefing` | the active profile's briefing on the owner's projects and priorities | `briefing` listed, the person is the owner, and alone |
+| `open_tasks` | the person's queued and running tasks, as (topic, profile), the newest `OPEN_TASKS_MAX` (10) | the context has a person |
+
+`person` is set only when one of the person's fields has something. Each prompter renders them once,
+as data (`blocks.agent_background`, `blocks.person_background`: an intro line from `prompts/blocks.py`,
+then the text between `<agent_background>`, `<owner_background>`, `<owner_briefing>`, or
+`<open_tasks>` tags, a closing tag inside defused); the intro says the instructions win where the
+background differs. GPT-Live: `Agent background:` and `About <person>:` paragraphs after the active
+agent; OpenAI Realtime: a `# Context` section last, with `## Active Agent Background` and `## About
+<person>` (the guide's place for background, saying which source is authoritative); Grok: a `##
+Background` section after Objective (the guide's small facts section near Role & Persona). With the
+largest caps (`voice_context_max_chars` at most 8000, the briefing 6000, each `voice_context` 2000,
+ten tasks), GPT-Live's instructions stay within its 16,384 tokens at `CHARS_PER_TOKEN`.
+
+Hermes writes the texts the prompt prefers: `HermesWriter` starts a run on the profile itself
+(`/p/<profile>/v1/runs`, the profile's key, its default model, effort `low`) in a session of its own,
+`duplex-voice-context-<profile>-<kind>` or `duplex-voice-briefing-<profile>`, asking for short plain
+sentences within the cap, no tool or formatting rules, no secrets, and the text alone
+(`hermes_context.writing_prompt`; a source file is sent between `<document>` markers as data). The
+result, cut to its cap, is cached atomically at `$HERMES_HOME/duplex/voice_context/<profile>.<kind>.md`,
+then its `.json` sidecar (`source_sha256`, null for the briefing; `written_sha256`; `written_at`). A
+`read` of `soul` or `user` uses the cache while `source_sha256` matches the file (the cache's own hash
+differing from `written_sha256` marks a hand edit, which is used and kept); otherwise it returns the
+file cut at a line or sentence end, and starts a background refresh. A briefing is used at any age,
+none until one exists; one older than `briefing_refresh_h` and not edited is refreshed in the
+background. Refreshes run one at a time per text, time out after `WRITE_TIMEOUT_S` (300 s, stopping
+the run), and after a failure wait `RETRY_AFTER_S` (600 s) before trying the same source again; a
+call never waits for one, and a result is used from the next `read`. The service starts refreshes of
+every profile's files, and of the briefing on the owner's active profile, when it starts, and cancels
+those still running when it stops. Files are re-read only when their modification time or size
+changes. A missing file is logged once (info), an unreadable one once (warning), a cut one once with
+its sizes; no text is ever logged. `hermes-duplex voice-context show` renders the instructions as if
+the owner were alone, with no rewrite started; `voice-context refresh [--force]` runs the refreshes
+now (`--force` replacing current texts and hand edits).
 
 **Limitation: one prompt per call.** Hand-offs always run on the speaker's own active profile, but the
 voice prompt speaks for one profile. On a Discord call with two people on different active profiles,
@@ -571,15 +631,17 @@ from its `Dialect` (OpenAI: `OpenAiRealtimePrompter` in `providers/realtime/open
 the golden tests read it from providers the registry builds. The fake provider defaults to
 `GptLivePrompter` and accepts any. The session asks `provider.prompter` for the instructions (from
 `provider.prompt_context`), each result, and the reconnect summary, and never looks at the
-provider's name. `service.prompt_context(config, profile)` builds a `PromptContext` from the
-`assistant` section (`name`, `persona`, `backchannel`), the profiles' names and descriptions, and the
-active profile with its description and `voice_context`; the session keeps one current context per
-conversation (see Active profiles and switching).
+provider's name. `service.prompt_context(config, profile, person, person_alone)` builds a
+`PromptContext` from the `assistant` section (`name`, `persona`, `backchannel`), the profiles' names
+and descriptions, the active profile with its description and `voice_context`, and the Hermes context
+and what is known about the person; the session keeps one current context per conversation (see
+Active profiles and switching, Prompt context and Hermes context).
 
 Each prompter renders the active profile once, in its own format, with only that profile's
 `voice_context`: GPT-Live an `Active agent:` paragraph after the persona lines, OpenAI Realtime an
 `# Active Agent` section, and Grok a paragraph in `## Objective` that frames the voice context as
-rules about the words it speaks, as xAI's guide asks. Every prompt says that hand-offs go to the active
+rules about the words it speaks, as xAI's guide asks. The Hermes background and the person's notes and
+open tasks follow it, as data (see Hermes context). Every prompt says that hand-offs go to the active
 agent until the user switches, to switch only when the user asks, and that only a yes or no answers a
 switch question (`blocks.ACTIVE_AGENT_SCOPE`, `SWITCH_WHEN_ASKED`, `SWITCH_QUESTION`). The tool-style
 prompts name `switch_profile` and `confirm_switch`; GPT-Live's lists "Agents" as a backend capability

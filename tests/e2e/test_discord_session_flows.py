@@ -165,7 +165,7 @@ async def test_request_is_credited_to_who_talked_most_and_a_stranger_is_never_he
         tracker=tracker,
         permissions=permissions,
         active_profiles=active_profiles,
-        prompt_context_for=lambda profile: prompt_context(config, profile),
+        prompt_context_for=lambda profile, *_: prompt_context(config, profile),
         default_profile=config.router.default_profile,
     )
     conversation.start()

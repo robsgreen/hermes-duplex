@@ -119,11 +119,16 @@ async def test_rob_switches_to_stock_picker_by_voice_and_his_portfolio_runs_ther
         f'Started "{PORTFOLIO}" on the stock-picker agent.'
     )
     # The voice prompt follows the switch: it started with general's voice context and was replaced
-    # in place with stock-picker's.
+    # in place with stock-picker's; task starts and ends replaced it too, to list rob's open tasks.
     [connect] = since("connect")
     assert "Covers everyday questions such as the weather" in connect["instructions"]
-    [update] = since("update_instructions")
-    assert "Covers Rob's portfolio, holdings, and trades" in update["text"]
+    updates = [update["text"] for update in since("update_instructions")]
+    switched = next(
+        n for n, text in enumerate(updates) if "Covers Rob's portfolio, holdings, and trades" in text
+    )
+    assert all("Covers everyday questions" in text for text in updates[:switched])
+    assert all("Covers Rob's portfolio" in text for text in updates[switched:])
+    assert any(f'"{PORTFOLIO}" on the stock-picker agent' in text for text in updates[switched:])
 
     assert [result["text"] for result in results[calls_before["deliver_result"] :]] == [
         frame_result("general", GENERAL_REPLY, RESULT_CAP_TOKENS),

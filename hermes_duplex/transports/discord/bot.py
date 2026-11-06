@@ -162,6 +162,21 @@ class DiscordConversation:
             for member_id in self._channel.voice_states
         )
 
+    def alone(self, person: str) -> bool:
+        """Whether ``person`` is in the voice channel and every other member is a bot, as the channel's
+        voice states and the guild's member cache tell; a member missing from the cache counts as a
+        person."""
+        found = False
+        for member_id in self._channel.voice_states:
+            entry = self._permissions.by_discord_id(member_id)
+            if entry is not None and entry.name == person:
+                found = True
+                continue
+            member = self._channel.guild.get_member(member_id)
+            if member is None or not member.bot:
+                return False
+        return found
+
     def start(self) -> None:
         """Start receiving and playing in the channel. Call it once, on the event loop."""
         self._attach(self._voice_client)

@@ -89,6 +89,10 @@ class WebConversation:
         """Whether ``person`` is the signed-in person."""
         return person == self.person
 
+    def alone(self, person: str) -> bool:
+        """Whether ``person`` is the signed-in person: a web conversation is one person's."""
+        return person == self.person
+
     async def frames(self) -> AsyncIterator[InputFrame]:
         """Yield the input frames in order until the socket closes. Iterate it from one consumer."""
         while (frame := await self._frames.get()) is not None:

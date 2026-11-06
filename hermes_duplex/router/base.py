@@ -21,7 +21,7 @@ ControlIntent = Literal["status", "cancel"]
 RouteSource = Literal["decisions", "jev", "knn", "fallback"]
 """What settled a decision: a backend by name, or the fallback when no backend answered confidently."""
 
-CONTROL_DESCRIPTION = "status or cancel of running voice tasks"
+CONTROL_DESCRIPTION = "progress of a task already running, or cancelling it"
 """The fixed description of the ``_control`` choice."""
 
 BUILTIN_CONTROL_EXAMPLES: Mapping[ControlIntent, tuple[str, ...]] = {

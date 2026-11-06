@@ -66,6 +66,9 @@ class _MemoryConversation:
     def present(self, person: str) -> bool:
         return person not in self.departed
 
+    def alone(self, person: str) -> bool:
+        return False
+
     async def flush_playback(self) -> None:
         pass
 
@@ -189,7 +192,7 @@ class _Harness:
             tracker=self.tracker,
             permissions=self.permissions,
             active_profiles=self.active_profiles,
-            prompt_context_for=lambda profile: service.prompt_context(self.config, profile),
+            prompt_context_for=lambda profile, *_: service.prompt_context(self.config, profile),
             default_profile=self.config.router.default_profile,
         )
         self._run = asyncio.create_task(session.run())

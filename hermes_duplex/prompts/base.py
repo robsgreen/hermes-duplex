@@ -55,6 +55,32 @@ class PromptContext:
     """The ``active_profile``'s config ``voice_context``: what it covers, what to always hand off, and
     how to say its words. None for none. No other profile's voice context ever reaches a prompt."""
 
+    hermes_soul: str | None = None
+    """The ``active_profile``'s Hermes ``SOUL.md``, as Hermes rewrote it for voice or cut to size:
+    background on the agent, data rather than instructions. None for none."""
+
+    person: str | None = None
+    """The person the conversation is with, whom the fields below describe; None when none of them
+    has anything to say."""
+
+    person_voice_context: str | None = None
+    """``person``'s config ``voice_context``: notes the owner wrote about them. None for none."""
+
+    hermes_user: str | None = None
+    """The ``active_profile``'s Hermes ``memories/USER.md`` about ``person``, its owner, as Hermes
+    rewrote it for voice or cut to size: data rather than instructions. Set only while the owner is
+    alone in the conversation; None otherwise."""
+
+    hermes_briefing: str | None = None
+    """The briefing on ``person``'s current projects and priorities that the ``active_profile`` wrote
+    from its memory: data rather than instructions. Set only while ``person`` is the owner and alone in
+    the conversation; None otherwise."""
+
+    open_tasks: tuple[tuple[str, str], ...] = ()
+    """``person``'s queued and running tasks as (topic, profile), oldest first, at most
+    ``OPEN_TASKS_MAX``. It may lag behind the tracker on providers that cannot replace their
+    instructions in place."""
+
 
 @dataclass(frozen=True)
 class TaskReport:
@@ -94,6 +120,10 @@ class VoicePrompter(Protocol):
         speaker is ``"user"`` or ``"assistant"``; ``tasks`` are the Hermes tasks still open.
         """
         ...
+
+
+OPEN_TASKS_MAX = 10
+"""Most of a person's open tasks a prompt lists: the newest ones."""
 
 
 CHARS_PER_TOKEN = 2.5

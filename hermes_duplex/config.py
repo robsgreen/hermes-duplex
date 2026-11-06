@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -41,7 +41,24 @@ _RESERVED_PROFILE_NAMES = {
 """Names no profile may use, each with why."""
 
 VOICE_CONTEXT_MAX_CHARS = 2000
-"""Longest ``profiles.<p>.voice_context`` allowed; it goes into every voice prompt for that profile."""
+"""Longest ``profiles.<p>.voice_context`` or ``people.<p>.voice_context`` allowed; each goes into the
+voice prompt while its profile is active, or while the conversation is with its person."""
+
+type ContextKind = Literal["soul", "user", "briefing"]
+"""A Hermes context file: a profile's ``SOUL.md`` (``soul``), its notes on its owner,
+``memories/USER.md`` (``user``), or the briefing on the owner's current projects and priorities that
+Hermes writes from its memory (``briefing``)."""
+
+HERMES_CONTEXT_FILES: tuple[ContextKind, ...] = ("soul", "user", "briefing")
+"""What ``hermes.voice_context_files`` may list."""
+
+OWNER_CONTEXT_FILES: frozenset[ContextKind] = frozenset({"user", "briefing"})
+"""The context files about the Hermes owner, which go into the voice prompt only while the owner is
+alone in the conversation."""
+
+HERMES_CONTEXT_MAX_CHARS_LIMIT = 8000
+"""Largest ``hermes.voice_context_max_chars`` allowed, so every context file with every voice context
+still fits GPT-Live's 16,384-token instructions."""
 
 CONFIG_ENV = "HERMES_DUPLEX_CONFIG"
 HERMES_HOME_ENV = "HERMES_HOME"
@@ -52,6 +69,10 @@ _SECRET_KEYS = frozenset({"api_key", "token", "bot_token", "key", "web_token", "
 _LITERAL_SECRET = "secrets must not be written in config; name the env var that holds it with a '_env' key"
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _DISCORD_ID = re.compile(r"^[0-9]+$")
+
+HERMES_PROFILE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+"""A Hermes profile id, which names its directory under ``$HERMES_HOME/profiles/``; Hermes matches
+names lowercased."""
 
 
 class ConfigError(Exception):
@@ -114,6 +135,17 @@ class HermesConfig:
     profile_keys_env: Mapping[str, str]
     """Profile name → env var holding that profile's ``API_SERVER_KEY``. A profile missing here
     cannot run tasks ("not configured")."""
+
+    voice_context_files: frozenset[ContextKind] = frozenset()
+    """Which of each profile's Hermes files go into the voice prompt, from ``HERMES_CONTEXT_FILES``;
+    empty for none."""
+
+    voice_context_max_chars: int = 4000
+    """Most characters of ``SOUL.md`` and of ``USER.md`` the voice prompt carries; a longer one is cut
+    short. The briefing has its own fixed cap."""
+
+    briefing_refresh_h: float = 6.0
+    """Hours after which a briefing is old enough for Hermes to write it again, in the background."""
 
 
 @dataclass(frozen=True)
@@ -268,6 +300,14 @@ class PersonConfig:
     """The profile the person starts on, one they may use; None leaves it to the router's
     ``default_profile`` or their first permitted profile."""
 
+    hermes_owner: bool = False
+    """Whether the person is Hermes's owner, whom each profile's ``memories/USER.md`` describes; at
+    most one person is."""
+
+    voice_context: str | None = None
+    """Text, at most ``VOICE_CONTEXT_MAX_CHARS`` long, that the voice prompt carries about the person
+    while the conversation is with them. None for none."""
+
 
 @dataclass(frozen=True)
 class DiscordConfig:
@@ -383,7 +423,9 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
     a key is unknown or has the wrong type, a name is not one of the allowed values, a person or the
     router names an undefined profile, a person may use no profile or starts on one they may not use,
     two profiles share an alias, an alias is or starts with another profile's name or starts with
-    "me", "us", or "you", a secret is written literally, or a named env var is unset or empty.
+    "me", "us", or "you", two people are the Hermes owner, ``hermes.voice_context_files`` names an
+    unknown file, lists ``user`` or ``briefing`` with no owner, or is set while a profile name is no
+    Hermes profile id, a secret is written literally, or a named env var is unset or empty.
     Unset env vars are checked last: when only they are wrong, the error is a ``MissingEnvError`` that
     reports the first one, in file order, and lists them all.
     """
@@ -405,10 +447,18 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
     root = _Section(raw if raw is not None else {}, "", env_refs)
     profiles = _profiles(root.section("profiles", required=True, by_name=True))
     config_dir = config_path.parent
-    hermes = _hermes(root.section("hermes", required=True), profiles)
+    hermes_section = root.section("hermes", required=True)
+    hermes = _hermes(hermes_section, profiles)
     provider = _provider(root.section("provider", required=True), config_dir)
     router = _router(root.section("router", required=True), profiles)
     people = _people(root.section("people", by_name=True), profiles)
+    owner_files = sorted(hermes.voice_context_files & OWNER_CONTEXT_FILES)
+    if owner_files and not any(p.hermes_owner for p in people.values()):
+        raise ConfigError(
+            hermes_section.child("voice_context_files"),
+            f"lists {' and '.join(owner_files)}, but no person has hermes_owner: true, "
+            "so it would never be used",
+        )
     transports = _transports(root.section("transports"))
     audio = _audio(root.section("audio"))
     tasks = _tasks(root.section("tasks"))
@@ -499,15 +549,16 @@ def _profiles(section: _Section) -> Mapping[str, ProfileConfig]:
     return MappingProxyType(profiles)
 
 
-def _voice_context(profile: _Section) -> str | None:
-    value = profile.text("voice_context")
+def _voice_context(section: _Section) -> str | None:
+    """The ``voice_context`` of a profile or person ``section``, checked; None when absent."""
+    value = section.text("voice_context")
     if value is None:
         return None
     if not value.strip():
-        raise ConfigError(profile.child("voice_context"), "must contain more than whitespace")
+        raise ConfigError(section.child("voice_context"), "must contain more than whitespace")
     if len(value) > VOICE_CONTEXT_MAX_CHARS:
         raise ConfigError(
-            profile.child("voice_context"),
+            section.child("voice_context"),
             f"is {len(value)} characters; at most {VOICE_CONTEXT_MAX_CHARS} are allowed",
         )
     return value
@@ -530,8 +581,38 @@ def _hermes(section: _Section, profiles: Mapping[str, ProfileConfig]) -> HermesC
             raise ConfigError(keys.child(profile), f"profile '{profile}' is not defined under profiles")
         profile_keys_env[profile] = keys.required_env_name(profile)
     keys.done()
+    files = section.texts("voice_context_files")
+    for kind in files:
+        if kind not in HERMES_CONTEXT_FILES:
+            raise ConfigError(
+                section.child("voice_context_files"),
+                _not_allowed("Hermes context file", kind, frozenset(HERMES_CONTEXT_FILES)),
+            )
+    if files:
+        for name in profiles:
+            if not HERMES_PROFILE_NAME.match(name.lower()):
+                raise ConfigError(
+                    section.child("voice_context_files"),
+                    f"profile '{name}' is not a Hermes profile name (letters, digits, '-', '_'), "
+                    "so its files cannot be found",
+                )
+    briefing_refresh_h = section.number("briefing_refresh_h", HermesConfig.briefing_refresh_h)
+    if briefing_refresh_h <= 0:
+        raise ConfigError(section.child("briefing_refresh_h"), "must be greater than 0")
+    config = HermesConfig(
+        api_base=api_base.rstrip("/"),
+        profile_keys_env=MappingProxyType(profile_keys_env),
+        voice_context_files=frozenset(cast(tuple[ContextKind, ...], files)),
+        voice_context_max_chars=section.integer(
+            "voice_context_max_chars",
+            HermesConfig.voice_context_max_chars,
+            minimum=1,
+            maximum=HERMES_CONTEXT_MAX_CHARS_LIMIT,
+        ),
+        briefing_refresh_h=briefing_refresh_h,
+    )
     section.done()
-    return HermesConfig(api_base=api_base.rstrip("/"), profile_keys_env=MappingProxyType(profile_keys_env))
+    return config
 
 
 def _provider(section: _Section, config_dir: Path) -> ProviderConfig:
@@ -674,6 +755,7 @@ def _api_backend[C](router: _Section, name: str, backend: str, config_type: Call
 
 def _people(section: _Section, profiles: Mapping[str, ProfileConfig]) -> Mapping[str, PersonConfig]:
     people: dict[str, PersonConfig] = {}
+    owner: str | None = None
     for name in section.names():
         person = section.section(name, required=True)
         allowed = person.texts("profiles")
@@ -696,11 +778,20 @@ def _people(section: _Section, profiles: Mapping[str, ProfileConfig]) -> Mapping
                     person.child("default_profile"),
                     f"profile '{default_profile}' is not one of the person's profiles",
                 )
+        hermes_owner = person.flag("hermes_owner", False)
+        if hermes_owner:
+            if owner is not None:
+                raise ConfigError(
+                    person.child("hermes_owner"), f"only one person may be the Hermes owner, and '{owner}' is"
+                )
+            owner = name
         people[name] = PersonConfig(
             discord_id=person.discord_id("discord_id"),
             web_token_env=person.env_name("web_token_env"),
             profiles=allowed,
             default_profile=default_profile,
+            hermes_owner=hermes_owner,
+            voice_context=_voice_context(person),
         )
         person.done()
     section.done()

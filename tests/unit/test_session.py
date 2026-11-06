@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from hermes_duplex import session as session_module
 from hermes_duplex.audio.frames import silent_frame
 from hermes_duplex.config import Config, load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
+from hermes_duplex.hermes_context import HermesContextFiles
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
 from hermes_duplex.prompts.base import PromptContext, TaskReport, VoicePrompter
@@ -72,6 +74,8 @@ class _MemoryConversation:
         self.closed_reason: str | None = None
         self.departed: set[str] = set()
         """People who have left; everyone else counts as present."""
+        self.company: set[str] = set()
+        """People present besides whoever ``alone`` asks about; empty means each present person is alone."""
 
     async def frames(self) -> AsyncIterator[InputFrame]:
         for frame in self._frames:
@@ -90,6 +94,9 @@ class _MemoryConversation:
 
     def present(self, person: str) -> bool:
         return person not in self.departed
+
+    def alone(self, person: str) -> bool:
+        return self.present(person) and not self.company - {person}
 
     async def flush_playback(self) -> None:
         pass
@@ -220,10 +227,12 @@ class _Harness:
         provider: FakeProvider | None = None,
         person: str | None = None,
         conversation: _MemoryConversation | None = None,
+        prompt_context_for: Callable[[str, str | None, bool], PromptContext] | None = None,
     ) -> None:
         """Run a session on ``provider``, or else a fake provider playing ``script`` with
         ``capabilities`` and ``prompter``, in ``conversation``, or else one yielding ``frames``;
-        ``person`` is who is signed in to the conversation."""
+        ``person`` is who is signed in to the conversation. ``prompt_context_for`` defaults to the
+        service's, for the profile alone."""
         self.provider = provider or FakeProvider(script, capabilities=capabilities, prompter=prompter)
         self.conversation = conversation or _MemoryConversation(frames)
         self.conversation.person = person
@@ -236,7 +245,8 @@ class _Harness:
             tracker=self.tracker,
             permissions=self.permissions,
             active_profiles=self.active_profiles,
-            prompt_context_for=lambda profile: service.prompt_context(self.config, profile),
+            prompt_context_for=prompt_context_for
+            or (lambda profile, *_: service.prompt_context(self.config, profile)),
             default_profile=self.config.router.default_profile,
             clock=clock,
         )
@@ -1537,3 +1547,132 @@ async def test_an_adopted_run_whose_status_cannot_be_read_ends_as_news(
         assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
     finally:
         await _close(first, second)
+
+
+# --- Hermes context, presence, and open tasks in the instructions ---------------------------------
+
+OWNER_FACTS = "Rob lives in Lisbon."
+
+
+def _owner_context(harness: _Harness) -> Callable[[str, str | None, bool], PromptContext]:
+    """The service's prompt context with rob as the Hermes owner, ``USER.md`` on, and stock-picker's
+    ``USER.md`` holding ``OWNER_FACTS``, with each person's open tasks from the harness's tracker."""
+    home = harness.tmp_path / "home"
+    user_md = home / "profiles" / "stock-picker" / "memories" / "USER.md"
+    user_md.parent.mkdir(parents=True, exist_ok=True)
+    user_md.write_text(OWNER_FACTS, encoding="utf-8")
+    config = harness.config
+    config = replace(
+        config,
+        hermes=replace(config.hermes, voice_context_files=frozenset({"user"})),
+        people={**config.people, "rob": replace(config.people["rob"], hermes_owner=True)},
+    )
+    files = HermesContextFiles(home, ("user",), 4000)
+    return lambda profile, person, alone: service.prompt_context(
+        config,
+        profile,
+        person,
+        alone,
+        context_files=files,
+        open_tasks=harness.tracker.active_for(person) if person is not None else (),
+    )
+
+
+async def test_the_owners_notes_are_in_the_instructions_only_while_they_are_alone(harness: _Harness) -> None:
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start([], [], person="rob", conversation=conversation, prompt_context_for=_owner_context(harness))
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("update_instructions")) == 1)
+    conversation.company.clear()
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("update_instructions")) == 2)
+
+    [connect] = harness.sent("connect")
+    assert OWNER_FACTS in connect.args["instructions"]
+    with_alex, alone_again = harness.texts("update_instructions")
+    assert OWNER_FACTS not in with_alex
+    assert OWNER_FACTS in alone_again
+
+
+async def test_without_instruction_replacement_someone_joining_restarts_at_once_without_the_owners_notes(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)  # a quiet restart would never come
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities={"replaces_instructions": False},
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100, _voiced("rob")))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    first, second = harness.sent("connect")
+    assert OWNER_FACTS in first.args["instructions"]
+    assert OWNER_FACTS not in second.args["instructions"]
+    assert harness.sent("update_instructions") == []
+
+
+async def test_someone_elses_conversation_never_carries_the_owners_notes(harness: _Harness) -> None:
+    conversation = _MemoryConversation(_frames(200, _voiced("alex")))
+    harness.start(
+        [], [], person="alex", conversation=conversation, prompt_context_for=_owner_context(harness)
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    conversation.feed(_frames(100))
+    await asyncio.sleep(0.05)
+
+    [connect] = harness.sent("connect")
+    assert OWNER_FACTS not in connect.args["instructions"]
+    assert all(OWNER_FACTS not in text for text in harness.texts("update_instructions"))
+
+
+async def test_open_tasks_are_kept_current_in_place_where_the_provider_replaces_instructions(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(
+        RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "up 2%"}])
+    )
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        _frames(2000, _voiced("rob")),
+        person="rob",
+        prompt_context_for=_owner_context(harness),
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+    await harness.wait_for(lambda: "<open_tasks>" not in harness.texts("update_instructions")[-1])
+
+    listed = [text for text in harness.texts("update_instructions") if "<open_tasks>" in text]
+    assert listed and all('"how is my portfolio doing" on the stock-picker agent' in text for text in listed)
+    assert len(harness.sent("connect")) == 1
+
+
+async def test_open_tasks_never_restart_a_provider_that_cannot_replace_instructions(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(
+        RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "up 2%"}])
+    )
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        _frames(2000, _voiced("rob")),
+        person="rob",
+        capabilities={"replaces_instructions": False},
+        prompt_context_for=_owner_context(harness),
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+    await asyncio.sleep(0.1)
+
+    assert len(harness.sent("connect")) == 1
+    assert harness.sent("update_instructions") == []

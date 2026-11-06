@@ -477,8 +477,11 @@ async def test_the_page_picker_switches_the_live_conversation_and_the_next_reque
         profiles_shown = page.active_profiles()
 
     assert stack.said()[0] == switched_to("general")
-    [instructions] = stack.recorded("update_instructions")
-    assert "general" in instructions["text"]
+    # The switch, then the task's start and its end keep the open tasks in the instructions current.
+    switched, *task_updates = [update["text"] for update in stack.recorded("update_instructions")]
+    assert "Active agent: general" in switched and "<open_tasks>" not in switched
+    assert any('"what\'s the weather tomorrow" on the general agent' in text for text in task_updates)
+    assert "<open_tasks>" not in task_updates[-1]
     [start] = api.requests_to("POST", "/runs")
     assert start.path == "/p/general/v1/runs"
     assert start.body["session_id"] == "duplex-rob-general"

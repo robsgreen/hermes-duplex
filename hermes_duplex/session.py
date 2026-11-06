@@ -13,7 +13,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 from .audio.frames import FRAME_MS
@@ -469,18 +469,24 @@ class VoiceSession:
     reach Hermes. The model's instructions, each result, and the reconnect summary come from the
     provider's ``prompter``.
 
-    The instructions speak for one active profile at a time: the session's current prompt context
-    (``prompt_context_for`` that profile), which every connect and reconnect renders. It starts on the
-    active profile of the conversation's ``person`` (who signed in, or who started it), or on
-    ``default_profile`` when the conversation has none, and moves to a person's active profile when
-    the session first hears that person and it differs. When the context changes during a provider
-    session, a provider that ``replaces_instructions`` gets the new instructions in place
-    (``update_instructions``); any other, or one whose update fails, is restarted: closed and
-    reconnected like a provider session that ended, re-seeded with the reconnect summary, without
-    counting toward the short-session limit. A restart for a person first heard waits until the call
-    is quiet (``RESTART_QUIET_S``), so it does not cut off what they are saying. Hermes tasks keep
-    running through it. Hand-offs always run on the speaker's own active profile, whatever the
-    instructions speak for.
+    The instructions speak for one active profile and one person at a time: the session's current
+    prompt context (``prompt_context_for`` that profile, that person, and whether they are alone in
+    the conversation, ``Conversation.alone``), which every connect and reconnect builds afresh, so it
+    re-reads Hermes's context files. It starts on the conversation's ``person`` (who signed in, or who
+    started it) and their active profile, or on ``default_profile`` and no person when the
+    conversation has none, and moves to a person and their active profile when the session first
+    hears that person, and to whoever switches. Whenever the person it speaks to stops or starts being
+    alone (someone joins or leaves), and whenever a task changes, the context is built again: the
+    Hermes owner's ``USER.md`` and briefing go in only while they are alone, and the person's open
+    tasks are listed. When the context changes during a provider session, a provider that
+    ``replaces_instructions`` gets the new instructions in place (``update_instructions``); any other,
+    or one whose update fails, is restarted: closed and reconnected like a provider session that ended,
+    re-seeded with the reconnect summary, without counting toward the short-session limit, except for
+    a change of the open tasks alone, which waits for the next restart or reconnect. A restart for a
+    person first heard, or for a person alone again, waits until the call is quiet
+    (``RESTART_QUIET_S``), so it does not cut off what they are saying; one for someone joining them
+    happens at once, so nothing meant for them alone is said. Hermes tasks keep running through it.
+    Hand-offs always run on the speaker's own active profile, whatever the instructions speak for.
 
     People switch their active profile only by asking: a ``switch_profile`` call, whose ``profile``
     is the user's words for the agent (``ActiveProfiles.resolve``), or a hand-off whose words are a
@@ -580,7 +586,7 @@ class VoiceSession:
         tracker: TaskTracker,
         permissions: PermissionChecker,
         active_profiles: ActiveProfiles,
-        prompt_context_for: Callable[[str], PromptContext],
+        prompt_context_for: Callable[[str, str | None, bool], PromptContext],
         default_profile: str,
         voice: str | None = None,
         pacer_lead_ms: int = 200,
@@ -637,9 +643,13 @@ class VoiceSession:
         self._opened_s = 0.0
         """``time.monotonic()`` when the current provider session opened."""
         person = conversation.person
-        self._prompt_context = prompt_context_for(
-            active_profiles.get(person) if person is not None else default_profile
-        )
+        self._context_profile = active_profiles.get(person) if person is not None else default_profile
+        """The profile the instructions speak for."""
+        self._context_person = person
+        """The person the instructions speak to: who the conversation is with, if anyone."""
+        self._context_alone = False
+        """Whether ``_context_person`` was alone in the conversation when the context was last built."""
+        self._prompt_context = self._current_context()
         """What the instructions should speak for now; its ``active_profile`` is never None."""
         self._rendered_context: PromptContext | None = None
         """The prompt context the open provider session's instructions were rendered from."""
@@ -695,6 +705,8 @@ class VoiceSession:
             for task in (*pumps, *self._delegations):
                 task.cancel()
             await asyncio.gather(*pumps, *self._delegations, return_exceptions=True)
+            # Ending: what follows changes the open tasks, but no instructions are updated any more.
+            self._provider_open.clear()
             await self._start_held()
             await self._tracker.leave_unattended(self._task_numbers, self._untold)
             await self._provider.close()
@@ -702,12 +714,12 @@ class VoiceSession:
     async def _connect(self, summary: str | None) -> None:
         """Open a provider session re-seeded with ``summary`` (None: a new call) on a fresh timeline.
 
-        The instructions are rendered from the current prompt context. Everything placed on the
-        previous provider session's timeline is forgotten, and work waiting for that timeline to reach
-        a point is woken to find it ended.
+        The instructions are rendered from the current prompt context, built afresh. Everything placed
+        on the previous provider session's timeline is forgotten, and work waiting for that timeline to
+        reach a point is woken to find it ended.
         """
         async with self._instructions_lock:
-            context = self._prompt_context
+            self._prompt_context = context = self._current_context()
             await self._provider.connect(self._provider.prompter.instructions(context), self._voice, summary)
             self._rendered_context = context
         async with self._input_advanced:
@@ -759,6 +771,11 @@ class VoiceSession:
                 self._last_voiced_s = time.monotonic()
             for person in frame.voiced_speakers - self._people_heard:
                 self._first_heard(person)
+            person = self._context_person
+            if person is not None and self._conversation.alone(person) != self._context_alone:
+                # Someone joined or left: what is only for the person alone leaves the instructions at
+                # once, and comes back once the call is quiet.
+                self._change_prompt_context(self._context_profile, person, when_quiet=not self._context_alone)
             if not self._provider_open.is_set():
                 continue  # reconnecting: the new provider session starts with the input after it opens
             # Placed on the provider session's own timeline: the transport's t_ms never restarts.
@@ -773,19 +790,19 @@ class VoiceSession:
     def _first_heard(self, person: str) -> None:
         """Take in ``person``, voiced for the first time in this session or for the first time since
         they were found to have left: listen for their switches, tell them when they were moved back to
-        their default, move the instructions to their active profile once the call is quiet, and adopt
-        their unattended tasks."""
+        their default, move the instructions to them and their active profile once the call is quiet,
+        and adopt their unattended tasks."""
         self._people_heard.add(person)
         self._listen_for_switches(person)
         if (fallback := self._active_profiles.fallback_pending(person)) is not None:
             self._announce(fallback_to_default(fallback))
-        self._change_prompt_context(self._active_profiles.get(person), when_quiet=True)
+        self._change_prompt_context(self._active_profiles.get(person), person, when_quiet=True)
         self._adopt_tasks(person)
 
     def _listen_for_switches(self, person: str) -> None:
         """Until the session ends, follow each switch of ``person``'s active profile made while they are
-        in the conversation: the instructions move to the new profile, and the switch is confirmed
-        aloud. A switch made after they left changes nothing here and is not reported as live."""
+        in the conversation: the instructions move to them and the new profile, and the switch is
+        confirmed aloud. A switch made after they left changes nothing here and is not reported as live."""
         if person in self._switch_subscriptions:
             return
 
@@ -794,7 +811,7 @@ class VoiceSession:
                 logger.info("%s switched to %s after leaving the conversation; ignored", person, profile)
                 self._people_heard.discard(person)  # so their return is taken in afresh
                 return False
-            self._change_prompt_context(profile)
+            self._change_prompt_context(profile, person)
             self._announce(switched_to(profile))
             return True
 
@@ -935,16 +952,44 @@ class VoiceSession:
         # The conversation has no voice of its own to say it with.
         await self._conversation.notify({"transcript": {"speaker": "assistant", "text": PROVIDER_LOST}})
 
-    def _change_prompt_context(self, profile: str, *, when_quiet: bool = False) -> None:
-        """Make ``profile`` the one the instructions speak for, and bring the open provider session's
-        instructions up to date in the background; nothing happens when it already is. With
-        ``when_quiet``, a provider that must restart for them waits until the call is quiet first
+    def _change_prompt_context(self, profile: str, person: str | None, *, when_quiet: bool = False) -> None:
+        """Make the instructions speak for ``profile`` and to ``person``, with the context built afresh
+        (``_current_context``), and bring the open provider session's instructions up to date in the
+        background; nothing happens when the context comes out as it was. With ``when_quiet``, a
+        provider that must restart for them waits until the call is quiet first
         (``_apply_prompt_context``)."""
-        if profile == self._prompt_context.active_profile:
+        before = (self._context_profile, self._context_person, self._context_alone)
+        self._context_profile, self._context_person = profile, person
+        context = self._current_context()
+        if self._same_instructions(context, self._prompt_context):
             return
-        logger.info("voice instructions now speak for profile %s", profile)
-        self._prompt_context = self._prompt_context_for(profile)
+        if before != (profile, person, self._context_alone):
+            logger.info(
+                "voice instructions now speak for profile %s, to %s%s",
+                profile,
+                person or "nobody in particular",
+                " alone" if self._context_alone else "",
+            )
+        self._prompt_context = context
         self._spawn(self._apply_prompt_context(when_quiet=when_quiet))
+
+    def _same_instructions(self, context: PromptContext, other: PromptContext | None) -> bool:
+        """Whether instructions rendered from ``context`` need not replace ones rendered from ``other``:
+        the contexts are equal, or, on a provider that cannot replace instructions in place, differ only
+        in the open tasks, which are not worth a restart (spoken notices tell of task changes)."""
+        if other is None:
+            return False
+        if self._capabilities["replaces_instructions"]:
+            return context == other
+        return replace(context, open_tasks=()) == replace(other, open_tasks=())
+
+    def _current_context(self) -> PromptContext:
+        """The prompt context for ``_context_profile`` and ``_context_person`` as of now: whether the
+        person is alone in the conversation is checked again (and kept in ``_context_alone``), and
+        ``prompt_context_for`` re-reads what it reads."""
+        person = self._context_person
+        self._context_alone = person is not None and self._conversation.alone(person)
+        return self._prompt_context_for(self._context_profile, person, self._context_alone)
 
     async def _apply_prompt_context(self, *, when_quiet: bool = False) -> None:
         """Give the open provider session instructions rendered from the current prompt context.
@@ -961,7 +1006,7 @@ class VoiceSession:
             await self._wait_for_quiet()
         async with self._instructions_lock:
             context = self._prompt_context
-            if not self._provider_open.is_set() or context == self._rendered_context:
+            if not self._provider_open.is_set() or self._same_instructions(context, self._rendered_context):
                 return
             if replaces:
                 try:
@@ -978,7 +1023,7 @@ class VoiceSession:
         await self._wait_for_quiet()
         async with self._instructions_lock:
             context = self._prompt_context
-            if self._provider_open.is_set() and context != self._rendered_context:
+            if self._provider_open.is_set() and not self._same_instructions(context, self._rendered_context):
                 await self._restart_provider(context)
 
     async def _restart_provider(self, context: PromptContext) -> None:
@@ -1636,7 +1681,9 @@ class VoiceSession:
         return task.state
 
     async def _notify_tasks(self) -> None:
-        """Send this session's task list to the conversation's user interface."""
+        """Send this session's task list to the conversation's user interface, and bring the open tasks
+        in the instructions up to date where that needs no restart (``_same_instructions``)."""
+        self._change_prompt_context(self._context_profile, self._context_person)
         tasks = [task for number in self._task_numbers if (task := self._tracker.get(number))]
         await self._conversation.notify(
             {

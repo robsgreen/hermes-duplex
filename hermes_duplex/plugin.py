@@ -53,7 +53,10 @@ def register(ctx: Any) -> None:
         help="hermes-duplex voice service",
         setup_fn=cli.add_commands,
         handler_fn=cli.run,
-        description="Run the hermes-duplex voice service, score its router, or check its setup (doctor).",
+        description=(
+            "Run the hermes-duplex voice service, score its router, check its setup (doctor), or show and "
+            "refresh the Hermes context its voice prompt carries (voice-context)."
+        ),
     )
 
     if not lifecycle.config_path.is_file():

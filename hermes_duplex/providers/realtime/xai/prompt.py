@@ -2,7 +2,9 @@
 
 The guide asks for second person and Markdown ``##`` sections in a fixed order: Role & Persona,
 Objective, Conversation Flow, Guardrails & Escalation, and Voice & Communication Style, with an
-optional ``## CRITICAL INSTRUCTIONS`` last for the few absolute rules (capitals allowed). Tools are
+optional ``## CRITICAL INSTRUCTIONS`` last for the few absolute rules (capitals allowed). Facts
+the agent should know go in a small extra section near Role & Persona, so Hermes background on the
+agent and the person, when there is any, is a ``## Background`` section after Objective. Tools are
 named in backticks exactly as the session offers them. The prompt controls words, not sound, so it
 has no pace or accent rules, and the active profile's voice context, in Objective, is framed as rules
 about the words spoken. Reports use the same JSON shape as the OpenAI Realtime prompter.
@@ -31,7 +33,8 @@ class GrokPrompter:
     def instructions(self, ctx: PromptContext) -> str:
         """The sections filled in for ``ctx``. Role & Persona opens with ``ctx.assistant_name``;
         ``ctx.persona`` replaces only the tone line after it. ``switch_profile`` is named only when
-        ``ctx.profiles`` names any profile, as the session offers it only then."""
+        ``ctx.profiles`` names any profile, as the session offers it only then. A ``## Background``
+        section follows Objective when ``ctx`` carries Hermes background or notes on the person."""
         tone = ctx.persona or "You are calm, friendly, and direct."
         delegate, status, cancel = DELEGATE_TOOL, TASK_STATUS_TOOL, CANCEL_TASK_TOOL
         switch, confirm = SWITCH_PROFILE_TOOL, CONFIRM_SWITCH_TOOL
@@ -50,7 +53,7 @@ Hermes agents that do the work people ask for.
 
 ## Objective
 Answer what you can yourself, hand everything else to Hermes, and tell people what Hermes reports back.
-{_active_agent(ctx)}
+{_active_agent(ctx)}{_background(ctx)}
 ## Conversation Flow
 - {blocks.SEVERAL_PEOPLE}
 - Handle {blocks.ANSWER_YOURSELF} yourself.
@@ -115,3 +118,12 @@ def _active_agent(ctx: PromptContext) -> str:
         else ""
     )
     return f"The active agent is {agent}. {blocks.ACTIVE_AGENT_SCOPE}\n{rules}"
+
+
+def _background(ctx: PromptContext) -> str:
+    """The ``## Background`` section: the active agent's Hermes background (``blocks.agent_background``),
+    then what is known about the person (``blocks.person_background``), paragraphs apart, after a blank
+    line and ending in a newline; empty when ``ctx`` carries none of them."""
+    agent = blocks.agent_background(ctx)
+    paragraphs = [*([agent] if agent is not None else []), *blocks.person_background(ctx)]
+    return f"\n## Background\n{'\n\n'.join(paragraphs)}\n" if paragraphs else ""

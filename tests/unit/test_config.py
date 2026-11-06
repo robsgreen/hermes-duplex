@@ -166,6 +166,9 @@ def test_example_config_loads_when_its_env_vars_are_set() -> None:
     assert config.profiles["stock-picker"].aliases == ("stocks", "the stock picker", "portfolio")
     assert config.profiles["stock-picker"].voice_context is not None
     assert config.people["rob"].default_profile == "general"
+    assert config.people["rob"].hermes_owner and not config.people["alex"].hermes_owner
+    assert config.people["alex"].voice_context is not None
+    assert config.hermes.voice_context_files == frozenset()
 
 
 def test_example_config_names_first_missing_env_var() -> None:
@@ -797,3 +800,92 @@ def test_profile_model_for_effort_falls_back_to_the_default_model() -> None:
     assert profile.model_for("low") == fast
     assert profile.model_for("high") == fallback
     assert ProfileConfig().model_for("medium") is None
+
+
+# --- Hermes context files and people's notes ------------------------------------------------------
+
+
+def _owner_rob(raw: dict[str, Any]) -> None:
+    raw["people"]["rob"]["hermes_owner"] = True
+
+
+def test_hermes_context_files_are_off_by_default(tmp_path: Path) -> None:
+    config = load_config(FIXTURES / "valid.yaml", env=ENV)
+
+    assert config.hermes.voice_context_files == frozenset()
+    assert config.hermes.voice_context_max_chars == 4000
+    assert not any(person.hermes_owner or person.voice_context for person in config.people.values())
+
+
+def test_hermes_context_files_owner_and_person_notes_load(tmp_path: Path) -> None:
+    raw = _valid_raw()
+    raw["hermes"].update(voice_context_files=["soul", "user"], voice_context_max_chars=2500)
+    raw["people"]["rob"].update(hermes_owner=True)
+    raw["people"]["alex"].update(voice_context="Alex is Rob's partner; keep it light.")
+    path = tmp_path / "duplex.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_config(path, env=ENV)
+
+    assert config.hermes.voice_context_files == frozenset({"soul", "user"})
+    assert config.hermes.voice_context_max_chars == 2500
+    assert config.people["rob"].hermes_owner and not config.people["alex"].hermes_owner
+    assert config.people["alex"].voice_context == "Alex is Rob's partner; keep it light."
+
+
+def test_an_unknown_hermes_context_file_is_rejected(tmp_path: Path) -> None:
+    error = _assert_error(
+        tmp_path,
+        lambda raw: raw["hermes"].update(voice_context_files=["soul", "memory"]),
+        "hermes.voice_context_files",
+    )
+    assert "'memory'" in str(error) and "briefing, soul, user" in str(error)
+
+
+def test_user_file_without_an_owner_is_rejected(tmp_path: Path) -> None:
+    error = _assert_error(
+        tmp_path, lambda raw: raw["hermes"].update(voice_context_files=["user"]), "hermes.voice_context_files"
+    )
+    assert "user" in str(error) and "hermes_owner" in str(error)
+
+
+def test_two_hermes_owners_are_rejected(tmp_path: Path) -> None:
+    def two_owners(raw: dict[str, Any]) -> None:
+        raw["people"]["alex"]["hermes_owner"] = True
+        raw["people"]["rob"]["hermes_owner"] = True
+
+    # The fixture is written with sorted keys, so alex is read before rob.
+    error = _assert_error(tmp_path, two_owners, "people.rob.hermes_owner")
+    assert "'alex'" in str(error)
+
+
+def test_hermes_context_files_need_profile_names_hermes_can_find(tmp_path: Path) -> None:
+    def odd_profile(raw: dict[str, Any]) -> None:
+        raw["hermes"]["voice_context_files"] = ["soul"]
+        raw["profiles"]["../secrets"] = {}
+
+    error = _assert_error(tmp_path, odd_profile, "hermes.voice_context_files")
+    assert "'../secrets'" in str(error)
+
+
+@pytest.mark.parametrize("value", [0, 8001, "4000"])
+def test_hermes_context_max_chars_out_of_range_is_rejected(tmp_path: Path, value: object) -> None:
+    _assert_error(
+        tmp_path,
+        lambda raw: raw["hermes"].update(voice_context_max_chars=value),
+        "hermes.voice_context_max_chars",
+    )
+
+
+def test_a_persons_voice_context_over_2000_characters_is_rejected(tmp_path: Path) -> None:
+    _assert_error(
+        tmp_path,
+        lambda raw: raw["people"]["alex"].update(voice_context="x" * 2001),
+        "people.alex.voice_context",
+    )
+
+
+def test_hermes_owner_must_be_true_or_false(tmp_path: Path) -> None:
+    _assert_error(
+        tmp_path, lambda raw: raw["people"]["rob"].update(hermes_owner="yes"), "people.rob.hermes_owner"
+    )

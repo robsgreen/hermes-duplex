@@ -136,11 +136,11 @@ a literal `api_key`, `token`, `bot_token`, `key`, `web_token`, or `secret` key i
 
 | Section | What it sets |
 |---|---|
-| `hermes` | `api_base` of the API server, and `profile_keys_env`: profile → env var holding that profile's `API_SERVER_KEY`. A profile without a key cannot run tasks; the voice says it is not configured. |
+| `hermes` | `api_base` of the API server, and `profile_keys_env`: profile → env var holding that profile's `API_SERVER_KEY`. A profile without a key cannot run tasks; the voice says it is not configured. Optional: `voice_context_files` (any of `soul`, `user`, `briefing`; none by default), `voice_context_max_chars` (4000, at most 8000), and `briefing_refresh_h` (6); see [Hermes context in the voice prompt](#hermes-context-in-the-voice-prompt). |
 | `provider` | `name` (required, never inferred), `model`, `voice`, `api_key_env`, and `turn_detection` for the Realtime family. |
 | `router` | `backend` (`decisions`, `jev`, or `knn`), optional `fast_path: knn`, `deadline_ms` (300), `default_profile` (`general`: where people start when their own `default_profile` is unset and they may use it), `suggest_switch` (true: may ask to switch when a request clearly fits another profile the speaker may use), `suggest_threshold` (0.85, greater than 0 and at most 1: how sure it must be before asking), extra `control_examples`, and the `decisions` or `jev` settings (`api_key_env`, optional `model` and `base_url`). |
 | `profiles` | Each Hermes profile people can talk to: `description` and `examples` steer switch suggestions; `models` and `default_model` pick the model; `aliases` are other names people say for it, compared as spoken (case, punctuation, hyphens, and a leading "the" ignored): each needs a word besides "the", none may start with "me", "us", or "you" or be or start with another profile's name ("general news" while `general` is a profile), and no two profiles share one; `voice_context` (optional, at most 2000 characters) goes into the voice prompt while the profile is active. |
-| `people` | Each person: `discord_id`, `web_token_env`, the `profiles` they may use (at least one; `"*"` for all), and an optional `default_profile` they start on, which must be one of those. |
+| `people` | Each person: `discord_id`, `web_token_env`, the `profiles` they may use (at least one; `"*"` for all), and an optional `default_profile` they start on, which must be one of those. Optional: `hermes_owner: true` for the one person Hermes's `USER.md` and briefing are about, and `voice_context` (at most 2000 characters), notes about the person the voice prompt carries while the conversation is with them. |
 | `transports` | `discord: {enabled, bot_token_env}` and `web: {enabled, host, port}`; both off unless enabled. |
 | `audio` | `pacer_lead_ms` (200), `gate_threshold_dbfs` (-35.0), and `playback_queue_s` (5). |
 | `tasks` | `restore_max_age_h` (24): after a restart, open tasks created longer ago than this are marked unknown silently instead of being followed again. |
@@ -334,6 +334,64 @@ the style and tone: GPT-Live's persona lines after that opening line, OpenAI Rea
 and Tone section, or the tone line of Grok's Role & Persona section. Describe how the assistant
 sounds, not who it is; the rest of each prompt stays. A blank `name` or `persona` is a config error.
 
+### Hermes context in the voice prompt
+
+The voice prompt can also carry what Hermes itself knows, for the active profile only:
+
+```yaml
+hermes:
+  voice_context_files: [soul, user, briefing]
+people:
+  rob: {web_token_env: DUPLEX_TOKEN_ROB, profiles: ["*"], hermes_owner: true}
+  alex: {discord_id: "456", profiles: [general], voice_context: "Alex is Rob's partner."}
+```
+
+- `soul`: the profile's `SOUL.md` (`$HERMES_HOME/profiles/<profile>/SOUL.md`; for a profile named
+  `default`, the top-level `$HERMES_HOME/SOUL.md`), as background on the agent you are talking to:
+  what it is for, what it can do, what to hand off to it. The prompt marks it as data; its own rules
+  and the profile's `voice_context` win where they differ. Hermes seeds a default `SOUL.md` into
+  every profile, so each profile has one.
+- `user`: the profile's `memories/USER.md`, Hermes's notes on its owner, the person with
+  `hermes_owner: true`.
+- `briefing`: a short summary of the owner's current projects and priorities that Hermes writes from
+  its memory and recent sessions.
+
+**Privacy.** `USER.md` and the briefing go into the prompt only while the owner is alone in the
+conversation: signed in on the web page, or in a Discord voice channel where everyone else is a bot.
+When someone else joins the channel, they leave the prompt at once (an instruction update, or on
+GPT-Live a restart of about a second); when the owner is alone again, they come back once the call is
+quiet. A person's own `voice_context` and their open tasks (queued and running, by topic and agent,
+the newest 10) go in while the conversation is with them: the person who signed in or brought the bot
+in, then whoever was last heard for the first time or last switched. On a shared Discord call those
+two are heard by everyone in the channel, as spoken task status already is. Nothing here logs the
+text of a file.
+
+**Rewrites.** Each profile rewrites its own `SOUL.md` and `USER.md` for a voice assistant (short plain
+sentences, no tool or formatting rules, within `voice_context_max_chars`), and writes the briefing,
+through the API server like any task, with its own key and default model, in a Hermes session of
+their own (`duplex-voice-context-<profile>-<kind>`, `duplex-voice-briefing-<profile>`). They run in
+the background: when the service starts, when a file changes, and for the briefing when it is older
+than `briefing_refresh_h` hours; a call never waits for one. Until a rewrite of the current file
+exists, or when it fails, the prompt carries the file itself, cut at a line or sentence end to
+`voice_context_max_chars` (with a warning naming the file and sizes); until a briefing exists there
+is none. The results are cached in `$HERMES_HOME/duplex/voice_context/<profile>.<kind>.md`, each with
+a `.json` sidecar of fingerprints. Edit a cached file to say it your way: an edit is kept until the
+source file changes, or, for the briefing, until a forced refresh. Changes reach the prompt at the
+next connect, reconnect, or profile or presence change; open tasks are kept current in place on
+OpenAI Realtime and Grok, and on GPT-Live at the next restart (spoken notices tell of task changes
+meanwhile).
+
+```bash
+uv run hermes-duplex voice-context show stock-picker     # or: hermes duplex voice-context show stock-picker
+uv run hermes-duplex voice-context refresh [stock-picker] [--force]
+```
+
+`show` prints the instructions the configured provider's model gets while that profile is active, as
+if the owner were alone on the call, and notes on stderr where each text came from (Hermes's
+rewrite, your edit, or the file itself); it starts no rewrite. `refresh` has Hermes write every
+enabled text of the profile (or of every profile) now, prints one line per text, and exits 1 when one
+could not be written; `--force` replaces current texts and your edits.
+
 ## Use it
 
 **On Discord.** Join a voice channel and run `/duplex join`, or type `join` in a text channel of
@@ -398,7 +456,8 @@ a composite router over `knn` with default settings. The phrase file's format is
 A request is a status or cancel request only on strong evidence: the deciding backend must give
 `_control` a probability of at least 0.995. Anything weaker runs as a task on your active profile,
 because a request taken as a status question is silently lost while a status question taken as a task
-is only a wasted run. `tests/fixtures/router_eval/descriptions_only.yaml` holds the same kind of
+is only a wasted run. The backends see `_control` described as "progress of a task already running,
+or cancelling it", so that a new request does not read as one. `tests/fixtures/router_eval/descriptions_only.yaml` holds the same kind of
 phrases for profiles configured with only a description, where tasks look most like status phrases.
 
 With the `minishlab/potion-base-8M` embedding model, `knn` scores:
@@ -408,7 +467,7 @@ With the `minishlab/potion-base-8M` embedding model, `knn` scores:
 | Choice accuracy | 0.825 | 0.700 |
 | Choice macro-F1 | 0.823 | 0.724 |
 | Control precision | 1.000 | 1.000 |
-| Control recall | 0.613 (19 of 31) | 0.857 (12 of 14) |
+| Control recall | 0.645 (20 of 31) | 0.929 (13 of 14) |
 | Task taken as control | 0.000 | 0.000 |
 | Suggestions made | 20 | 2 |
 | Suggestion precision | 1.000 (every suggestion was right) | 1.000 |
@@ -427,19 +486,21 @@ Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 | Tier | Command | Needs |
 |---|---|---|
 | Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | nothing |
-| Default (1210 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
-| Real Hermes end-to-end (5 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
+| Default (1285 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
+| Real Hermes end-to-end (6 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
 | Live (1 test) | `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` | hermes-agent, real API keys, the spoken WAV fixtures (below); spends money |
 | Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` (or `descriptions_only.yaml`) | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |
 | Manual | [docs/live-checklist.md](docs/live-checklist.md) | a Discord server, keys, people to talk |
 
 Install the toolchain first with `uv sync --frozen`.
 
-**Real Hermes end-to-end.** The `e2e` tests (`tests/e2e/test_real_hermes.py` and
-`test_real_hermes_flows.py`; the other `tests/e2e/` files run in the default tier) start a real Hermes
-gateway in a temporary `HERMES_HOME` with two profiles backed by a fake LLM, install this plugin from
-your working tree, and drive calls through the web transport with the fake voice provider: a routed
-run, a refusal, a topic switch, a local status answer, and `doctor` against the gateway. They skip
+**Real Hermes end-to-end.** The `e2e` tests (`tests/e2e/test_real_hermes.py`,
+`test_real_hermes_flows.py`, and `test_real_hermes_context.py`; the other `tests/e2e/` files run in
+the default tier) start a real Hermes gateway in a temporary `HERMES_HOME` with two profiles backed
+by a fake LLM, install this plugin from your working tree, and drive calls through the web transport
+with the fake voice provider: a routed run, a refusal, a topic switch, a local status answer,
+`doctor` against the gateway, and a `SOUL.md` rewritten on its own profile, cached, and carried into
+a call's instructions with a hand edit. They skip
 when `hermes` is not on `PATH`.
 Install hermes-agent at the commit whose pins this plugin targets, into its own venv as a gateway
 install has it, with this plugin's runtime dependencies (`hermes plugins validate` imports the
