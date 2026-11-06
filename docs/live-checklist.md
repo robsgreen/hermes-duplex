@@ -481,7 +481,7 @@ stock-picker for voice" lines, then run `hermes-duplex voice-context show stock-
 Expected: in steps 1 and 2 the answers follow the rewritten SOUL.md, the cheese is known, and the
 briefing's projects come up. In step 3 the answer stops as B joins (the log shows "someone joined: flushed playback"), and with B
 in the channel the cheese is not known (the log shows
-"voice instructions now speak for profile stock-picker, to <you>" without "alone"; GPT-Live restarts
-at once), and once B has left and the call is quiet it is known again. In step 4 the task is named by
+"voice instructions now speak for profile stock-picker, to <you>" without "alone" and a restart at
+once on every provider, and no more of the earlier answer is heard after it), and once B has left and the call is quiet it is known again. In step 4 the task is named by
 topic and no task number is said, and the edit reaches the prompt only at the next connect. In step 5 the edit is what the model goes by until `--force`
 replaces it. Neither the log nor `doctor` ever prints a file's text.

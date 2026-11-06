@@ -261,7 +261,8 @@ On OpenAI Realtime and Grok the new instructions replace the old ones in place (
 not confirm within 5 seconds, the session restarts instead); GPT-Live cannot replace its
 instructions, so the session restarts it (about a second of pause) with the new ones and a summary of
 the conversation so far. An explicit switch restarts at once; a change from first hearing someone
-waits until the call has been quiet for 2 seconds, so nobody is cut off.
+waits until the call has been quiet for 2 seconds, so nobody is cut off. Someone joining while the
+owner's private notes are in the prompt restarts every provider at once (see Privacy below).
 
 ### People and permissions
 
@@ -358,11 +359,15 @@ people:
 
 **Privacy.** `USER.md` and the briefing go into the prompt only while the owner is alone in the
 conversation: signed in on the web page, or in a Discord voice channel where everyone else is a bot.
-When someone else joins the channel, they leave the prompt at once (an instruction update, or on
-GPT-Live a restart of about a second), and whatever the assistant had not finished saying is cut off,
-so the newcomer hears nothing meant for the owner alone; a later reconnect is re-seeded with the open
-tasks only, not with what was said before they joined. When the owner is alone again, the texts come
-back once the call is quiet. A person's own `voice_context` and their open tasks (queued and running, by topic and agent,
+When someone else joins the channel, they leave the prompt at once: on every provider the session
+restarts the voice model (about a second of pause), and whatever the assistant had not finished
+saying is cut off, along with anything it still sends before the restart, so the newcomer hears
+nothing meant for the owner alone. The restart, and every later reconnect, is seeded with the open
+tasks only, not with what was said before they joined; on OpenAI Realtime and Grok the restart also
+leaves behind the model's own memory of the conversation so far. A request the model was handing
+off just then is not run; the assistant asks for it again. When the owner is alone again, the texts
+come back once the call is quiet (in place on OpenAI Realtime and Grok, with a quiet restart on
+GPT-Live). A person's own `voice_context` and their open tasks (queued and running, by topic and agent,
 the newest 10) go in while the conversation is with them: the person who signed in or brought the bot
 in, then whoever was last heard for the first time or last switched. When that person leaves, the
 prompt moves back to the person who brought the bot in, or to the one person left, if either is
@@ -494,7 +499,7 @@ Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 | Tier | Command | Needs |
 |---|---|---|
 | Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | nothing |
-| Default (1311 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
+| Default (1315 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
 | Real Hermes end-to-end (6 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
 | Live (1 test) | `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` | hermes-agent, real API keys, the spoken WAV fixtures (below); spends money |
 | Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` (or `descriptions_only.yaml`) | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |

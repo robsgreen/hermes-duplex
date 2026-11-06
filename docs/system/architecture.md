@@ -481,16 +481,23 @@ open:
 
 | Provider | `replaces_instructions` | On a prompt-context change |
 |---|---|---|
-| OpenAI Realtime, xAI Grok | true | `update_instructions`: a `session.update` carrying only `instructions` and an `event_id`, meant to leave tools, voice, audio settings, and the conversation as they are. It waits up to `UPDATE_TIMEOUT_S` (5 s) for `session.updated`; an `error` naming its event id, a timeout, or the connection ending raises, the old instructions stay, and the session restarts instead. The rejection is not passed on as a provider error, so it does not count as a refused response. |
+| OpenAI Realtime, xAI Grok | true | Restarts as GPT-Live does when someone joins the owner while their notes are in the instructions (below). Otherwise `update_instructions`: a `session.update` carrying only `instructions` and an `event_id`, meant to leave tools, voice, audio settings, and the conversation as they are. It waits up to `UPDATE_TIMEOUT_S` (5 s) for `session.updated`; an `error` naming its event id, a timeout, or the connection ending raises, the old instructions stay, and the session restarts instead. The rejection is not passed on as a provider error, so it does not count as a refused response. |
 | GPT-Live | false | The session closes the provider session and reconnects it with the new instructions and the reconnect summary (see Reconnect and re-seed). The restart counts neither as short-lived nor as a failure; Hermes tasks keep running. |
 
 A restart for an explicit switch, or for someone joining the owner, happens at once. When the person
 the instructions speak to stops being alone (someone joined, or they left) while the open provider
-session's instructions carry the owner's `USER.md` or briefing, the session first drops the output
-not heard yet, as a barge-in does (pacer drop, `flush_playback`, `truncate` where
-supported), and ignores the rest of that output item, so nothing said for them alone reaches the
-newcomer; unless `session.RESEED_LINES_SAID_ALONE` (off), no later re-seed carries the transcript
-lines from before (a default pending the owner's confirmation). One for a person first heard, for a
+session's instructions carry the owner's `USER.md` or briefing, the session mutes that provider
+session (`_drop_output_for_newcomers`: everything it outputs from then until the next connect is
+ignored, since GPT-Live sends no item ids and keeps streaming until its close handshake ends), drops
+the output not heard yet, as a barge-in does (pacer drop, `flush_playback`, `truncate` where
+supported), and restarts the provider at once, on OpenAI Realtime and Grok too: an update in place
+would keep the server-side conversation said with the owner's notes. The pacer is dropped and
+playback flushed once more as the muted session ends. A function call or live delegation the muted
+session sends is not acted on (nothing could answer it) and the people are asked to say it again
+(`NOT_HEARD`) once the new session is open; announcements wait for it too. Neither the restart nor
+any later re-seed carries the transcript lines from before the join: the summary holds the open
+tasks only. Without the owner's notes in the instructions, a join cuts nothing off and changes the
+instructions in place where the provider can. One for a person first heard, for a
 person who left, or for the owner alone again (on GPT-Live, or after a failed update on Realtime or Grok)
 first waits until the call is quiet: nobody voiced for
 `RESTART_QUIET_S` (2 s, longer than the live hand-off's transcript grace), no output held or
@@ -522,8 +529,8 @@ background differs. GPT-Live: `Agent background:` and `About <person>:` paragrap
 agent; OpenAI Realtime: a `# Context` section last, with `## Active Agent Background` and `## About
 <person>` (the guide's place for background, saying which source is authoritative); Grok: a `##
 Background` section after Objective (the guide's small facts section near Role & Persona), each
-Hermes text cut to `xai.prompt.BACKGROUND_MAX_CHARS` (2000) since the guide asks for short prompts
-(a default pending the owner's confirmation). With the
+Hermes text cut to `xai.prompt.BACKGROUND_MAX_CHARS` (2000) since the guide asks for short prompts.
+With the
 largest caps (`voice_context_max_chars` at most 8000, the briefing 6000, each `voice_context` 2000,
 ten tasks), GPT-Live's instructions stay within its 16,384 tokens at `CHARS_PER_TOKEN`.
 
@@ -545,10 +552,9 @@ background. Refreshes run one at a time per text, time out after `WRITE_TIMEOUT_
 the run), and after a failure, or a failed write to the cache, wait `RETRY_AFTER_S` (600 s) before
 trying the same source again; a call never waits for one, and a result is used from the next `read`.
 The service starts refreshes of every profile's files, and of the briefing on the owner's active
-profile, when it starts, and cancels those still running when it stops. Unless
-`service.REFRESH_CONTEXT_DURING_CALLS` (off; a default pending the owner's confirmation), refreshes
-that fall due while any conversation is on are deferred (`HermesContextFiles.defer_refreshes`) and
-start once the last conversation ends. Each `read` reads the files. A missing file is logged once (info), an unreadable one once (warning), a cut one once with
+profile, when it starts, and cancels those still running when it stops. Refreshes that fall due
+while any conversation is on are deferred (`HermesContextFiles.defer_refreshes`) and start once the
+last conversation ends, so they neither compete with the call's own tasks nor change a file it reads. Each `read` reads the files. A missing file is logged once (info), an unreadable one once (warning), a cut one once with
 its sizes; no text is ever logged. `hermes-duplex voice-context show` renders the instructions as if
 the owner were alone, with no rewrite started; `voice-context refresh [--force]` runs the refreshes
 now (`--force` replacing current texts and hand edits).
@@ -732,8 +738,9 @@ in the instructions, see Prompt context), and the open tasks with their states i
 (`notices.task_list`; the spoken status's "I'll tell you when it finishes" stays out of the model's
 context). OpenAI Realtime caps sessions at 60 minutes (`max_session_s` 3600);
 GPT-Live and xAI publish no cap. A change of prompt context on a provider without
-`replaces_instructions` (GPT-Live) takes this same path, by closing the provider session on purpose:
-it reconnects with the new instructions and the same summary, and does not count toward the
+`replaces_instructions` (GPT-Live), or on any provider someone joining the owner while their notes
+are in the instructions (see Prompt context), takes this same path, by closing the provider session
+on purpose: it reconnects with the new instructions and the same summary, and does not count toward the
 short-session limit below.
 
 Hermes runs keep going across a reconnect and report to the new provider session. Only the provider

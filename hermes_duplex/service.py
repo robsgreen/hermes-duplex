@@ -35,11 +35,6 @@ STOP_TIMEOUT_S = 5.0
 ACTIVE_PROFILES_FILE_NAME = "active_profiles.json"
 """The file under ``$HERMES_HOME/duplex/`` that keeps each person's active profile across restarts."""
 
-REFRESH_CONTEXT_DURING_CALLS = False
-"""Whether Hermes may rewrite a context text or refresh the briefing in the background while a
-conversation is on. Off: what falls due meanwhile waits until no conversation is left, so the writes
-neither compete with the call's own tasks nor change a file the call reads; no call ever waits for one."""
-
 SESSION_STOP_GRACE_S = 1.0
 """How long ``stop`` lets cancelled sessions finish (closing their provider) before abandoning them."""
 
@@ -174,16 +169,16 @@ class DuplexService:
     async def _run_conversation(self, conversation: Conversation) -> None:
         """Run one voice session for ``conversation`` until either ends. Transports call this.
 
-        Unless ``REFRESH_CONTEXT_DURING_CALLS``, the context files' background refreshes are deferred
-        from the first conversation on until the last one ends."""
+        The context files' background refreshes are deferred from the first conversation on until the
+        last one ends, so the rewrites neither compete with the call's own tasks nor change a file the
+        call reads; no call ever waits for one."""
         if self._stopping:
             await conversation.close("server stopping")
             return
         task = asyncio.current_task()
         assert task is not None, "transports call this from a task"
         self._sessions[task] = conversation
-        if not REFRESH_CONTEXT_DURING_CALLS:
-            self._context_files.defer_refreshes(True)  # before the session first reads the files
+        self._context_files.defer_refreshes(True)  # before the session first reads the files
         try:
             provider = self._provider_factory(
                 self._config.provider, self._config.secrets, self._prompt_context

@@ -25,6 +25,7 @@ from hermes_duplex.prompts.base import PromptContext, TaskReport, VoicePrompter
 from hermes_duplex.prompts.notices import (
     NO_QUESTION_PENDING,
     NO_SUCH_TASK,
+    NOT_HEARD,
     NOTHING_TO_CANCEL,
     WHO_IS_ASKING,
     only_one_running,
@@ -32,8 +33,18 @@ from hermes_duplex.prompts.notices import (
     task_summary,
     which_to_cancel,
 )
-from hermes_duplex.providers.base import ModelChoice
-from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
+from hermes_duplex.providers.base import (
+    DELEGATE_TOOL,
+    Closed,
+    DelegationRequested,
+    ModelChoice,
+    OutputAudio,
+    OutputDone,
+    OutputTranscript,
+    ProviderEvent,
+)
+from hermes_duplex.providers.fake.adapter import DEFAULT_CAPABILITIES, FakeProvider, SentCall
+from hermes_duplex.providers.gpt_live.adapter import CAPABILITIES as GPT_LIVE_CAPABILITIES
 from hermes_duplex.providers.gpt_live.prompt import frame_result
 from hermes_duplex.router.base import ControlIntent, Effort, RouteDecision
 from hermes_duplex.router.composite import CompositeRouter
@@ -1584,15 +1595,17 @@ async def test_the_owners_notes_are_in_the_instructions_only_while_they_are_alon
 
     conversation.company.add("alex")
     conversation.feed(_frames(100))
-    await harness.wait_for(lambda: len(harness.sent("update_instructions")) == 1)
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
     conversation.company.clear()
     conversation.feed(_frames(100))
-    await harness.wait_for(lambda: len(harness.sent("update_instructions")) == 2)
+    await harness.wait_for(lambda: len(harness.sent("update_instructions")) == 1)
 
-    [connect] = harness.sent("connect")
-    assert OWNER_FACTS in connect.args["instructions"]
-    with_alex, alone_again = harness.texts("update_instructions")
-    assert OWNER_FACTS not in with_alex
+    # Someone joining restarts the provider even though it replaces instructions, so its conversation
+    # said with the owner's notes goes too; the notes come back in place.
+    alone, with_alex = harness.sent("connect")
+    assert OWNER_FACTS in alone.args["instructions"]
+    assert OWNER_FACTS not in with_alex.args["instructions"]
+    [alone_again] = harness.texts("update_instructions")
     assert OWNER_FACTS in alone_again
 
 
@@ -1818,33 +1831,144 @@ async def test_audio_held_for_the_owner_alone_is_not_played_once_someone_joins(
     assert "(nothing yet)" in summary
 
 
-async def test_the_audio_of_an_item_cut_off_for_a_newcomer_stays_unplayed(harness: _Harness) -> None:
+class _StillReplyingAsItCloses(FakeProvider):
+    """A fake provider whose first ``close`` is answered only after ``in_flight`` arrives, as a real
+    provider's socket still yields what the server sent before it saw the close."""
+
+    def __init__(
+        self, script: Iterable[Mapping[str, Any]], in_flight: Iterable[ProviderEvent], **kwargs: Any
+    ) -> None:
+        super().__init__(script, **kwargs)
+        self._in_flight = list(in_flight)
+
+    async def events(self) -> AsyncIterator[ProviderEvent]:
+        async for event in super().events():
+            if isinstance(event, Closed) and event.reason == "closed by client":
+                for late in self._in_flight:
+                    yield late
+                self._in_flight.clear()
+            yield event
+
+
+def _played_ms(conversation: _MemoryConversation) -> float:
+    return sum(len(pcm) for pcm in conversation.played) / 2 / RATE * 1000
+
+
+@pytest.mark.parametrize(
+    "capabilities, item_id",
+    [(GPT_LIVE_CAPABILITIES, None), (DEFAULT_CAPABILITIES, "item_1")],
+    ids=["gpt-live", "realtime"],
+)
+async def test_output_arriving_after_someone_joins_from_the_session_with_the_owners_notes_is_dropped(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    capabilities: Mapping[str, object],
+    item_id: str | None,
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)  # a quiet restart would never come
     conversation = _MemoryConversation(_frames(200, _voiced("rob")))
-    harness.start(
+    output = {"type": "output_audio", "ms": 5000, "item_id": item_id}
+    provider = _StillReplyingAsItCloses(
         [
-            {"at_input_ms": 100, "event": {"type": "output_audio", "ms": 2000, "item_id": "item_1"}},
-            {
-                "on_sent": "update_instructions",
-                "event": {"type": "output_audio", "ms": 2000, "item_id": "item_1"},
-            },
-            {"after_ms": 0, "event": {"type": "output_audio", "ms": 200, "item_id": "item_2"}},
+            {"at_input_ms": 100, "event": {"type": "output_transcript", "delta": "Your hearing is Friday."}},
+            {"at_input_ms": 100, "event": output},
+            # The restarted provider session's own reply plays.
+            {"on_sent": "connect", "event": {**output, "ms": 200, "item_id": item_id and "item_2"}},
         ],
+        [
+            OutputAudio(pcm=bytes(2 * RATE), item_id=item_id),  # 1 s
+            OutputTranscript(delta=" Bring the custody papers."),
+            OutputDone(),
+        ],
+        capabilities=capabilities,
+    )
+    harness.start(
+        [],
         [],
         person="rob",
         conversation=conversation,
+        provider=provider,
         prompt_context_for=_owner_context(harness),
     )
     await harness.wait_for(lambda: bool(conversation.played))
 
+    played_at_join = _played_ms(conversation)
     conversation.company.add("alex")
     conversation.feed(_frames(100))
-    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))
-    played_at_join = sum(len(pcm) for pcm in conversation.played)
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
     await asyncio.sleep(0.6)
 
-    # item_2's 200 ms play; none of the rest of item_1 does.
-    played_ms = (sum(len(pcm) for pcm in conversation.played) - played_at_join) / 2 / RATE * 1000
-    assert played_ms < 350, "the rest of item_1 kept playing to the newcomer"
+    played_ms = _played_ms(conversation) - played_at_join
+    assert 150 < played_ms < 400, "only the restarted provider session's 200 ms reply plays to alex"
+    first, second = harness.sent("connect")
+    assert OWNER_FACTS in first.args["instructions"]
+    assert OWNER_FACTS not in second.args["instructions"]
+    assert harness.sent("update_instructions") == [], (
+        "a join with the owner's notes restarts on every provider"
+    )
+    assert "hearing" not in second.args["history_summary"]
+    assert "custody" not in second.args["history_summary"]
+
+
+async def test_a_reply_still_being_generated_when_someone_joins_is_neither_played_nor_reseeded(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.3)  # for the restart once alone again
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _StillReplyingAsItCloses(
+        [],
+        [OutputTranscript(delta="Your lawyer is Ana."), OutputAudio(pcm=bytes(2 * RATE), item_id=None)],
+        capabilities=GPT_LIVE_CAPABILITIES,
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 100)  # nothing is playing yet
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await asyncio.sleep(0.5)
+    conversation.company.clear()
+    conversation.feed(_frames(100))  # alone again: a later reseed must not bring it back either
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 3, timeout_s=8)
+
+    assert conversation.played == []
+    assert all("lawyer" not in (call.args["history_summary"] or "") for call in harness.sent("connect"))
+
+
+async def test_a_hand_off_from_the_session_with_the_owners_notes_after_someone_joins_is_asked_again(
+    harness: _Harness, api: FakeHermesApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _StillReplyingAsItCloses(
+        [],
+        [DelegationRequested("call_1", None, DELEGATE_TOOL, {"task": "email my lawyer Ana"})],
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 100)
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: bool(harness.sent("say")))
+
+    assert harness.texts("say") == [NOT_HEARD]
+    assert len(harness.sent("connect")) == 2, "said to the restarted provider session"
+    assert api.runs == {}
+    assert harness.sent("send_function_output") == []
 
 
 async def test_when_the_person_spoken_to_leaves_the_instructions_move_to_the_conversations_person(
@@ -1876,8 +2000,9 @@ async def test_when_the_person_spoken_to_leaves_the_instructions_move_to_the_one
     await harness.wait_for(lambda: OWNER_FACTS in harness.texts("update_instructions")[-1])
 
 
+@pytest.mark.parametrize("replaces_instructions", [False, True], ids=["gpt-live", "realtime"])
 async def test_someone_joining_cuts_nothing_off_when_nothing_private_is_in_the_instructions(
-    harness: _Harness,
+    harness: _Harness, replaces_instructions: bool
 ) -> None:
     conversation = _MemoryConversation(_frames(200, _voiced("rob")))
     harness.start(
@@ -1890,7 +2015,7 @@ async def test_someone_joining_cuts_nothing_off_when_nothing_private_is_in_the_i
         [],
         person="rob",
         conversation=conversation,
-        capabilities={"replaces_instructions": False, "supports_truncate": True},
+        capabilities={"replaces_instructions": replaces_instructions, "supports_truncate": True},
         prompt_context_for=lambda profile, person, alone: service.prompt_context(
             harness.config, profile, person, alone
         ),
