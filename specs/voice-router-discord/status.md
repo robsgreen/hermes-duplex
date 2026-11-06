@@ -197,3 +197,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-06 08:26 - Fix round 9c committed (1321 pass; coder e2e 6). Re-review + quiet-switch coder next.
 - 2026-11-06 08:26 - User approved switch-by-meaning. One coder: quiet-switch then switch-by-meaning. Re-review of 1a2fe8e in parallel.
 - 2026-11-06 08:40 - Re-review 9d: 2 medium (F1 in-place update window, F2 truncate crash). Sent to the active coder as extra items.
+- 2026-11-06 09:13 - Quiet switch + switch-by-meaning + F1/F2 committed (1378 pass; coder e2e 6). Two-seat review next.
