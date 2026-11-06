@@ -233,7 +233,7 @@ class CompositeRouter:
             for call in pending:
                 call.cancel()
                 self._abandoned.add(call)
-                call.add_done_callback(self._abandoned.discard)
+                call.add_done_callback(self._forget_abandoned)
 
         if not settled:
             for call in pending:
@@ -241,6 +241,14 @@ class CompositeRouter:
                 if call is main_call:
                     self._breaker.record(answered=False, now_s=self._clock())
         return _Answers(main=main, fast=fast)
+
+    def _forget_abandoned(self, call: asyncio.Task[BackendResult]) -> None:
+        """Drop an abandoned call once it ends, and retrieve its outcome: a backend whose own timeout
+        fires at the deadline ends with an error rather than being cancelled, and an error nobody
+        retrieves is logged by asyncio as "Task exception was never retrieved"."""
+        self._abandoned.discard(call)
+        if not call.cancelled() and (exc := call.exception()) is not None:
+            logger.debug("abandoned router call ended with %s: %s", type(exc).__name__, exc)
 
     def _accepts_early(self, fast: BackendResult, active: str) -> bool:
         """Whether the fast path is sure enough to stop waiting for the main path: a clear winner that

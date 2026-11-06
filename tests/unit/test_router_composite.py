@@ -702,3 +702,38 @@ async def test_early_accept_does_not_count_against_the_main_path() -> None:
         await _route(router, "set a reminder", active="general")
 
     assert len(main.requests) == 4
+
+
+class _RaisesWhenCancelled(_StubBackend):
+    """A main path whose own timeout fires as the router gives up: cancelling it ends the call with
+    an error instead of a cancellation, as aiohttp's timeout turns Decisions' cancelled request into
+    ``DecisionsError``."""
+
+    async def classify(self, req: RouteRequest, deadline_ms: int) -> BackendResult:
+        try:
+            await asyncio.sleep(SLOW_S)
+        except asyncio.CancelledError:
+            raise RuntimeError("did not answer within the deadline") from None
+        return await super().classify(req, deadline_ms)
+
+
+async def test_a_main_path_that_errors_after_the_deadline_leaves_no_unretrieved_error() -> None:
+    import gc
+
+    unretrieved: list[dict[str, object]] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+    try:
+        main, fast = _RaisesWhenCancelled(name="decisions"), _StubBackend()
+        fast.answer({"stock-picker": 0.7, "general": 0.3})
+        router = _two_path_router(main, fast, SHORT_DEADLINE)
+
+        await _route(router, "should I buy NVDA")
+        for _ in range(5):  # let the abandoned call end and its done callbacks run
+            await asyncio.sleep(0)
+        gc.collect()
+
+        assert not router._abandoned  # pyright: ignore[reportPrivateUsage]
+        assert unretrieved == []
+    finally:
+        loop.set_exception_handler(None)
