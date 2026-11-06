@@ -280,3 +280,9 @@ Seat A: same resolved verdicts. New:
 - NF2 medium (run) = M-B1.
 - L1 low = M-B2 + _report_progress spoken by the muted session.
 - L2 low = L-B1.
+
+### Fix round 9c (1a2fe8e) — scoped re-review (single reviewer, both lenses)
+NF1, NF2/M-B1, M-B2/L1, L-B2 resolved; L-B1 partial (muted floor wait and _answer guard untested). Invariant holds except:
+- F1 medium (run, pre-existing) — _rendered_context set only after update_instructions returns; join during an in-place update that brings the owner's notes back is never muted/restarted. Fix: set rendered before awaiting, restore on exception.
+- F2 medium (run, pre-existing, now reachable) — _barge_in truncate during a Realtime connect raises RuntimeError (no wire) → session dies. Fix: truncate only while provider open.
+Repros: scratchpad/rereview9d/repo/tests/unit/test_rr9d.py.
