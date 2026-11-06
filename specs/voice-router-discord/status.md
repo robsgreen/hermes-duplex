@@ -194,3 +194,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-06 08:02 - Re-review 9c seat B: 2 medium (reconnect backoff reseed, late input transcript), 2 low. Waiting seat A.
 - 2026-11-06 08:02 - Re-review 9c seat A: NF1 high (stuck mute race). Dispatching fix round 9c.
 - 2026-11-06 08:12 - User approved quiet switch on GPT-Live + 'Switching you to' line. Brief written; dispatch after fix round 9c lands (same file).
+- 2026-11-06 08:26 - Fix round 9c committed (1321 pass; coder e2e 6). Re-review + quiet-switch coder next.
