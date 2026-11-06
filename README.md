@@ -359,27 +359,35 @@ people:
 **Privacy.** `USER.md` and the briefing go into the prompt only while the owner is alone in the
 conversation: signed in on the web page, or in a Discord voice channel where everyone else is a bot.
 When someone else joins the channel, they leave the prompt at once (an instruction update, or on
-GPT-Live a restart of about a second); when the owner is alone again, they come back once the call is
-quiet. A person's own `voice_context` and their open tasks (queued and running, by topic and agent,
+GPT-Live a restart of about a second), and whatever the assistant had not finished saying is cut off,
+so the newcomer hears nothing meant for the owner alone; a later reconnect is re-seeded with the open
+tasks only, not with what was said before they joined. When the owner is alone again, the texts come
+back once the call is quiet. A person's own `voice_context` and their open tasks (queued and running, by topic and agent,
 the newest 10) go in while the conversation is with them: the person who signed in or brought the bot
-in, then whoever was last heard for the first time or last switched. On a shared Discord call those
+in, then whoever was last heard for the first time or last switched. When that person leaves, the
+prompt moves back to the person who brought the bot in, or to the one person left, if either is
+there. On a shared Discord call those
 two are heard by everyone in the channel, as spoken task status already is. Nothing here logs the
 text of a file.
 
 **Rewrites.** Each profile rewrites its own `SOUL.md` and `USER.md` for a voice assistant (short plain
 sentences, no tool or formatting rules, within `voice_context_max_chars`), and writes the briefing,
-through the API server like any task, with its own key and default model, in a Hermes session of
-their own (`duplex-voice-context-<profile>-<kind>`, `duplex-voice-briefing-<profile>`). They run in
-the background: when the service starts, when a file changes, and for the briefing when it is older
-than `briefing_refresh_h` hours; a call never waits for one. Until a rewrite of the current file
+through the API server like any task, with its own key and default model, each in a fresh Hermes
+session of its own (`duplex-voice-context-<profile>-<kind>-<id>`, `duplex-voice-briefing-<profile>-<id>`),
+never a person's. The `SOUL.md` rewrite is told to say nothing about you or anyone else, since anyone
+on a call may hear it. They run in the background: when the service starts, when a file has changed,
+and for the briefing when it is older than `briefing_refresh_h` hours. While any call is on, they
+wait until the last one ends; a call never waits for one. Until a rewrite of the current file
 exists, or when it fails, the prompt carries the file itself, cut at a line or sentence end to
 `voice_context_max_chars` (with a warning naming the file and sizes); until a briefing exists there
 is none. The results are cached in `$HERMES_HOME/duplex/voice_context/<profile>.<kind>.md`, each with
 a `.json` sidecar of fingerprints. Edit a cached file to say it your way: an edit is kept until the
-source file changes, or, for the briefing, until a forced refresh. Changes reach the prompt at the
-next connect, reconnect, or profile or presence change; open tasks are kept current in place on
-OpenAI Realtime and Grok, and on GPT-Live at the next restart (spoken notices tell of task changes
-meanwhile).
+source file changes, or, for the briefing, until a forced refresh. A changed file or a new rewrite
+reaches the prompt only at the next connect or reconnect, profile switch, person first heard, or
+change of who is on the call; never mid-turn and never with a task change. Open tasks are kept
+current in place on OpenAI Realtime and Grok, and on GPT-Live at the next restart (spoken notices
+tell of task changes meanwhile). On Grok each text is cut to 2,000 characters, as xAI's guide asks
+for short prompts.
 
 ```bash
 uv run hermes-duplex voice-context show stock-picker     # or: hermes duplex voice-context show stock-picker
@@ -486,7 +494,7 @@ Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 | Tier | Command | Needs |
 |---|---|---|
 | Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | nothing |
-| Default (1285 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
+| Default (1310 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
 | Real Hermes end-to-end (6 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
 | Live (1 test) | `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` | hermes-agent, real API keys, the spoken WAV fixtures (below); spends money |
 | Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` (or `descriptions_only.yaml`) | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |

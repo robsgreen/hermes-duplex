@@ -24,7 +24,7 @@ from .config import AudioConfig
 from .dispatch.hermes_api import HermesApiClient, HermesApiError, RunEvent, RunStart
 from .people import PermissionChecker
 from .profiles import ActiveProfiles, SwitchOutcome
-from .prompts.base import SENTENCE_END, PromptContext, TaskReport
+from .prompts.base import OPEN_TASKS_MAX, SENTENCE_END, PromptContext, TaskReport
 from .prompts.notices import (
     LOST_TRACK,
     NO_QUESTION_PENDING,
@@ -142,6 +142,11 @@ RESTART_QUIET_S = 2.0
 """A prompt-context change from first hearing a person restarts a provider that cannot replace its
 instructions only once nobody has been voiced for this many seconds, longer than
 ``TRANSCRIPT_GRACE_MS``, so the restart cuts off no one's words, nor a live hand-off's transcript."""
+
+RESEED_LINES_SAID_ALONE = False
+"""Whether the summary that re-seeds a provider session, after someone joined the owner while their
+``USER.md`` or briefing was in the instructions, carries the transcript lines from before they joined.
+Off: it carries the open tasks only, since those lines may hold what was meant for the owner alone."""
 
 _NAMED_TASK = re.compile(r"\btask\s+(?:number\s+|#\s*)?(\d+)\b", re.IGNORECASE)
 """A task named by its number: "task 2", "task number 2", "task #2". Accepted, never advertised."""
@@ -471,21 +476,25 @@ class VoiceSession:
 
     The instructions speak for one active profile and one person at a time: the session's current
     prompt context (``prompt_context_for`` that profile, that person, and whether they are alone in
-    the conversation, ``Conversation.alone``), which every connect and reconnect builds afresh, so it
-    re-reads Hermes's context files. It starts on the conversation's ``person`` (who signed in, or who
-    started it) and their active profile, or on ``default_profile`` and no person when the
-    conversation has none, and moves to a person and their active profile when the session first
-    hears that person, and to whoever switches. Whenever the person it speaks to stops or starts being
-    alone (someone joins or leaves), and whenever a task changes, the context is built again: the
-    Hermes owner's ``USER.md`` and briefing go in only while they are alone, and the person's open
-    tasks are listed. When the context changes during a provider session, a provider that
+    the conversation, ``Conversation.alone``, with the person's open tasks added). It is built afresh,
+    re-reading Hermes's context files, only on connect and reconnect and when what it speaks for
+    changes. It starts on the conversation's ``person`` (who signed in, or who started it) and their
+    active profile, or on ``default_profile`` and no person when the conversation has none, and moves
+    to a person and their active profile when the session first hears that person, and to whoever
+    switches. When the person it speaks to has left, it moves to the conversation's ``person``, or else
+    to the one person from config present, if either is there. Whenever the person it speaks to stops
+    or starts being alone (someone joins or leaves), the context is built again: the Hermes owner's
+    ``USER.md`` and briefing go in only while they are alone. Whenever a task changes, only the open
+    tasks listed in it change. When the context changes during a provider session, a provider that
     ``replaces_instructions`` gets the new instructions in place (``update_instructions``); any other,
     or one whose update fails, is restarted: closed and reconnected like a provider session that ended,
     re-seeded with the reconnect summary, without counting toward the short-session limit, except for
     a change of the open tasks alone, which waits for the next restart or reconnect. A restart for a
-    person first heard, or for a person alone again, waits until the call is quiet
-    (``RESTART_QUIET_S``), so it does not cut off what they are saying; one for someone joining them
-    happens at once, so nothing meant for them alone is said. Hermes tasks keep running through it.
+    person first heard, for a person who left, or for a person alone again, waits until the call is
+    quiet (``RESTART_QUIET_S``), so it does not cut off what they are saying; one for someone joining
+    them happens at once, so nothing meant for them alone is said, and, when the instructions carried
+    the owner's ``USER.md`` or briefing, the output they had not heard yet is dropped first
+    (``_drop_output_for_newcomers``). Hermes tasks keep running through it.
     Hand-offs always run on the speaker's own active profile, whatever the instructions speak for.
 
     People switch their active profile only by asking: a ``switch_profile`` call, whose ``profile``
@@ -553,7 +562,9 @@ class VoiceSession:
 
     When the provider session ends on its own (it expired, dropped, or was closed by the provider),
     the session reconnects with backoff and re-seeds the new provider session with the latest
-    transcript lines and the open tasks. Input that arrives while reconnecting is not sent. Each
+    transcript lines (none from before someone joined the owner while their notes were in the
+    instructions, ``RESEED_LINES_SAID_ALONE``) and
+    the open tasks. Input that arrives while reconnecting is not sent. Each
     provider session has its own input timeline, starting at 0 when it connects, so speaker credit
     and transcript windows start afresh. Tasks keep running across a reconnect and report to the new
     provider session; one requested by an earlier provider session has its result spoken as a notice,
@@ -628,6 +639,13 @@ class VoiceSession:
         """Ids of the delegations the current provider session requested; only it can answer them."""
         self._history: deque[tuple[Literal["user", "assistant"], str]] = deque(maxlen=HISTORY_LINES)
         """The latest transcript lines as (speaker, text), oldest first."""
+        self._lines_added = 0
+        """Transcript lines added to ``_history`` so far, including those it no longer holds."""
+        self._reseed_after_line = 0
+        """``_lines_added`` when someone last joined a person alone: no re-seed carries the lines
+        before it."""
+        self._muted_item_id: str | None = None
+        """The output item playing when someone joined a person alone, whose further audio is dropped."""
         self._input_line = ""
         self._output_line = ""
         self._task_numbers: list[int] = []
@@ -748,7 +766,8 @@ class VoiceSession:
             for number in self._task_numbers
             if (task := self._tracker.get(number)) and task.state not in TERMINAL_STATES
         ]
-        summary = self._provider.prompter.reseed(self._history, open_tasks)
+        lines = list(self._history)
+        summary = self._provider.prompter.reseed(lines[len(lines) - self._lines_to_reseed() :], open_tasks)
         try:
             await retry_connect(lambda: self._connect(summary), sleep=self._sleep)
         except WireError as error:
@@ -771,11 +790,7 @@ class VoiceSession:
                 self._last_voiced_s = time.monotonic()
             for person in frame.voiced_speakers - self._people_heard:
                 self._first_heard(person)
-            person = self._context_person
-            if person is not None and self._conversation.alone(person) != self._context_alone:
-                # Someone joined or left: what is only for the person alone leaves the instructions at
-                # once, and comes back once the call is quiet.
-                self._change_prompt_context(self._context_profile, person, when_quiet=not self._context_alone)
+            await self._follow_presence()
             if not self._provider_open.is_set():
                 continue  # reconnecting: the new provider session starts with the input after it opens
             # Placed on the provider session's own timeline: the transport's t_ms never restarts.
@@ -786,6 +801,47 @@ class VoiceSession:
                 if connection == self._connection:
                     self._sent_ms = t_ms + FRAME_MS
                     self._input_advanced.notify_all()
+
+    async def _follow_presence(self) -> None:
+        """Keep the instructions on someone in the conversation, and what is only for a person alone
+        out of them once they are not.
+
+        When the person the instructions speak to has left, they move to the conversation's
+        ``person``, or else to the one person from config still present, if either is (once the call is
+        quiet). When the person stops being alone (someone joined, or they left), the instructions change
+        at once, and, if the open provider session's instructions carried text only for them alone (the
+        owner's ``USER.md`` or briefing), the output not heard yet is dropped first
+        (``_drop_output_for_newcomers``); when they are alone again, the change waits until the call is
+        quiet."""
+        person = self._context_person
+        if person is None:
+            return
+        target = person if self._conversation.present(person) else self._present_person() or person
+        if target == person and self._conversation.alone(person) == self._context_alone:
+            return
+        no_longer_alone = self._context_alone
+        if no_longer_alone and _carries_owner_texts(self._rendered_context):
+            await self._drop_output_for_newcomers()
+        profile = self._context_profile if target == person else self._active_profiles.get(target)
+        self._change_prompt_context(profile, target, when_quiet=not no_longer_alone)
+
+    def _present_person(self) -> str | None:
+        """Whom the instructions move to when their person has left: the conversation's ``person``
+        while present, else the one person from config present, else None."""
+        if (person := self._conversation.person) is not None and self._conversation.present(person):
+            return person
+        present = [name for name in self._permissions.names if self._conversation.present(name)]
+        return present[0] if len(present) == 1 else None
+
+    async def _drop_output_for_newcomers(self) -> None:
+        """Someone now hears the call besides the person who was alone in it: discard the output not
+        heard yet, as a barge-in does, ignore the rest of the item it belonged to, and, unless
+        ``RESEED_LINES_SAID_ALONE``, keep the transcript so far out of every later re-seed."""
+        self._muted_item_id = self._pacer.item_id
+        await self._barge_in("someone joined")
+        if not RESEED_LINES_SAID_ALONE:
+            self._input_line = self._output_line = ""
+            self._reseed_after_line = self._lines_added
 
     def _first_heard(self, person: str) -> None:
         """Take in ``person``, voiced for the first time in this session or for the first time since
@@ -847,8 +903,9 @@ class VoiceSession:
         """Whether output audio is held here or still playing at the conversation."""
         return self._pacer.held_ms > 0 or self._pacer.ahead_ms > 0
 
-    async def _barge_in(self) -> None:
+    async def _barge_in(self, reason: str = "barge-in") -> None:
         """Discard the output the user has not heard yet; the provider decides whether to go on.
+        ``reason`` says why, for the log.
 
         Where the provider supports it, the interrupted item is truncated to what the user heard, as
         the pacer counts it: the conversation's own count spans its playback, not the provider's items.
@@ -858,7 +915,7 @@ class VoiceSession:
         dropped_ms = self._pacer.drop()
         await self._conversation.flush_playback()
         logger.info(
-            "barge-in: flushed playback after %d ms of the item, dropped %.0f ms held", heard_ms, dropped_ms
+            "%s: flushed playback after %d ms of the item, dropped %.0f ms held", reason, heard_ms, dropped_ms
         )
         if item_id is not None and self._capabilities["supports_truncate"]:
             await self._provider.truncate(item_id, heard_ms)
@@ -901,7 +958,9 @@ class VoiceSession:
                         self._floor.speech_stopped()
                     case ResponseStarted():
                         self._floor.response_started()
-                    case OutputAudio(pcm=pcm, item_id=item_id):
+                    case OutputAudio(pcm=pcm, item_id=item_id) if (
+                        item_id is None or item_id != self._muted_item_id
+                    ):
                         self._pacer.push(pcm, item_id)
                     case InputTranscript(delta=delta, final=final, start_ms=start_ms):
                         self._input_transcript.add(self._sent_ms if start_ms is None else start_ms, delta)
@@ -935,7 +994,7 @@ class VoiceSession:
                     case Closed(reason=reason):
                         logger.info("voice provider session closed: %s", reason)
                     case _:
-                        pass  # SessionReady needs no handling
+                        pass  # SessionReady needs no handling, nor audio of a muted item
             if self._restarting:
                 self._restarting = False  # asked for, so neither short-lived nor a failure
             else:
@@ -975,21 +1034,33 @@ class VoiceSession:
 
     def _same_instructions(self, context: PromptContext, other: PromptContext | None) -> bool:
         """Whether instructions rendered from ``context`` need not replace ones rendered from ``other``:
-        the contexts are equal, or, on a provider that cannot replace instructions in place, differ only
-        in the open tasks, which are not worth a restart (spoken notices tell of task changes)."""
+        they render the same text, or, on a provider that cannot replace instructions in place, the same
+        text but for the open tasks, which are not worth a restart (spoken notices tell of task
+        changes). Comparing what the prompter writes, not the contexts, means a field that renders
+        nothing (such as a person with nothing said about them) never counts as a change."""
         if other is None:
             return False
-        if self._capabilities["replaces_instructions"]:
-            return context == other
-        return replace(context, open_tasks=()) == replace(other, open_tasks=())
+        if not self._capabilities["replaces_instructions"]:
+            context, other = replace(context, open_tasks=()), replace(other, open_tasks=())
+        render = self._provider.prompter.instructions
+        return context == other or render(context) == render(other)
 
     def _current_context(self) -> PromptContext:
         """The prompt context for ``_context_profile`` and ``_context_person`` as of now: whether the
-        person is alone in the conversation is checked again (and kept in ``_context_alone``), and
-        ``prompt_context_for`` re-reads what it reads."""
+        person is alone in the conversation is checked again (and kept in ``_context_alone``),
+        ``prompt_context_for`` re-reads what it reads (Hermes's context files among it), and the
+        person's open tasks are listed (``_open_tasks``)."""
         person = self._context_person
         self._context_alone = person is not None and self._conversation.alone(person)
-        return self._prompt_context_for(self._context_profile, person, self._context_alone)
+        context = self._prompt_context_for(self._context_profile, person, self._context_alone)
+        return replace(context, open_tasks=self._open_tasks())
+
+    def _open_tasks(self) -> tuple[tuple[str, str], ...]:
+        """``_context_person``'s queued and running tasks as ``PromptContext.open_tasks`` lists them:
+        (topic, profile), the newest ``OPEN_TASKS_MAX``, oldest first."""
+        person = self._context_person
+        tasks = self._tracker.active_for(person) if person is not None else ()
+        return tuple((topic(task.text), task.profile) for task in tasks[-OPEN_TASKS_MAX:])
 
     async def _apply_prompt_context(self, *, when_quiet: bool = False) -> None:
         """Give the open provider session instructions rendered from the current prompt context.
@@ -1060,10 +1131,16 @@ class VoiceSession:
         line, self._output_line = self._output_line, ""
         await self._add_transcript_line("assistant", line)
 
+    def _lines_to_reseed(self) -> int:
+        """How many of the latest transcript lines a re-seed may carry: those added since someone
+        joined a person alone (``_drop_output_for_newcomers``), or all of them."""
+        return min(len(self._history), self._lines_added - self._reseed_after_line)
+
     async def _add_transcript_line(self, speaker: Literal["user", "assistant"], text: str) -> None:
         text = text.strip()
         if text:
             self._history.append((speaker, text))
+            self._lines_added += 1
             await self._conversation.notify({"transcript": {"speaker": speaker, "text": text}})
 
     def _on_delegation(self, request: DelegationRequested) -> None:
@@ -1682,8 +1759,15 @@ class VoiceSession:
 
     async def _notify_tasks(self) -> None:
         """Send this session's task list to the conversation's user interface, and bring the open tasks
-        in the instructions up to date where that needs no restart (``_same_instructions``)."""
-        self._change_prompt_context(self._context_profile, self._context_person)
+        in the instructions up to date where that needs no restart (``_same_instructions``). Only the
+        open tasks change: nothing else is read again, so a context file that changed meanwhile waits
+        for the next connect, switch, or change of who the instructions speak to."""
+        context = replace(self._prompt_context, open_tasks=self._open_tasks())
+        if context != self._prompt_context:
+            self._prompt_context = context
+            if self._capabilities["replaces_instructions"]:
+                # Quiet, should the update fail: a task change is never worth cutting anyone off.
+                self._spawn(self._apply_prompt_context(when_quiet=True))
         tasks = [task for number in self._task_numbers if (task := self._tracker.get(number))]
         await self._conversation.notify(
             {
@@ -1693,6 +1777,12 @@ class VoiceSession:
                 ]
             }
         )
+
+
+def _carries_owner_texts(context: PromptContext | None) -> bool:
+    """Whether instructions rendered from ``context`` carried what is only for the owner alone: their
+    ``USER.md`` or briefing."""
+    return context is not None and bool(context.hermes_user or context.hermes_briefing)
 
 
 def _with_context(text: str, context: str | None) -> str:

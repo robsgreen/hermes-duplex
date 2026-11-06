@@ -868,12 +868,23 @@ def test_hermes_context_files_need_profile_names_hermes_can_find(tmp_path: Path)
     assert "'../secrets'" in str(error)
 
 
-@pytest.mark.parametrize("value", [0, 8001, "4000"])
+@pytest.mark.parametrize("value", [0, 8001, "4000", 4000.5, float("inf"), float("nan")])
 def test_hermes_context_max_chars_out_of_range_is_rejected(tmp_path: Path, value: object) -> None:
     _assert_error(
         tmp_path,
         lambda raw: raw["hermes"].update(voice_context_max_chars=value),
         "hermes.voice_context_max_chars",
+    )
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan"), "6"])
+def test_a_briefing_refresh_age_that_is_not_a_finite_positive_number_is_rejected(
+    tmp_path: Path, value: object
+) -> None:
+    _assert_error(
+        tmp_path,
+        lambda raw: raw["hermes"].update(briefing_refresh_h=value),
+        "hermes.briefing_refresh_h",
     )
 
 

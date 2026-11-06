@@ -467,18 +467,21 @@ stock-picker for voice" lines, then run `hermes-duplex voice-context show stock-
 1. On the web page, on `stock-picker`, ask "what can you do for me?", then "what's my favourite
    cheese?", then "what am I busy with these days?".
 2. On Discord, alone in the channel with the bot, ask the same three questions.
-3. Have person B join the channel (not speak), and ask the cheese question again; then have B leave
-   and, after a quiet moment, ask once more.
+3. Ask "tell me everything you know about me" and, while the answer plays, have person B join the
+   channel (not speak); then ask the cheese question again; then have B leave and, after a quiet
+   moment, ask once more.
 4. Start a slow task ("research three dividend stocks in depth") and, while it runs, ask "what's
-   still running?"; on `openai-realtime` or `xai-realtime` check that the log shows an instruction
-   update when it starts and ends, and on `gpt-live` that no restart follows.
+   still running?" and edit `stock-picker`'s `USER.md`; on `openai-realtime` or `xai-realtime` check
+   that the log shows an instruction update when it starts and ends, and on `gpt-live` that no
+   restart follows; and that no "Hermes wrote" line appears until you have left the call.
 5. Edit `$HERMES_HOME/duplex/voice_context/stock-picker.soul.md` by hand, reconnect, and ask what
    the agent can do; then run `hermes-duplex voice-context refresh stock-picker` (it says it kept
    your edit) and `--force`.
 
 Expected: in steps 1 and 2 the answers follow the rewritten SOUL.md, the cheese is known, and the
-briefing's projects come up. In step 3, with B in the channel, the cheese is not known (the log shows
+briefing's projects come up. In step 3 the answer stops as B joins (the log shows "someone joined: flushed playback"), and with B
+in the channel the cheese is not known (the log shows
 "voice instructions now speak for profile stock-picker, to <you>" without "alone"; GPT-Live restarts
 at once), and once B has left and the call is quiet it is known again. In step 4 the task is named by
-topic and no task number is said. In step 5 the edit is what the model goes by until `--force`
+topic and no task number is said, and the edit reaches the prompt only at the next connect. In step 5 the edit is what the model goes by until `--force`
 replaces it. Neither the log nor `doctor` ever prints a file's text.

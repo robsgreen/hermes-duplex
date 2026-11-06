@@ -34,7 +34,7 @@ from typing import Literal, Protocol
 
 from .config import ContextKind
 from .dispatch.hermes_api import TERMINAL_KINDS, HermesApiClient, HermesApiError
-from .prompts.base import split_text
+from .prompts.base import cap_text
 
 logger = logging.getLogger(__name__)
 
@@ -105,19 +105,6 @@ def source_path(hermes_home: Path, profile: str, kind: ContextKind) -> Path | No
             return None
 
 
-def cap_text(text: str, max_chars: int) -> str:
-    """``text`` stripped, cut to at most ``max_chars`` characters when longer: after its last line
-    break in the second half of the room, else after a sentence end or a word (``split_text``)."""
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    room = text[:max_chars]
-    line_end = room.rfind("\n")
-    if line_end > max_chars // 2:
-        return room[:line_end].rstrip()
-    return split_text(text, max_chars)[0].rstrip()
-
-
 @dataclass(frozen=True)
 class _Cached:
     """A cached text and what its sidecar holds."""
@@ -137,12 +124,13 @@ class _Cached:
 class HermesContextFiles:
     """Reads the Hermes context of ``kinds`` for the voice prompt, and keeps what Hermes writes for it.
 
-    ``read`` is cheap enough to call on every connect and prompt change: files are re-read only when
-    their modification time or size changes. When the cache holds no rewrite of a file's current text,
-    or no briefing, or a briefing older than ``briefing_refresh_h`` that nobody edited, ``read`` starts
-    a background ``refresh`` of it (when there is a ``write`` and an event loop is running), at most one
-    per text at a time and none for ``RETRY_AFTER_S`` after a failed one; the result is used from the
-    next ``read``. ``clock`` gives Unix seconds. Use it from one event loop.
+    ``read`` reads the files each time it is called. When the cache holds no rewrite of a file's
+    current text, or no briefing, or a briefing older than ``briefing_refresh_h`` that nobody edited,
+    ``read`` starts a background ``refresh`` of it (when there is a ``write`` and an event loop is
+    running), at most one per text at a time and none for ``RETRY_AFTER_S`` after a failed one or a
+    failed write to the cache; the result is used from the next ``read``. While ``defer_refreshes`` is
+    on, such a refresh is remembered instead and started when it is turned off. ``clock`` gives Unix
+    seconds. Use it from one event loop.
     """
 
     def __init__(
@@ -161,9 +149,6 @@ class HermesContextFiles:
         self._write = write
         self._briefing_refresh_s = briefing_refresh_h * 3600
         self._clock = clock
-        self._texts: dict[Path, tuple[int, int, str]] = {}
-        """Per file read, its modification time (ns), size, and text, so an unchanged file is not
-        read again."""
         self._logged: set[tuple[Path, str]] = set()
         """(file, what was logged about it), so each missing, unreadable, or cut-short file is logged
         once."""
@@ -171,6 +156,9 @@ class HermesContextFiles:
         self._locks: dict[tuple[str, ContextKind], asyncio.Lock] = {}
         self._failed: dict[tuple[str, ContextKind], tuple[str | None, float]] = {}
         """Per text, the sha256 of the source of its last failed write (None for a briefing), and when."""
+        self._deferring = False
+        self._deferred: set[tuple[str, ContextKind]] = set()
+        """The texts whose background refresh waits for ``defer_refreshes`` to be turned off."""
 
     @property
     def kinds(self) -> frozenset[ContextKind]:
@@ -217,6 +205,17 @@ class HermesContextFiles:
         cache is missing or stale, as ``read`` would."""
         for profile in profiles:
             for kind in sorted(self._kinds & frozenset(kinds)):
+                self.read(profile, kind)
+
+    def defer_refreshes(self, defer: bool) -> None:
+        """Turn deferring background refreshes on or off. While on, a refresh that ``read`` or
+        ``refresh_stale`` would start is remembered instead, so Hermes is not asked to write anything;
+        turning it off starts those that are still due. A refresh already running goes on, and
+        ``refresh`` itself never waits."""
+        self._deferring = defer
+        if not defer:
+            deferred, self._deferred = self._deferred, set()
+            for profile, kind in sorted(deferred):
                 self.read(profile, kind)
 
     async def refresh(self, profile: str, kind: ContextKind, *, force: bool = False) -> RefreshOutcome:
@@ -271,6 +270,7 @@ class HermesContextFiles:
                 _write_atomically(target, written)
                 _write_atomically(target.with_suffix(".json"), json.dumps(sidecar) + "\n")
             except OSError as error:
+                self._failed[key] = (source_sha256, self._clock())
                 logger.warning("could not cache the voice context at %s: %s", target, type(error).__name__)
                 return "failed"
             logger.info(
@@ -296,7 +296,7 @@ class HermesContextFiles:
 
     def _start_refresh(self, profile: str, kind: ContextKind, source: str | None) -> None:
         """Start a background refresh of the text unless one runs, it failed lately for this source,
-        there is no writer, or no event loop is running."""
+        there is no writer, or no event loop is running; while deferring, remember it instead."""
         key = (profile, kind)
         if self._write is None or key in self._refreshing:
             return
@@ -308,6 +308,9 @@ class HermesContextFiles:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # a command reading the context once, such as ``voice-context show``
+        if self._deferring:
+            self._deferred.add(key)
+            return
         task = loop.create_task(self.refresh(profile, kind))
         self._refreshing[key] = task
         task.add_done_callback(lambda _: self._refreshing.pop(key, None))
@@ -339,28 +342,21 @@ class HermesContextFiles:
             return None
 
     def _read_text(self, path: Path, *, missing_level: int | None) -> str | None:
-        """The text of ``path``, re-read only when its modification time or size changed; None when it
-        is missing (logged once at ``missing_level``, unless None) or unreadable (a warning, once)."""
+        """The text of ``path``; None when it is missing (logged once at ``missing_level``, unless None)
+        or unreadable (a warning, once)."""
         try:
-            stat = path.stat()
-            known = self._texts.get(path)
-            if known is not None and known[:2] == (stat.st_mtime_ns, stat.st_size):
-                return known[2]
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            self._texts.pop(path, None)
             if missing_level is not None:
                 self._log_once(
                     missing_level, path, "missing", "no %s; the voice prompt goes without it", path
                 )
             return None
         except (OSError, UnicodeDecodeError) as error:
-            self._texts.pop(path, None)
             self._log_once(
                 logging.WARNING, path, "unreadable", "cannot read %s: %s", path, type(error).__name__
             )
             return None
-        self._texts[path] = (stat.st_mtime_ns, stat.st_size, text)
         self._logged.discard((path, "missing"))
         self._logged.discard((path, "unreadable"))
         return text
@@ -391,9 +387,10 @@ class HermesContextFiles:
 
 class HermesWriter:
     """A ``Writer`` that asks the profile itself, through the Hermes API server, on the profile's
-    default model at low effort, in a Hermes session of its own, never a person's:
-    ``duplex-voice-context-<profile>-<kind>`` for a rewrite, ``duplex-voice-briefing-<profile>`` for
-    the briefing. ``owner`` is the name of the person ``USER.md`` and the briefing are about, if any."""
+    default model at low effort, in a fresh Hermes session for each write, never a person's:
+    ``duplex-voice-context-<profile>-<kind>-<run uuid>`` for a rewrite,
+    ``duplex-voice-briefing-<profile>-<run uuid>`` for the briefing, so no write sees an earlier one.
+    ``owner`` is the name of the person ``USER.md`` and the briefing are about, if any."""
 
     def __init__(self, hermes: HermesApiClient, owner: str | None) -> None:
         self._hermes = hermes
@@ -404,12 +401,13 @@ class HermesWriter:
         cannot start, ends any other way, or its stream ends without an outcome; a cancelled call (such
         as a timeout) asks Hermes to stop the run."""
         prompt = writing_prompt(profile, kind, source, max_chars, self._owner)
+        run_uuid = str(uuid.uuid4())
         session = (
-            f"duplex-voice-briefing-{profile}"
+            f"duplex-voice-briefing-{profile}-{run_uuid}"
             if kind == "briefing"
-            else f"duplex-voice-context-{profile}-{kind}"
+            else f"duplex-voice-context-{profile}-{kind}-{run_uuid}"
         )
-        start = await self._hermes.start_run(profile, prompt, session, None, "low", str(uuid.uuid4()))
+        start = await self._hermes.start_run(profile, prompt, session, None, "low", run_uuid)
         if start.run_id is None:
             raise HermesApiError("Hermes queued the run without a run id")
         try:
@@ -445,7 +443,9 @@ def writing_prompt(
                 f"Below is your SOUL.md, which describes you, the {profile} agent. {voice} Rewrite the "
                 "document as background for that voice assistant: what you are for, what you can do, and "
                 "which requests it should always hand to you. Write about yourself in the third person "
-                f'("The {profile} agent ...").'
+                f'("The {profile} agent ..."). Anyone on a call may hear what the voice assistant says '
+                f"from it, so say nothing about {owner_name} or any other person: no names, facts, "
+                "plans, or preferences of anyone, even if you know them."
             )
         case "user":
             purpose = (

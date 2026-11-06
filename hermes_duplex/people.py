@@ -57,6 +57,11 @@ class PermissionChecker:
         """Discord user ids of every person who has one; audio and commands from others are dropped."""
         return frozenset(self._by_discord_id)
 
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Every person's name, in config order."""
+        return tuple(self._by_name)
+
     def by_name(self, name: str) -> Person | None:
         """The person ``name`` from config's ``people`` table, or None for anyone not in config."""
         return self._by_name.get(name)

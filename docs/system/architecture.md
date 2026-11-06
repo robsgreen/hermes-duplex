@@ -457,28 +457,41 @@ system item instead of deleting it, and GPT-Live's commentary is already part of
 **Prompt context.** The instructions speak for one active profile and to one person at a time: the
 session's current `PromptContext` (`service.prompt_context(config, profile, person, person_alone)`),
 which carries that profile's name, description, `voice_context`, and Hermes context, and what is known
-about the person (see Hermes context below). Every connect and reconnect builds it afresh, re-reading
-Hermes's files and the person's open tasks, and renders it. It starts on the conversation's `person`
-and their active profile: the signed-in person (web), or the person who brought the bot in with
-`/duplex join` or a typed `join` (Discord); on `router.default_profile` and no person when there is
-none. It moves to a person and their active profile when the session first hears that person, and to
-the switching person and their new profile on every switch it is notified of. On every input frame
-the session also checks whether that person is alone in the conversation (`Conversation.alone`: the
+about the person (see Hermes context below); the session adds the person's open tasks. The context is
+built afresh, re-reading Hermes's files, only at these points: every connect and reconnect, a switch,
+the session first hearing a person, and a change of who the instructions speak to or of whether that
+person is alone. It starts on the conversation's `person` and their active profile: the signed-in
+person (web), or the person who brought the bot in with `/duplex join` or a typed `join` (Discord); on
+`router.default_profile` and no person when there is none. It moves to a person and their active
+profile when the session first hears that person, and to the switching person and their new profile
+on every switch it is notified of. On every input frame the session also checks whether that person
+is still in the conversation (`Conversation.present`) and alone in it (`Conversation.alone`: the
 signed-in person on the web; on Discord, in the voice channel with only bots, a member missing from
-the guild's member cache counting as a person); when that flips, the context is built again. And on
-every task change it sends the conversation's user interface, it builds the context again for the
-open tasks. A rebuilt context that renders the same instructions changes nothing; on GPT-Live, one
-that differs only in the open tasks changes nothing either, since a restart is not worth it (the
-spoken notices tell of task changes, and the next restart or reconnect lists them). When it changes
-while a provider session is open:
+the guild's member cache counting as a person). When they have left, the context moves, once the call
+is quiet, to the conversation's `person` if present, else to the one person from config still
+present, if there is exactly one. When alone flips, the context is built again. On every task change
+it sends the conversation's user interface, only the open tasks in the context change: nothing is
+read again, so a context file that changed mid-call reaches the prompt at the next of the points
+above, never with a task change. Two contexts are compared by the instructions the prompter renders
+from them, so a field that renders nothing (a person with nothing said about them) is no change. A
+context that renders the same instructions changes nothing; on GPT-Live, one that differs only in the
+open tasks changes nothing either, since a restart is not worth it (the spoken notices tell of task
+changes, and the next restart or reconnect lists them). When it changes while a provider session is
+open:
 
 | Provider | `replaces_instructions` | On a prompt-context change |
 |---|---|---|
 | OpenAI Realtime, xAI Grok | true | `update_instructions`: a `session.update` carrying only `instructions` and an `event_id`, meant to leave tools, voice, audio settings, and the conversation as they are. It waits up to `UPDATE_TIMEOUT_S` (5 s) for `session.updated`; an `error` naming its event id, a timeout, or the connection ending raises, the old instructions stay, and the session restarts instead. The rejection is not passed on as a provider error, so it does not count as a refused response. |
 | GPT-Live | false | The session closes the provider session and reconnects it with the new instructions and the reconnect summary (see Reconnect and re-seed). The restart counts neither as short-lived nor as a failure; Hermes tasks keep running. |
 
-A restart for an explicit switch, or for someone joining the owner, happens at once. One for a person
-first heard or for the owner alone again (on GPT-Live, or after a failed update on Realtime or Grok)
+A restart for an explicit switch, or for someone joining the owner, happens at once. When the person
+the instructions speak to stops being alone (someone joined, or they left) while the open provider
+session's instructions carry the owner's `USER.md` or briefing, the session first drops the output
+not heard yet, as a barge-in does (pacer drop, `flush_playback`, `truncate` where
+supported), and ignores the rest of that output item, so nothing said for them alone reaches the
+newcomer; unless `session.RESEED_LINES_SAID_ALONE` (off), no later re-seed carries the transcript
+lines from before (a default pending the owner's confirmation). One for a person first heard, for a
+person who left, or for the owner alone again (on GPT-Live, or after a failed update on Realtime or Grok)
 first waits until the call is quiet: nobody voiced for
 `RESTART_QUIET_S` (2 s, longer than the live hand-off's transcript grace), no output held or
 playing, and, where the provider emits speech events, the floor free, so it cuts off nobody's words.
@@ -495,27 +508,33 @@ requires Hermes profile ids when the feature is on). `prompt_context` puts in:
 | Field | From | When |
 |---|---|---|
 | `hermes_soul` | the active profile's `SOUL.md`, as Hermes rewrote it for voice, or the file cut to size | `soul` listed |
-| `person`, `person_voice_context` | `people.<p>.voice_context` | the context has a person |
+| `person` | who the conversation is with | the context has a person |
+| `person_voice_context` | `people.<p>.voice_context` | the context has a person |
 | `hermes_user` | the active profile's `USER.md`, rewritten or cut to size | `user` listed, the person is the `hermes_owner`, and alone |
 | `hermes_briefing` | the active profile's briefing on the owner's projects and priorities | `briefing` listed, the person is the owner, and alone |
-| `open_tasks` | the person's queued and running tasks, as (topic, profile), the newest `OPEN_TASKS_MAX` (10) | the context has a person |
+| `open_tasks` | the person's queued and running tasks, as (topic, profile), the newest `OPEN_TASKS_MAX` (10); listed by the session | the context has a person |
 
-`person` is set only when one of the person's fields has something. Each prompter renders them once,
+A person with nothing said about them renders nothing. Each prompter renders them once,
 as data (`blocks.agent_background`, `blocks.person_background`: an intro line from `prompts/blocks.py`,
 then the text between `<agent_background>`, `<owner_background>`, `<owner_briefing>`, or
 `<open_tasks>` tags, a closing tag inside defused); the intro says the instructions win where the
 background differs. GPT-Live: `Agent background:` and `About <person>:` paragraphs after the active
 agent; OpenAI Realtime: a `# Context` section last, with `## Active Agent Background` and `## About
 <person>` (the guide's place for background, saying which source is authoritative); Grok: a `##
-Background` section after Objective (the guide's small facts section near Role & Persona). With the
+Background` section after Objective (the guide's small facts section near Role & Persona), each
+Hermes text cut to `xai.prompt.BACKGROUND_MAX_CHARS` (2000) since the guide asks for short prompts
+(a default pending the owner's confirmation). With the
 largest caps (`voice_context_max_chars` at most 8000, the briefing 6000, each `voice_context` 2000,
 ten tasks), GPT-Live's instructions stay within its 16,384 tokens at `CHARS_PER_TOKEN`.
 
 Hermes writes the texts the prompt prefers: `HermesWriter` starts a run on the profile itself
-(`/p/<profile>/v1/runs`, the profile's key, its default model, effort `low`) in a session of its own,
-`duplex-voice-context-<profile>-<kind>` or `duplex-voice-briefing-<profile>`, asking for short plain
-sentences within the cap, no tool or formatting rules, no secrets, and the text alone
+(`/p/<profile>/v1/runs`, the profile's key, its default model, effort `low`) in a fresh session for
+each write, `duplex-voice-context-<profile>-<kind>-<run uuid>` or
+`duplex-voice-briefing-<profile>-<run uuid>`, so no write builds on an earlier one, asking for short
+plain sentences within the cap, no tool or formatting rules, no secrets, and the text alone
 (`hermes_context.writing_prompt`; a source file is sent between `<document>` markers as data). The
+`SOUL.md` rewrite is also told that anyone on a call may hear it, so it must say nothing about the
+owner or any other person. The
 result, cut to its cap, is cached atomically at `$HERMES_HOME/duplex/voice_context/<profile>.<kind>.md`,
 then its `.json` sidecar (`source_sha256`, null for the briefing; `written_sha256`; `written_at`). A
 `read` of `soul` or `user` uses the cache while `source_sha256` matches the file (the cache's own hash
@@ -523,11 +542,13 @@ differing from `written_sha256` marks a hand edit, which is used and kept); othe
 file cut at a line or sentence end, and starts a background refresh. A briefing is used at any age,
 none until one exists; one older than `briefing_refresh_h` and not edited is refreshed in the
 background. Refreshes run one at a time per text, time out after `WRITE_TIMEOUT_S` (300 s, stopping
-the run), and after a failure wait `RETRY_AFTER_S` (600 s) before trying the same source again; a
-call never waits for one, and a result is used from the next `read`. The service starts refreshes of
-every profile's files, and of the briefing on the owner's active profile, when it starts, and cancels
-those still running when it stops. Files are re-read only when their modification time or size
-changes. A missing file is logged once (info), an unreadable one once (warning), a cut one once with
+the run), and after a failure, or a failed write to the cache, wait `RETRY_AFTER_S` (600 s) before
+trying the same source again; a call never waits for one, and a result is used from the next `read`.
+The service starts refreshes of every profile's files, and of the briefing on the owner's active
+profile, when it starts, and cancels those still running when it stops. Unless
+`service.REFRESH_CONTEXT_DURING_CALLS` (off; a default pending the owner's confirmation), refreshes
+that fall due while any conversation is on are deferred (`HermesContextFiles.defer_refreshes`) and
+start once the last conversation ends. Each `read` reads the files. A missing file is logged once (info), an unreadable one once (warning), a cut one once with
 its sizes; no text is ever logged. `hermes-duplex voice-context show` renders the instructions as if
 the owner were alone, with no rewrite started; `voice-context refresh [--force]` runs the refreshes
 now (`--force` replacing current texts and hand edits).
@@ -706,7 +727,8 @@ When a provider session ends without the session asking (expiry, a drop, or the 
 it), the session reconnects through `retry_connect` (`providers/wire.py`): up to 3 attempts, 0.5 s
 then doubling between them. Input that arrives meanwhile is not sent. The new provider session is
 seeded with the prompter's `reseed` (`blocks.history_summary` for all three): the last 10
-transcript lines framed as data, and the open tasks with their states in neutral words
+transcript lines framed as data (only those since someone joined the owner while their notes were
+in the instructions, see Prompt context), and the open tasks with their states in neutral words
 (`notices.task_list`; the spoken status's "I'll tell you when it finishes" stays out of the model's
 context). OpenAI Realtime caps sessions at 60 minutes (`max_session_s` 3600);
 GPT-Live and xAI publish no cap. A change of prompt context on a provider without

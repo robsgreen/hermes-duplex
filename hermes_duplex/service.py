@@ -16,8 +16,7 @@ from .dispatch.hermes_api import HermesApiClient
 from .hermes_context import HermesContextFiles, HermesWriter
 from .people import PermissionChecker
 from .profiles import ActiveProfiles
-from .prompts.base import OPEN_TASKS_MAX, PromptContext
-from .prompts.notices import topic
+from .prompts.base import PromptContext
 from .providers.registry import ProviderFactory, provider_factory
 from .router.composite import CompositeRouter
 from .router.factory import build_backends
@@ -35,6 +34,11 @@ STOP_TIMEOUT_S = 5.0
 
 ACTIVE_PROFILES_FILE_NAME = "active_profiles.json"
 """The file under ``$HERMES_HOME/duplex/`` that keeps each person's active profile across restarts."""
+
+REFRESH_CONTEXT_DURING_CALLS = False
+"""Whether Hermes may rewrite a context text or refresh the briefing in the background while a
+conversation is on. Off: what falls due meanwhile waits until no conversation is left, so the writes
+neither compete with the call's own tasks nor change a file the call reads; no call ever waits for one."""
 
 SESSION_STOP_GRACE_S = 1.0
 """How long ``stop`` lets cancelled sessions finish (closing their provider) before abandoning them."""
@@ -168,39 +172,43 @@ class DuplexService:
         )
 
     async def _run_conversation(self, conversation: Conversation) -> None:
-        """Run one voice session for ``conversation`` until either ends. Transports call this."""
+        """Run one voice session for ``conversation`` until either ends. Transports call this.
+
+        Unless ``REFRESH_CONTEXT_DURING_CALLS``, the context files' background refreshes are deferred
+        from the first conversation on until the last one ends."""
         if self._stopping:
             await conversation.close("server stopping")
             return
         task = asyncio.current_task()
         assert task is not None, "transports call this from a task"
-        provider = self._provider_factory(self._config.provider, self._config.secrets, self._prompt_context)
-        session = VoiceSession(
-            conversation,
-            provider,
-            router=self._router,
-            hermes=self._hermes,
-            tracker=self._tracker,
-            permissions=self._permissions,
-            active_profiles=self._active_profiles,
-            prompt_context_for=lambda profile, person, alone: prompt_context(
-                self._config,
-                profile,
-                person,
-                alone,
-                context_files=self._context_files,
-                open_tasks=self._tracker.active_for(person) if person is not None else (),
-            ),
-            default_profile=self._config.router.default_profile,
-            voice=self._config.provider.voice,
-            pacer_lead_ms=self._config.audio.pacer_lead_ms,
-            gate_threshold_dbfs=self._config.audio.gate_threshold_dbfs,
-        )
         self._sessions[task] = conversation
+        if not REFRESH_CONTEXT_DURING_CALLS:
+            self._context_files.defer_refreshes(True)  # before the session first reads the files
         try:
+            provider = self._provider_factory(
+                self._config.provider, self._config.secrets, self._prompt_context
+            )
+            session = VoiceSession(
+                conversation,
+                provider,
+                router=self._router,
+                hermes=self._hermes,
+                tracker=self._tracker,
+                permissions=self._permissions,
+                active_profiles=self._active_profiles,
+                prompt_context_for=lambda profile, person, alone: prompt_context(
+                    self._config, profile, person, alone, context_files=self._context_files
+                ),
+                default_profile=self._config.router.default_profile,
+                voice=self._config.provider.voice,
+                pacer_lead_ms=self._config.audio.pacer_lead_ms,
+                gate_threshold_dbfs=self._config.audio.gate_threshold_dbfs,
+            )
             await session.run()
         finally:
             del self._sessions[task]
+            if not self._sessions and not self._stopping:
+                self._context_files.defer_refreshes(False)
 
     async def _stop_sessions(self) -> None:
         """Cancel every session and wait ``SESSION_STOP_GRACE_S`` for them to close their providers.
@@ -302,15 +310,15 @@ def prompt_context(
     person_alone: bool = False,
     *,
     context_files: HermesContextFiles | None = None,
-    open_tasks: Sequence[Task] = (),
 ) -> PromptContext:
     """What every provider's prompt is written from: the ``assistant`` section and the profiles, and,
     when ``active_profile`` names a configured profile, that profile with its description and
     ``voice_context`` as the one the instructions speak for, and its Hermes ``SOUL.md`` from
-    ``context_files``. ``person`` is who the conversation is with: their config ``voice_context`` and
-    ``open_tasks`` (their queued and running tasks, of which the newest ``OPEN_TASKS_MAX`` go in) go
+    ``context_files``. ``person`` is who the conversation is with: their config ``voice_context`` goes
     in, and, when they are the Hermes owner and ``person_alone`` (nobody else in the conversation),
-    the active profile's ``USER.md`` and briefing. Raises ``KeyError`` for an unknown profile."""
+    the active profile's ``USER.md`` and briefing. The open tasks are left empty for the session to
+    list (``VoiceSession``). Reads the context files each call. Raises ``KeyError`` for an unknown
+    profile."""
     assistant = config.assistant
     active = config.profiles[active_profile] if active_profile is not None else None
     who = config.people.get(person) if person is not None else None
@@ -320,9 +328,6 @@ def prompt_context(
         if who is not None and who.hermes_owner and person_alone:
             user = context_files.read(active_profile, "user")
             briefing = context_files.read(active_profile, "briefing")
-    person_voice_context = who.voice_context if who is not None else None
-    tasks = tuple((topic(task.text), task.profile) for task in open_tasks[-OPEN_TASKS_MAX:])
-    says_anything = person_voice_context or user or briefing or tasks
     return PromptContext(
         assistant_name=assistant.name,
         persona=assistant.persona,
@@ -332,11 +337,10 @@ def prompt_context(
         active_profile_description=active.description if active is not None else None,
         voice_context=active.voice_context if active is not None else None,
         hermes_soul=soul.text if soul is not None else None,
-        person=person if says_anything else None,
-        person_voice_context=person_voice_context,
+        person=person,
+        person_voice_context=who.voice_context if who is not None else None,
         hermes_user=user.text if user is not None else None,
         hermes_briefing=briefing.text if briefing is not None else None,
-        open_tasks=tasks,
     )
 
 

@@ -18,8 +18,8 @@ hermes:
   # the agent; `user` is its memories/USER.md, and `briefing` a summary of the owner's current projects
   # and priorities that Hermes writes from its memory; both go in only while the person with
   # `hermes_owner: true` is alone on the call (the web page, or alone on Discord). Hermes rewrites
-  # SOUL.md and USER.md for voice and writes the briefing in the background, through the API server on
-  # each profile, and caches them in $HERMES_HOME/duplex/voice_context/ (edit them there; an edit is
+  # SOUL.md and USER.md for voice and writes the briefing in the background (never while a call is on),
+  # through the API server on each profile, and caches them in $HERMES_HOME/duplex/voice_context/ (edit them there; an edit is
   # kept until the source file changes). `voice_context_max_chars` (4000, at most 8000) caps SOUL.md
   # and USER.md; `briefing_refresh_h` (6) is how old a briefing gets before Hermes writes a new one.
   # voice_context_files: [soul, user, briefing]

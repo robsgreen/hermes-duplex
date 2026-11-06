@@ -7,6 +7,7 @@ read from the env var a ``*_env`` key names, at load time, into a ``Secrets`` ob
 values from ``repr()``.
 """
 
+import math
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -597,8 +598,8 @@ def _hermes(section: _Section, profiles: Mapping[str, ProfileConfig]) -> HermesC
                     "so its files cannot be found",
                 )
     briefing_refresh_h = section.number("briefing_refresh_h", HermesConfig.briefing_refresh_h)
-    if briefing_refresh_h <= 0:
-        raise ConfigError(section.child("briefing_refresh_h"), "must be greater than 0")
+    if not math.isfinite(briefing_refresh_h) or briefing_refresh_h <= 0:
+        raise ConfigError(section.child("briefing_refresh_h"), "must be a finite number greater than 0")
     config = HermesConfig(
         api_base=api_base.rstrip("/"),
         profile_keys_env=MappingProxyType(profile_keys_env),

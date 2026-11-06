@@ -4,10 +4,12 @@ edits, background refreshes, caps, and the writer that asks Hermes."""
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 import pytest
 
+from hermes_duplex import hermes_context
 from hermes_duplex.config import ContextKind
 from hermes_duplex.dispatch.hermes_api import HermesApiClient, HermesApiError
 from hermes_duplex.hermes_context import (
@@ -15,10 +17,10 @@ from hermes_duplex.hermes_context import (
     RETRY_AFTER_S,
     HermesContextFiles,
     HermesWriter,
-    cap_text,
     source_path,
     writing_prompt,
 )
+from hermes_duplex.prompts.base import cap_text
 from tests.fakes.fake_hermes_api import FakeHermesApi, RunScript
 
 SOUL = "# Stock picker\nYou manage Rob's portfolio.\nUse the brokerage tool for trades.\n"
@@ -361,6 +363,68 @@ async def test_close_cancels_a_refresh_still_running(tmp_path: Path) -> None:
     assert not files.cache_path("general", "soul").exists()
 
 
+async def test_a_failed_write_to_the_cache_waits_before_trying_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "general", "soul", SOUL)
+    writer = RecordingWriter()
+    clock = Clock()
+    files = _files(tmp_path, writer, clock=clock)
+
+    def full_disk(path: Path, text: str) -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(hermes_context, "_write_atomically", full_disk)
+    files.read("general", "soul")
+    await _settle(files)
+    files.read("general", "soul")
+    await _settle(files)
+
+    assert len(writer.calls) == 1
+    clock.now += RETRY_AFTER_S
+    files.read("general", "soul")
+    await _settle(files)
+    assert len(writer.calls) == 2
+
+
+async def test_refreshes_wait_while_deferred_and_start_when_deferring_ends(tmp_path: Path) -> None:
+    _write(tmp_path, "general", "soul", SOUL)
+    writer = RecordingWriter()
+    files = _files(tmp_path, writer)
+
+    files.defer_refreshes(True)
+    found = files.read("general", "soul")
+    await _settle(files)
+
+    assert found is not None and found.origin == "original"
+    assert writer.calls == []
+    files.defer_refreshes(False)
+    await _settle(files)
+    assert [(profile, kind) for profile, kind, _, _ in writer.calls] == [("general", "soul")]
+    assert await files.refresh("general", "soul") == "current"
+
+
+async def test_refresh_itself_never_waits_for_deferred_refreshes(tmp_path: Path) -> None:
+    _write(tmp_path, "general", "soul", SOUL)
+    files = _files(tmp_path, RecordingWriter())
+    files.defer_refreshes(True)
+
+    assert await files.refresh("general", "soul") == "rewritten"
+
+
+def test_an_edit_that_keeps_the_size_and_time_of_the_file_is_read(tmp_path: Path) -> None:
+    path = _write(tmp_path, "general", "soul", "Agent A.")
+    files = _files(tmp_path)
+    assert files.read("general", "soul") is not None
+    stat = path.stat()
+
+    path.write_text("Agent B.", encoding="utf-8")
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    found = files.read("general", "soul")
+    assert found is not None and found.text == "Agent B."
+
+
 def test_reading_outside_an_event_loop_starts_no_rewrite(tmp_path: Path) -> None:
     _write(tmp_path, "general", "soul", SOUL)
     writer = RecordingWriter()
@@ -444,10 +508,27 @@ async def test_the_writer_runs_on_the_profile_in_its_own_session_and_returns_the
 
     assert (rewritten, briefing) == ("Rewritten.", "Briefing.")
     assert soul_start.path == briefing_start.path == "/p/stock-picker/v1/runs"
-    assert soul_start.body["session_id"] == "duplex-voice-context-stock-picker-soul"
-    assert briefing_start.body["session_id"] == "duplex-voice-briefing-stock-picker"
+    assert soul_start.body["session_id"].startswith("duplex-voice-context-stock-picker-soul-")
+    assert briefing_start.body["session_id"].startswith("duplex-voice-briefing-stock-picker-")
     assert "model" not in soul_start.body
     assert soul_start.body["input"] == writing_prompt("stock-picker", "soul", SOUL, 4000, "rob")
+
+
+async def test_each_write_runs_in_a_fresh_hermes_session() -> None:
+    async with FakeHermesApi({"general": "k" * 16}) as fake:
+        fake.run_scripts = [
+            RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "One."}]),
+            RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "Two."}]),
+        ]
+        async with HermesApiClient(fake.api_base, {"general": "k" * 16}.get) as client:
+            writer = HermesWriter(client, "rob")
+            await writer("general", "user", USER, 4000)
+            await writer("general", "user", USER, 4000)
+
+        first, second = fake.requests_to("POST", "/runs")
+
+    assert first.body["session_id"] != second.body["session_id"]
+    assert not first.body["session_id"].startswith("duplex-rob-")
 
 
 async def test_the_writer_fails_when_the_run_fails() -> None:
@@ -467,6 +548,13 @@ def test_the_rewrite_prompt_frames_the_file_as_data_and_asks_for_plain_short_tex
     assert "at most 3000 characters" in prompt
     assert "markdown" in prompt and "Do not change any files" in prompt
     assert "the stock-picker agent" in prompt
+
+
+def test_the_soul_prompt_forbids_anything_about_the_owner_or_anyone_else() -> None:
+    prompt = writing_prompt("general", "soul", SOUL, 4000, "rob")
+
+    assert "Anyone on a call may hear" in prompt
+    assert "say nothing about rob or any other person" in prompt
 
 
 def test_the_user_and_briefing_prompts_name_the_owner_and_leave_out_secrets() -> None:

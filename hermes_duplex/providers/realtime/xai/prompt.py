@@ -7,14 +7,17 @@ the agent should know go in a small extra section near Role & Persona, so Hermes
 agent and the person, when there is any, is a ``## Background`` section after Objective. Tools are
 named in backticks exactly as the session offers them. The prompt controls words, not sound, so it
 has no pace or accent rules, and the active profile's voice context, in Objective, is framed as rules
-about the words spoken. Reports use the same JSON shape as the OpenAI Realtime prompter.
+about the words spoken. The guide asks for short prompts, so each Hermes text in Background is cut to
+``BACKGROUND_MAX_CHARS``, below what the other prompters carry. Reports use the same JSON shape as the
+OpenAI Realtime prompter.
 """
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from ....prompts import blocks
-from ....prompts.base import REPORT_TYPE, PromptContext, TaskReport, json_report
+from ....prompts.base import REPORT_TYPE, PromptContext, TaskReport, cap_text, json_report
 from ...base import (
     CANCEL_TASK_TOOL,
     CONFIRM_SWITCH_TOOL,
@@ -25,6 +28,11 @@ from ...base import (
 
 if TYPE_CHECKING:
     from ....tasks import Task
+
+BACKGROUND_MAX_CHARS = 2000
+"""Most characters of each Hermes text (``SOUL.md``, ``USER.md``, the briefing) a Grok prompt carries,
+since xAI's guide asks for short prompts; the other providers carry up to
+``hermes.voice_context_max_chars``."""
 
 
 class GrokPrompter:
@@ -123,7 +131,18 @@ def _active_agent(ctx: PromptContext) -> str:
 def _background(ctx: PromptContext) -> str:
     """The ``## Background`` section: the active agent's Hermes background (``blocks.agent_background``),
     then what is known about the person (``blocks.person_background``), paragraphs apart, after a blank
-    line and ending in a newline; empty when ``ctx`` carries none of them."""
+    line and ending in a newline; empty when ``ctx`` carries none of them. Each Hermes text is cut to
+    ``BACKGROUND_MAX_CHARS``."""
+    ctx = replace(
+        ctx,
+        hermes_soul=_shortened(ctx.hermes_soul),
+        hermes_user=_shortened(ctx.hermes_user),
+        hermes_briefing=_shortened(ctx.hermes_briefing),
+    )
     agent = blocks.agent_background(ctx)
     paragraphs = [*([agent] if agent is not None else []), *blocks.person_background(ctx)]
     return f"\n## Background\n{'\n\n'.join(paragraphs)}\n" if paragraphs else ""
+
+
+def _shortened(text: str | None) -> str | None:
+    return cap_text(text, BACKGROUND_MAX_CHARS) if text is not None else None

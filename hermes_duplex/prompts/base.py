@@ -60,8 +60,8 @@ class PromptContext:
     background on the agent, data rather than instructions. None for none."""
 
     person: str | None = None
-    """The person the conversation is with, whom the fields below describe; None when none of them
-    has anything to say."""
+    """The person the conversation is with, whom the fields below describe; None for nobody in
+    particular. A person with nothing said about them renders nothing."""
 
     person_voice_context: str | None = None
     """``person``'s config ``voice_context``: notes the owner wrote about them. None for none."""
@@ -78,8 +78,8 @@ class PromptContext:
 
     open_tasks: tuple[tuple[str, str], ...] = ()
     """``person``'s queued and running tasks as (topic, profile), oldest first, at most
-    ``OPEN_TASKS_MAX``. It may lag behind the tracker on providers that cannot replace their
-    instructions in place."""
+    ``OPEN_TASKS_MAX``; the session lists them. It may lag behind the tracker on providers that
+    cannot replace their instructions in place."""
 
 
 @dataclass(frozen=True)
@@ -193,6 +193,19 @@ def split_text(text: str, max_chars: int) -> list[str]:
         text = text[cut:]
     parts.append(text)
     return parts
+
+
+def cap_text(text: str, max_chars: int) -> str:
+    """``text`` stripped, cut to at most ``max_chars`` characters when longer: after its last line
+    break in the second half of the room, else after a sentence end or a word (``split_text``)."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    room = text[:max_chars]
+    line_end = room.rfind("\n")
+    if line_end > max_chars // 2:
+        return room[:line_end].rstrip()
+    return split_text(text, max_chars)[0].rstrip()
 
 
 def json_report(report: TaskReport, cap_tokens: int) -> str:

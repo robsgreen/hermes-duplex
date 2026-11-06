@@ -25,6 +25,7 @@ from hermes_duplex.providers.base import DELEGATE_RECEIPT
 from hermes_duplex.providers.gpt_live.prompt import GptLivePrompter, frame_result
 from hermes_duplex.providers.realtime.adapter import session_tools
 from hermes_duplex.providers.realtime.openai.prompt import OpenAiRealtimePrompter
+from hermes_duplex.providers.realtime.xai.prompt import BACKGROUND_MAX_CHARS as GROK_BACKGROUND_MAX_CHARS
 from hermes_duplex.providers.realtime.xai.prompt import GrokPrompter
 from hermes_duplex.tasks import Task
 
@@ -604,6 +605,21 @@ def test_grok_adds_a_background_section_after_objective() -> None:
     ]
     background = text.split("## Background\n")[1].split("\n\n## ")[0]
     assert SOUL in background and USER in background and NOTES in background
+
+
+def test_grok_cuts_each_hermes_text_to_its_shorter_background_cap() -> None:
+    longest = "word " * (HERMES_CONTEXT_MAX_CHARS_LIMIT // 5)
+    context = _with_background(hermes_soul=longest, hermes_user=longest, hermes_briefing=longest)
+
+    grok = GrokPrompter().instructions(context)
+    background = grok.split("## Background\n")[1].split("\n\n## ")[0]
+    texts = re.findall(
+        r"<(?:agent_background|owner_background|owner_briefing)>\n(.*?)\n</", background, re.DOTALL
+    )
+
+    assert len(texts) == 3
+    assert all(0 < len(text) <= GROK_BACKGROUND_MAX_CHARS for text in texts)
+    assert longest.strip() in OpenAiRealtimePrompter().instructions(context)
 
 
 def test_the_largest_background_still_fits_gpt_lives_instructions_budget() -> None:

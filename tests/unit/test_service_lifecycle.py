@@ -7,7 +7,6 @@ import os
 import signal
 import time
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -29,7 +28,7 @@ from hermes_duplex.router.decisions import DecisionsBackend
 from hermes_duplex.router.factory import build_backends
 from hermes_duplex.router.knn import Embedder
 from hermes_duplex.service import STOP_TIMEOUT_S, DuplexService, build_service
-from hermes_duplex.tasks import Task, TaskTracker
+from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.discord.bot import DiscordTransport
 from hermes_duplex.transports.web.server import WebTransport
 from tests.fakes.fake_embedder import fake_embed
@@ -158,23 +157,6 @@ async def _with_briefing(config: Config) -> HermesContextFiles:
     return files
 
 
-def _task(number: int, person: str, text: str) -> Task:
-    moment = datetime(2026, 11, 6, tzinfo=UTC)
-    return Task(
-        number=number,
-        uuid=f"u{number}",
-        person=person,
-        profile="general",
-        effort="medium",
-        model=None,
-        text=text,
-        state="running",
-        run_id=None,
-        created_at=moment,
-        updated_at=moment,
-    )
-
-
 async def test_prompt_context_carries_the_owners_texts_only_while_they_are_alone(tmp_path: Path) -> None:
     config = _context_config(tmp_path)
     files = await _with_briefing(config)
@@ -188,7 +170,7 @@ async def test_prompt_context_carries_the_owners_texts_only_while_they_are_alone
         "Rob lives in Lisbon.",
         "Rob is moving house.",
     )
-    assert (together.person, together.hermes_user, together.hermes_briefing) == (None, None, None)
+    assert (together.person, together.hermes_user, together.hermes_briefing) == ("rob", None, None)
 
 
 async def test_prompt_context_never_gives_the_owners_texts_to_anyone_else(tmp_path: Path) -> None:
@@ -201,15 +183,45 @@ async def test_prompt_context_never_gives_the_owners_texts_to_anyone_else(tmp_pa
     assert (alex.hermes_user, alex.hermes_briefing) == (None, None)
 
 
-def test_prompt_context_lists_the_newest_open_tasks_by_topic_and_profile(tmp_path: Path) -> None:
+def test_prompt_context_names_the_person_whatever_is_said_about_them(tmp_path: Path) -> None:
     config = _context_config(tmp_path)
-    tasks = [_task(n, "rob", f"please check item {n}") for n in range(1, 13)]
 
-    context = service.prompt_context(config, "general", "rob", False, open_tasks=tasks)
+    rob = service.prompt_context(config, "general", "rob", False)
 
-    assert context.person == "rob"
-    assert context.open_tasks == tuple((f"check item {n}", "general") for n in range(3, 13))
-    assert service.prompt_context(config, "general", None, False, open_tasks=tasks).person is None
+    assert (rob.person, rob.person_voice_context, rob.hermes_user, rob.open_tasks) == ("rob", None, None, ())
+    assert service.prompt_context(config, "general", None, False).person is None
+
+
+async def test_context_rewrites_falling_due_during_a_conversation_wait_until_it_ends(tmp_path: Path) -> None:
+    config = _context_config(tmp_path)
+    written: list[tuple[str, ContextKind]] = []
+
+    async def write(profile: str, kind: ContextKind, source: str | None, max_chars: int) -> str:
+        written.append((profile, kind))
+        return f"{kind} for voice"
+
+    duplex = build_service(config, embed=fake_embed)
+    duplex._context_files = HermesContextFiles(
+        config.hermes_home, config.hermes.voice_context_files, 4000, write
+    )
+    await duplex.start()
+    try:
+        await _wait_until(lambda: len(written) == 3)  # SOUL.md, USER.md, and the briefing, at start
+        (tmp_path / "profiles/general/SOUL.md").write_text("The general agent does more.", encoding="utf-8")
+
+        url = _web_url(duplex, "/ws")
+        async with (
+            aiohttp.ClientSession() as http,
+            http.ws_connect(url, protocols=("bearer", ENV["TOKEN_ROB"])),
+        ):
+            await _wait_until(lambda: bool(duplex.status().conversations))
+            await asyncio.sleep(0.2)
+            assert len(written) == 3, "Hermes was asked to rewrite SOUL.md during the call"
+
+        await _wait_until(lambda: len(written) == 4)
+        assert written[-1] == ("general", "soul")
+    finally:
+        await duplex.stop()
 
 
 class _HangingCloseProvider(FakeProvider):
