@@ -26,13 +26,20 @@ Embedder = Callable[[Sequence[str]], npt.NDArray[np.floating]]
 
 DEFAULT_MODEL = "minishlab/potion-base-8M"
 TARGET_MIN_SIMILARITY = 0.4
-"""``ProfileMatcher`` takes a profile only when the words' cosine similarity to one of its phrases is
-at least this. Checked with ``DEFAULT_MODEL`` against the held-out switch phrasings
-(``tests/fixtures/router_eval/switch_heldout.yaml``, five profiles, never used to choose it): every
-target that resolves to its profile scores 0.416 ("finance agent") to 0.797 ("headlines bot"), while
-the words that should name no profile ("regular", "real estate", "leasing", "insurance", "financial
-advisor", "metric units") score 0.254 or less. On the router eval's own phrases resolving targets
-score 0.448 or more."""
+"""``ProfileMatcher`` takes a profile for words that call it an agent only when their cosine
+similarity to one of its phrases is at least this. Checked with ``DEFAULT_MODEL`` against the
+held-out switch phrasings (``tests/fixtures/router_eval/switch_heldout.yaml``, five profiles, never
+used to choose it): every such target that resolves to its profile scores 0.416 ("finance agent") to
+0.797 ("headlines bot"), while the words that should name no profile ("regular", "real estate",
+"leasing", "insurance") score 0.254 or less. On the router eval's own phrases resolving targets score
+0.448 or more."""
+NAME_MIN_SIMILARITY = 0.85
+"""Words that do not call what they ask for an agent ("switch to stock pickers", "talk to my stock
+broker") resolve to a profile only when their cosine similarity to one of its names or aliases is at
+least this: a near-exact name, such as a plural ("stock pickers" 0.95, "travels" 0.89, "coders"
+0.85). On the held-out switch phrasings the words of tasks that only sound like a switch score 0.723
+or less ("stock trader"; "stock broker" 0.633, "stock photos" 0.618, "programmer" 0.468), and in
+review probes 0.731 ("travel card")."""
 TARGET_MARGIN = 0.15
 """How much the top profile's similarity must beat every other profile's by; a closer call names no
 single profile. On the held-out switch phrasings every resolving target wins by 0.28 or more (the
@@ -145,9 +152,9 @@ class ProfileMatcher:
     profile's name and aliases and, only when the person called it an agent, profile, assistant, or
     bot (``TargetWords.names_an_agent``: "the investing agent", not "my stock broker"), its
     description; a profile's score is its best similarity. The top profile is taken when its score is
-    at least ``TARGET_MIN_SIMILARITY`` and beats every other profile's by at least ``TARGET_MARGIN``;
-    otherwise the words name no single profile. Whether the person may use the profile is not
-    considered here.
+    at least ``TARGET_MIN_SIMILARITY`` (``NAME_MIN_SIMILARITY``, a near-exact name, for words that do
+    not call it an agent) and beats every other profile's by at least ``TARGET_MARGIN``; otherwise the
+    words name no single profile. Whether the person may use the profile is not considered here.
     """
 
     def __init__(
@@ -208,7 +215,8 @@ class ProfileMatcher:
                 best[phrase.profile] = max(best.get(phrase.profile, -1.0), float(similarity))
         ranked = sorted(best.items(), key=lambda item: item[1], reverse=True)
         (top, score), runner_up = ranked[0], ranked[1][1] if len(ranked) > 1 else -1.0
-        clear = score >= TARGET_MIN_SIMILARITY and score - runner_up >= TARGET_MARGIN
+        floor = TARGET_MIN_SIMILARITY if names_an_agent else NAME_MIN_SIMILARITY
+        clear = score >= floor and score - runner_up >= TARGET_MARGIN
         logger.info(
             "switch target %r by meaning%s: %s (similarity %.3f, runner-up %.3f)",
             wanted,

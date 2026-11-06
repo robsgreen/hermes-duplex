@@ -194,17 +194,24 @@ it holds across conversations and restarts. Hand-offs run in the Hermes session
 There are four ways to switch:
 
 - **By voice**, on any provider: "switch to stock-picker", "let me talk to the stock picker", "ok,
-  back to general", "go to stocks", "move me to stocks", "use my portfolio agent", "connect me with
-  the stock research assistant". A switch phrase ("switch to", "change to", "talk to", "speak to",
-  "back to", "go to", "move me to", "take me to", "put me on", "use", "connect me with", "give me",
-  "I need", "I want") that opens what you say, or one of its sentences (a comma doesn't start one:
+  back to general", "go to stocks", "move me to stocks", "switch me over to the news one", "use my
+  portfolio agent", "connect me with the stock research assistant", "put me through to the finance
+  agent", "I'd like the coder". A switch phrase ("switch to", "switch me to", "switch me over to",
+  "switch over to", "change to", "change me to", "swap to", "talk to", "speak to", "back to", "go
+  to", "move me to", "take me to", "put me on", "put me through to", "I'd like", "hand me over to",
+  "use", "connect me with", "give me", "get me", "bring up", "can I have", "I need", "I want") that
+  opens what you say, or one of its sentences (a comma doesn't start one:
   "if rates fall, switch to stocks" is a normal request), after lead-ins such as "let me",
   "can I", "can we", "I need to", "I'd rather", "please", "go", "hmm", "ok", "I'd like to", or
   "thanks" (one after another: "hmm, ok, let me talk to stocks"), followed by a profile's name or one
-  of its `aliases`, switches; the request never reaches the router or Hermes. "use", "connect me
-  with", "give me", "I need", and "I want" count only with "the" or "my" and a word for an agent
-  ("agent", "profile", "assistant", "bot") after the name: "use my portfolio agent" switches, "use a
-  different approach", "connect me with my accountant", and "I need a travel agent" don't.
+  of its `aliases` (optionally followed by "one": "the news one"), switches; the request never
+  reaches the router or Hermes. "use", "connect me with", "give me", "get me", "bring up", "can I
+  have", "I need", and "I want" count only with "the" or "my" and a word for an agent ("agent",
+  "profile", "assistant", "bot") after the name: "use my portfolio agent" and "get me the stocks
+  agent" switch, "use a different approach", "connect me with my accountant", "I need a travel
+  agent", "get me the news", and "bring up my calendar" don't. "I'd like" and "hand me over to" also
+  need "the" or "my", but a profile's name or alias is enough: "I'd like the coder" switches, "I'd
+  like the salmon" doesn't.
   "Switch to stocks and check NVDA" switches, then hands off "check NVDA" on the new profile, and so
   do "talk to stocks about Tesla" with "Tesla" and "connect me with the investing agent, what's Apple
   at?" with "what's Apple at?".
@@ -219,21 +226,32 @@ There are four ways to switch:
 - **Web:** the **Talking to** picker on the page.
 
 A name resolves to the longest profile name or alias it starts with, a name winning a tie. Words
-that fit no name or alias ("the stock trader", "my portfolio agent") resolve by meaning: the switch
-phrasing and anything after "and", "then", "so", "about", or a sentence break are dropped, and the
-rest is compared, on the same local embedding model the `knn` router uses (loaded in the background
-when the service starts), with each profile's name and aliases, and with its description only when
-you call it an agent, profile, assistant, or bot ("the investing agent", not "my stock broker"); the
-closest profile is taken when it is a clear winner (similarity at least 0.4, and 0.15 above every
-other profile). This holds for every way to switch: by voice, the `switch_profile` tool, `/duplex
-profile`, and the web picker. A short name that fits no profile by name or meaning (at most three
-words, as in "switch to Sarah"), said with nothing else, or a name that fits several gets "Sorry,
-which agent do you mean?" with the profiles you may use. Said with a request ("Switch to Celsius.
-What's the weather in Paris?", "talk to the travel agent about my trip"), called an agent ("go to
-the insurance agent", "talk to my real estate agent"), or after "back to", "go to", "move me to",
-"take me to", or "put me on" without a word for an agent ("back to Tesla, what's it at?", "go to the
-gym"; but "go to the stock trader profile" is a switch), words that name no profile are handed off
-whole as a normal request. A profile you may not
+that fit no name or alias ("the stock trader agent", "my portfolio agent", "stock pickers") resolve
+on the same local embedding model the `knn` router uses (loaded in the background when the service
+starts): the switch phrasing and anything after "and", "then", "so", "about", or a sentence break are
+dropped, and the rest is compared with each profile's name and aliases. How close they must be
+depends on whether you call it an agent, profile, assistant, or bot:
+
+- **With a word for an agent** ("the investing agent", "go to the stock trader profile"), they are
+  matched by meaning: each profile's description counts too, and the closest profile is taken when
+  it is a clear winner (similarity at least 0.4, and 0.15 above every other profile).
+- **Without one** ("talk to my stock broker", "switch to stock photos", "talk to a programmer"),
+  only a profile's exact name or alias, or a near-exact one (similarity at least 0.85 to a name or
+  alias, such as a plural: "switch to the stock pickers"), switches. Anything else ("change to
+  Celsius", "talk to my dad", "can I speak to a human", "switch to Sarah") is handed off whole as a
+  normal request.
+
+This holds for every way to switch: by voice, the `switch_profile` tool, `/duplex profile`, and the
+web picker; the last three answer words that name no single profile with the profiles you may use.
+By voice, "Sorry, which agent do you mean?", with the profiles you may use, is asked only for a
+name that fits several profiles, or for a word for an agent that says nothing of which one, said
+with nothing else ("switch to another agent", "let me talk to a different assistant"). Said with a
+request ("Switch to Celsius. What's the weather in Paris?", "talk to the travel agent about my
+trip"), called an agent that is no profile ("go to the insurance agent", "talk to my real estate
+agent"), or after "back to", "go to", "move me to", "take me to", "put me on", or "put me through
+to" without a word for an agent ("back to Tesla, what's it at?", "go to the gym", "put me through to
+my accountant"), words that name no profile are handed off whole as a normal request. A profile you
+may not
 use gets "Sorry, you don't have access to the stock-picker agent, so I didn't switch." Every live
 conversation you are in confirms a switch aloud ("You're now talking to stock-picker."), wherever it
 was made; a conversation you have left (a Discord voice channel you are no longer in) ignores it. If
@@ -505,27 +523,30 @@ is read the way a call reads it (the switch parser, then the meaning of words th
 alias) to score switch precision and recall, how often a task is taken as a switch (it never runs),
 and how often a switch goes to its labelled target. `tests/fixtures/router_eval/switch_heldout.yaml`
 holds switch phrasings and tasks that only sound like them, over five profiles; it was never used to
-pick the switch thresholds (0.4 similarity, 0.15 margin), only to check them: every target that
-resolves there scores 0.416 or more and wins by 0.28 or more, while words for nothing a profile is
-("regular", "real estate", "insurance", "metric units") score 0.254 or less.
+pick the switch thresholds (0.4 similarity, 0.15 margin; 0.85 without a word for an agent, set by
+decision), only to check them: every target with a word for an agent that resolves there scores
+0.416 or more and wins by 0.28 or more, while words for nothing a profile is ("regular", "real
+estate", "insurance") score 0.254 or less; words without one that are no profile's name score 0.723
+or less ("stock trader"). Its round-10b sections hold phrases written after seeing the parser miss
+them (they check the fix, so they score perfectly) and a fresh set written before running it.
 
 With the `minishlab/potion-base-8M` embedding model, `knn` scores:
 
-| Measure | `phrases.yaml` (113 routed of 124) | `descriptions_only.yaml` (43 routed of 47) | `switch_heldout.yaml` (50 routed of 72) |
+| Measure | `phrases.yaml` (113 routed of 124) | `descriptions_only.yaml` (43 routed of 47) | `switch_heldout.yaml` (91 routed of 141) |
 |---|---|---|---|
-| Choice accuracy | 0.823 | 0.674 | 0.520 |
-| Choice macro-F1 | 0.824 | 0.696 | 0.569 |
+| Choice accuracy | 0.823 | 0.674 | 0.560 |
+| Choice macro-F1 | 0.824 | 0.696 | 0.576 |
 | Control precision | 1.000 | 1.000 | n/a |
 | Control recall | 0.645 (20 of 31) | 0.929 (13 of 14) | n/a |
 | Task taken as control | 0.000 | 0.000 | 0.000 |
-| Switch precision | 1.000 | 1.000 | 0.850 (17 of 20) |
-| Switch recall | 0.545 (6 of 11) | 0.750 (3 of 4) | 0.773 (17 of 22) |
-| Task taken as switch | 0.000 | 0.000 | 0.060 (3 of 50: "talk to my stock broker" switches to stock-picker by its name; "I want to talk to my financial advisor" and "change to metric units" ask which agent) |
-| Switch target accuracy | 0.667 (6 of 9) | 1.000 (3 of 3) | 0.773 (17 of 22; every switch taken went to its target) |
-| Suggestions made | 20 | 2 | 17 |
-| Suggestion precision | 1.000 | 1.000 | 0.941 |
-| Suggestion recall | 0.526 (20 of the 38 phrases that should have one) | 1.000 (2 of 2) | 0.762 |
-| Effort accuracy | 0.317 (`knn` judges no effort, so this is the share labelled `medium`) | 0.345 | 0.320 |
+| Switch precision | 1.000 | 1.000 | 1.000 (46 of 46) |
+| Switch recall | 0.636 (7 of 11) | 0.750 (3 of 4) | 0.920 (46 of 50; 13 of 13 in the fresh set) |
+| Task taken as switch | 0.000 | 0.000 | 0.000 (0 of 91) |
+| Switch target accuracy | 0.667 (6 of 9) | 1.000 (3 of 3) | 0.918 (45 of 49; every switch taken went to its target) |
+| Suggestions made | 20 | 2 | 31 |
+| Suggestion precision | 1.000 | 1.000 | 0.935 |
+| Suggestion recall | 0.526 (20 of the 38 phrases that should have one) | 1.000 (2 of 2) | 0.784 |
+| Effort accuracy | 0.317 (`knn` judges no effort, so this is the share labelled `medium`) | 0.345 | 0.198 |
 | Latency p50 / p95 / p99 | under 1 ms | under 1 ms | under 1 ms |
 
 The switch misses are wordings the parser has no phrasing for ("switch agents", "change profile to
@@ -543,7 +564,7 @@ Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 | Tier | Command | Needs |
 |---|---|---|
 | Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | nothing |
-| Default (1465 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
+| Default (1530 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
 | Real Hermes end-to-end (6 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
 | Live (1 test) | `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` | hermes-agent, real API keys, the spoken WAV fixtures (below); spends money |
 | Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` (or `descriptions_only.yaml`, `switch_heldout.yaml`) | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |
@@ -630,14 +651,17 @@ Then run `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m liv
   different active profiles, each person's hand-offs still run on their own profile, but the voice
   model's instructions (and `voice_context`) are those of the last person who switched or was first
   heard.
-- **Switch phrases are matched literally.** A switch by voice needs "switch to", "talk to", "back
-  to", or "change to" followed by a profile's name or alias (see
-  [Active profile and switching](#active-profile-and-switching)). On GPT-Live, other phrasings are
-  handed off as a normal request on the active profile, where a switch suggestion may follow; OpenAI
-  Realtime and Grok can still switch through the `switch_profile` tool. A switch phrase said alone
-  with a short name that is no profile, such as "switch to Celsius", is taken as a switch and
-  answered "Sorry, which agent do you mean?" instead of being handed off; said with anything more
-  ("switch to Celsius and tell me the weather") it is handed off.
+- **Switch phrases are matched literally.** A switch by voice needs one of the listed phrases
+  followed by a profile's name or alias, or by words that end in "agent", "profile", "assistant", or
+  "bot" (see [Active profile and switching](#active-profile-and-switching)). On GPT-Live, other
+  phrasings ("can I get the markets agent", "I want the agent that does flights") are handed off as
+  a normal request on the active profile, where a switch suggestion may follow; OpenAI Realtime and
+  Grok can still switch through the `switch_profile` tool.
+- **Without a word for an agent, only a profile's (near-)exact name switches.** "Let me speak with
+  the trip planner", "talk to the developer", and "can I talk to the programming one" are handed off
+  as normal requests, though they mean the travel and coder profiles; add the words people use as
+  `aliases`, or say "agent". The other way round, "I'd like the news" and "hand me over to the
+  travel one" switch, since they name a profile.
 - **An end queued but not yet spoken when the service stops is lost.** Untold results are kept in
   memory; after a restart only tasks that were still open are picked up again.
 - **The CI `e2e` job has not run on GitHub Actions yet**; the real-Hermes tier has passed locally.

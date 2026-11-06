@@ -376,29 +376,39 @@ Names resolve to the longest profile name or alias the words start with, a name 
 an alias (`switching.resolve_profile`). Words that start with neither resolve by meaning
 (`ProfileMatcher`): `switching.target_words` keeps the words of the target the way the parser reads
 one (after the switch phrasing, up to "and", "then", "so", "about", or a sentence break) and drops
-"the", "my", "a", polite words, and agent nouns ("agent", "profile", "assistant", "bot"). What is left
+"the", "my", "a", "other", "another", "different", polite words, and agent nouns ("agent",
+"profile", "assistant", "bot"). What is left
 is embedded with the `knn` backend's model (loaded once per process, `router.knn.load_model`; the
 service prewarms it and the profiles' phrases in the background at start, and a failed load is not
 tried again for `MODEL_RETRY_S`, 300 s, while only names count) and compared by cosine similarity
 with each profile's spoken name and aliases, and, only when the words call it an agent (an agent noun
 among them: "the investing agent", not "my stock broker"), its description; a profile scores its best.
-The top profile is taken when it scores at least `TARGET_MIN_SIMILARITY` (0.4) and beats every other
-by `TARGET_MARGIN` (0.15). On the held-out switch phrasings (`switch_heldout.yaml`) every target that
-resolves scores 0.416 or more and wins by 0.28 or more, while the words that resolve to nothing
-("regular", "real estate", "leasing", "insurance", "financial advisor", "metric units") score 0.254 or
-less. Whether the person may use it is checked by the switch. Every path uses this resolution, the web frame and the tool included, so each
+The top profile is taken when it beats every other by `TARGET_MARGIN` (0.15) and scores at least
+`TARGET_MIN_SIMILARITY` (0.4) for words that call it an agent, or `NAME_MIN_SIMILARITY` (0.85, a
+near-exact name or alias such as a plural: "stock pickers") for words that do not: without an agent
+noun, only a profile's (near-)exact name switches, so "talk to my stock broker", "switch to stock
+photos", and "talk to a programmer" do not. On the held-out switch phrasings (`switch_heldout.yaml`)
+every target with an agent noun that resolves scores 0.416 or more and wins by 0.28 or more, while
+the words that resolve to nothing ("regular", "real estate", "leasing", "insurance") score 0.254 or
+less; words without an agent noun that are no profile's name score 0.723 or less ("stock trader").
+Whether the person may use it is checked by the switch. Every path uses this resolution, the web frame and the tool included, so each
 accepts aliases and descriptions. Words that name no single profile get `which_profile`, listing the
 profiles the speaker may use; a profile the person may not use gets `switch_refused`, and the active
 one `already_active` (`notices.switch_reply` words all three).
 
 **Spoken switch requests.** `read_switch_request` looks for a switch phrasing from one table
 (`switching._PHRASINGS`, which `target_words` reads too) followed by a target, a leading "the"
-dropped. Each phrasing has a kind: `switch` ("switch to", "change to", "talk to", "talk with", "speak
-to", "speak with"), `place` ("back to", "go to", "move me to", "take me to", "put me on", also said of
-places and things), and `agent` ("use", "connect me with", "connect me to", "give me", "I need", "I
-want", said of anything, so their target must start with "the" or "my" and end in an agent noun,
-"agent", "profile", "assistant", or "bot": "use my portfolio agent", but not "use a different
-approach", "connect me with my accountant", or "I need a travel agent"). "go" is also a lead-in ("go
+dropped. Each phrasing has a kind: `switch` ("switch to", "switch me to", "switch me over to",
+"switch over to", "change to", "change me to", "swap to", "talk to", "talk with", "speak to", "speak
+with"), `place` ("back to", "go to", "move me to", "take me to", "put me through to", "put me on",
+also said of places and things), `named` ("I'd like", "hand me over to", whose target must start with
+"the" or "my" and be a profile's name or alias, "I'd like the coder", or end in an agent noun), and
+`agent` ("use", "connect me with", "connect me to", "give me", "get me", "bring up", "can I have", "I
+need", "I want", said of anything, so their target must start with "the" or "my" and end in an agent
+noun, "agent", "profile", "assistant", or "bot": "use my portfolio agent", but not "use a different
+approach", "connect me with my accountant", "get me the news", or "I need a travel agent"). After a
+profile's name or alias, "one" counts as an agent noun ("switch me over to the news one"), and only
+there ("give me the latest one" is no switch). "go" is also a lead-in ("go
 back to general"), so a phrasing may start where a lead-in does. Where it stands decides what counts:
 
 - **Opening** what is said, or one of its sentences (after `.`, `;`, `!` or `?`; a comma does not start one), after
@@ -418,11 +428,13 @@ back to general"), so a phrasing may start where a lead-in does. Where it stands
   savings back to stocks" makes no request even with an alias "stocks".
 
 `profiles.resolve_switch_request` (`ActiveProfiles.read_switch_request`) then resolves words that fit
-no name or alias by meaning. Words that name no profile that way make no switch request, and the
-hand-off is an ordinary request, when they come with a further request ("talk to the travel agent
-about my trip") or end in an agent noun ("go to the insurance agent", "talk to my real estate
-agent"): people say that of agents of their own. Only a short bare target ("switch to Sarah") gets
-`which_profile`.
+no name or alias (`ActiveProfiles.resolve`, `ProfileMatcher` above). Words it finds no profile for
+make no switch request, and the hand-off is an ordinary request: without an agent noun ("switch to
+Sarah", "change to Celsius", "talk to my dad"), with a further request ("talk to the travel agent
+about my trip"), or with an agent noun and words that say which ("go to the insurance agent", "talk
+to my real estate agent": people say that of agents of their own). Only an agent noun that says
+nothing of which agent, said with nothing else ("switch to another agent", "talk to a different
+assistant"), gets `which_profile`, as does a name or alias two profiles share.
 
 A phrase with a negation earlier in its clause ("don't switch to stocks"), one followed by "me",
 "us", or "you" ("talk to me about Tesla"), or one whose target is followed by anything other than

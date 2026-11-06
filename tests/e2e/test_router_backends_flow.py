@@ -291,7 +291,7 @@ async def test_switch_requests_give_the_same_result_under_every_backend_without_
     caplog.set_level("INFO")
     async with FakeDecisions() as stub:  # stands in for whichever API the backend calls; never asked
         said, active = await _switch_through_a_session(
-            tmp_path, backend, stub.base_url, ["let me talk to the stock picker", "switch to finance"]
+            tmp_path, backend, stub.base_url, ["let me talk to the stock picker", "switch to another agent"]
         )
 
     assert said == [switched_to("stock-picker"), which_profile(["general", "stock-picker"])]

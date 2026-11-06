@@ -11,7 +11,8 @@ import yaml
 
 from hermes_duplex.config import Config, load_config
 from hermes_duplex.people import PermissionChecker
-from hermes_duplex.profiles import ActiveProfiles, SwitchResult
+from hermes_duplex.profiles import ActiveProfiles, SwitchResult, resolve_switch_request
+from hermes_duplex.switching import SwitchRequest
 
 PROFILES: dict[str, dict[str, Any]] = {
     "home": {"aliases": ["the house"]},
@@ -387,3 +388,34 @@ async def test_a_switch_clears_a_pending_fallback(store: ActiveProfiles, path: P
     await store.switch("alex", "stock-picker")
 
     assert store.fallback_pending("alex") is None
+
+
+async def _by_meaning(words: str) -> str | None:
+    """Resolves only "the trading agent" and "stock pickers", as ``ProfileMatcher`` would."""
+    return {"trading agent": "stock-picker", "stock pickers": "stock-picker"}.get(words)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Resolved: a name or alias, or words the resolver finds a profile for.
+        ("switch to stocks", SwitchRequest("stock-picker", "stocks", None)),
+        ("put me on the trading agent", SwitchRequest("stock-picker", "trading agent", None)),
+        ("switch to stock pickers", SwitchRequest("stock-picker", "stock pickers", None)),
+        # Unresolved words that call it an agent and say nothing of which: the person is asked.
+        ("switch to another agent", SwitchRequest(None, "another agent", None)),
+        ("let me talk to a different assistant", SwitchRequest(None, "a different assistant", None)),
+        # Any other unresolved words are an ordinary request.
+        ("switch to Celsius", None),
+        ("talk to my dad", None),
+        ("go to the insurance agent", None),
+        ("switch to another agent and check NVDA", None),
+        ("talk to the travel agent about my trip", None),
+    ],
+)
+async def test_resolve_switch_request_switches_asks_which_or_leaves_a_task(
+    text: str, expected: SwitchRequest | None
+) -> None:
+    names = {name: profile.get("aliases", []) for name, profile in PROFILES.items()}
+
+    assert await resolve_switch_request(text, names, _by_meaning) == expected

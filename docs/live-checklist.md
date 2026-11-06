@@ -300,7 +300,7 @@ provider each result is for. Start each on `general` (say "back to general" firs
 
 1. Say "switch to stock-picker".
 2. Say "let me talk to the stock picker" (an alias for the profile already active).
-3. Say "switch to Sarah".
+3. Say "switch to another agent", then "switch to Sarah".
 4. Say "back to general and what's the weather tomorrow?"
 5. Stop the service, start it again, rejoin, and ask "what's the weather?"
 6. Say "don't switch to stocks", then "remind me to talk to Sarah tomorrow", then "should I move my
@@ -316,7 +316,8 @@ provider each result is for. Start each on `general` (say "back to general" firs
 11. Say "remind me to go to the dentist on Friday", then "can I talk to you about my weekend plans",
     then "connect me with the Sarah agent", then "can I talk to Sarah about the stock picker", then
     "change my profile picture", then "find me a travel agent".
-12. On Discord, run `/duplex profile the stock trader` (typed, not picked from the list).
+12. On Discord, run `/duplex profile the stock trader agent` (typed, not picked from the list), then
+    `/duplex profile the stock trader`.
 
 Expected: step 1 is confirmed aloud ("You're now talking to stock-picker."; on `gpt-live`,
 "Switching you to stock-picker." just before a short pause) and the log shows `switch
@@ -324,7 +325,8 @@ of <you> to profile stock-picker: switched` and `voice instructions now speak fo
 stock-picker`; no Hermes run starts. On `openai-realtime` and `xai-realtime` the model calls
 `switch_profile` or hands the words to `delegate`; on `gpt-live` the words are handed off. Step 2
 answers "You're already talking to stock-picker." Step 3 answers "Sorry, which agent do you mean?
-You can switch to stock-picker or general." and nothing changes. Step 4 switches to `general` and
+You can switch to stock-picker or general." to the first and nothing changes; the second is handed
+off as an ordinary request (only a near-exact profile name switches without "agent"). Step 4 switches to `general` and
 then runs the weather request there, with no switch question. In step 5 the request runs on
 `general`, the profile saved before the restart (`$HERMES_HOME/duplex/active_profiles.json`). In
 step 6 nothing switches: each is handed off as an ordinary request on `general` (the last may draw a
@@ -339,7 +341,8 @@ Hermes run and no `route` line for them: each is read by the switch parser and r
 `'investing'`); "what's Apple at?" then runs on `stock-picker`, and the last switches and then runs
 "check NVDA" there. In step 11 every one runs as an ordinary task on `general` (a `route` line each;
 the Sarah one may draw a switch question: answer no), and none gets "Sorry, which agent do you
-mean?". Step 12 switches to `stock-picker`.
+mean?". In step 12 the first switches to `stock-picker`; the second names no profile (no "agent",
+and no near-exact name) and is answered with the profiles you may use.
 
 ### 17. Switch suggestions
 

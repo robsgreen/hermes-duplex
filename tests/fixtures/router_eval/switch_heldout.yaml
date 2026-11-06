@@ -6,7 +6,9 @@
 # them. Its phrases come from review probes, written without looking at what the parser reads.
 # `_switch` phrases ask to switch, with the profile they mean as `target` where they name one; every
 # other phrase is a task and must never be taken as a switch request. The profiles are five, so a
-# target has more to be confused with than in phrases.yaml.
+# target has more to be confused with than in phrases.yaml. NAME_MIN_SIMILARITY (0.85) was set by
+# the user's decision in review round 10b, not chosen from this file. The round-10b sections at the
+# end say how their phrases were written.
 
 profiles:
   general:
@@ -115,3 +117,79 @@ phrases:
   - {text: change to metric units, profile: general, active: general, effort: low}
   - {text: talk to me about the weather, profile: general, active: general, effort: low}
   - {text: I need a new laptop for coding, profile: coder, active: general, effort: medium}
+
+  # Added in review round 10b, after the parser missed or misread them: these WERE written after
+  # seeing failures, so they check the rule for targets without an agent noun and the phrasings added
+  # for them rather than test it blind. Targets without an agent noun switch only on a near-exact
+  # profile name or alias; anything else is a task.
+  - {text: switch to stocks, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: talk to the stock picker, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: connect me with the investing agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: switch me to the stock picker please, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: can you switch me to the trip planning agent, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: put me through to the finance agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: "switch me over to the news one?", profile: _switch, active: general, effort: medium, target: news}
+  - {text: switch me to travel, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: switch over to stocks, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: swap to the stock picker, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: get me the stocks agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: can I have the coding assistant, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: hand me over to the news agent, profile: _switch, active: general, effort: medium, target: news}
+  - {text: bring up the travel agent, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: I'd like the coder, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: talk to my stock trader, profile: stock-picker, active: general, effort: low}
+  - {text: talk to the stock exchange, profile: stock-picker, active: general, effort: low}
+  - {text: switch to stock photos, profile: general, active: general, effort: low}
+  - {text: talk to my travel buddy, profile: general, active: general, effort: low}
+  - {text: talk to my coding mentor, profile: coder, active: general, effort: low}
+  - {text: talk to a programmer, profile: coder, active: general, effort: low}
+  - {text: change to Celsius, profile: general, active: general, effort: low}
+  - {text: switch to English, profile: general, active: general, effort: low}
+  - {text: change to dark mode, profile: general, active: general, effort: low}
+  - {text: switch to decaf, profile: general, active: general, effort: low}
+  - {text: switch to my work account, profile: general, active: general, effort: low}
+  - {text: switch to the other calendar, profile: general, active: general, effort: low}
+  - {text: talk to my dad, profile: general, active: general, effort: low}
+  - {text: I want to talk to a lawyer, profile: general, active: general, effort: low}
+  - {text: can I speak to a human, profile: general, active: general, effort: low}
+  - {text: let me speak to your supervisor, profile: general, active: general, effort: low}
+  - {text: I want to talk to Jenny, profile: general, active: general, effort: low}
+  - {text: put me through to customer support, profile: general, active: general, effort: low}
+  - {text: get me a coffee, profile: general, active: general, effort: low}
+  - {text: can I have the bill, profile: general, active: general, effort: low}
+  - {text: I'd like the salmon, profile: general, active: general, effort: low}
+  - {text: bring up my calendar, profile: general, active: general, effort: low}
+  - {text: switch me to a cheaper plan, profile: general, active: general, effort: medium}
+
+  # Fresh in round 10b, written before running them and never tuned against.
+  - {text: could you switch me to the coding agent, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: swap to the news profile, profile: _switch, active: general, effort: medium, target: news}
+  - {text: switch over to the travel assistant, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: put me through to the stock picker, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: hand me over to the coder, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: I'd like the travel agent please, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: change me to general, profile: _switch, active: stock-picker, effort: medium, target: general}
+  - {text: get me the news bot, profile: _switch, active: general, effort: medium, target: news}
+  - {text: switch me to the general assistant, profile: _switch, active: stock-picker, effort: medium, target: general}
+  - {text: can I have the stocks profile, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: bring up the coding bot, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: switch to the stock pickers, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: switch to another agent, profile: _switch, active: general, effort: medium}
+  - {text: get me the news, profile: news, active: general, effort: low}
+  - {text: bring up stocks on the screen, profile: stock-picker, active: general, effort: low}
+  - {text: bring up the stock chart, profile: stock-picker, active: general, effort: low}
+  - {text: get me a taxi to the airport, profile: travel, active: general, effort: low}
+  - {text: can I have the weather for Paris, profile: general, active: general, effort: low}
+  - {text: I'd like a table for two at eight, profile: general, active: general, effort: low}
+  - {text: switch me to the window seat, profile: travel, active: general, effort: low}
+  - {text: swap to the other tab, profile: general, active: general, effort: low}
+  - {text: switch over to the other monitor, profile: coder, active: general, effort: low}
+  - {text: change me to the earlier flight, profile: travel, active: general, effort: medium}
+  - {text: put me through to the front desk, profile: travel, active: general, effort: low}
+  - {text: talk to the doorman, profile: general, active: general, effort: low}
+  - {text: switch to the stock ticker, profile: stock-picker, active: general, effort: low}
+  - {text: switch to news radio, profile: news, active: general, effort: low}
+  - {text: get me the stock price of Apple, profile: stock-picker, active: general, effort: low}
+  - {text: I'd like the vegetarian option, profile: general, active: general, effort: low}
+  - {text: talk to someone in billing, profile: general, active: general, effort: low}
+  - {text: can I have the news, profile: news, active: general, effort: low}

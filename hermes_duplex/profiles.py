@@ -43,22 +43,24 @@ async def resolve_switch_request(
 ) -> SwitchRequest | None:
     """The switch request ``text`` makes as a voice session carries it out: read by
     ``switching.read_switch_request`` over ``names`` (each profile name to its aliases), with words
-    that fit no name or alias given the profile ``resolve`` finds for them by meaning
-    (``SwitchRequest.target`` None when it finds none: the person is asked which agent).
+    that fit no name or alias given the profile ``resolve`` finds for them (``ProfileMatcher``: by
+    meaning when they call it an agent, else only by a near-exact name or alias).
 
-    Words that name no profile by name or meaning make no switch request at all, and so are an
-    ordinary request, when they are said with a further request ("talk to the travel agent about my
-    trip") or call what they ask for an agent ("go to the insurance agent", "talk to my real estate
-    agent"), since people say that of agents of their own; only a short bare target ("switch to
-    Sarah") asks which agent. None when ``text`` makes no switch request.
+    Words that ``resolve`` finds no profile for make no switch request at all, and so are an ordinary
+    request ("talk to my dad", "switch to Celsius", "go to the insurance agent", "talk to the travel
+    agent about my trip"), with one exception: words that call it an agent but say nothing of which
+    one, with no further request ("switch to another agent", "let me talk to a different
+    assistant"), keep ``SwitchRequest.target`` None, and the person is asked which agent. None when
+    ``text`` makes no switch request.
     """
     request = read_switch_request(text, names)
     if request is None or request.target is not None:
         return request
-    target = await resolve(request.words)
-    if target is None and (request.rest is not None or target_words(request.words).names_an_agent):
-        return None
-    return request._replace(target=target)
+    if (target := await resolve(request.words)) is not None:
+        return request._replace(target=target)
+    said = target_words(request.words)
+    asks_which = said.names_an_agent and not said.words and request.rest is None
+    return request if asks_which else None
 
 
 class SwitchResult(NamedTuple):

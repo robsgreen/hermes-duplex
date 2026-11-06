@@ -20,24 +20,33 @@ class _Phrasing(NamedTuple):
     """One way of asking to switch: its words, and what may follow them as the target."""
 
     words: tuple[str, ...]
-    kind: Literal["switch", "place", "agent"]
-    """What makes the words after it a target that names no profile by name or alias:
+    kind: Literal["switch", "place", "named", "agent"]
+    """What the words after it must be to make a target:
 
-    - ``"switch"``: said only of agents, so such a target asks which one is meant when the phrasing
-      is all that is said ("switch to finance"), and names an agent when it ends in an agent noun
-      ("talk to the investing agent").
+    - ``"switch"``: said mostly of agents, so a profile's name or alias, words that end in an agent
+      noun ("talk to the investing agent"), or, when the phrasing and polite words are all that is
+      said, any few words ("switch to stock pickers"), whose meaning then decides
+      (``profiles.resolve_switch_request``).
     - ``"place"``: also said of places, topics, and things ("go to the gym", "back to Tesla", "put me
-      on hold"), so only a target that ends in an agent noun names an agent ("go to the stock trader
-      profile").
-    - ``"agent"``: said of anything ("use a different approach", "give me the weather"), so every
-      target, a profile's name included, must start with "the" or "my" and end in an agent noun ("use
-      my portfolio agent", "connect me with the stock picker agent").
+      on hold"), so a profile's name or alias, or words that end in an agent noun ("go to the stock
+      trader profile").
+    - ``"named"``: said of things too ("I'd like the salmon"), so the target must start with "the" or
+      "my" and be a profile's name or alias ("I'd like the coder") or end in an agent noun ("hand me
+      over to the news agent").
+    - ``"agent"``: said of anything ("use a different approach", "give me the weather", "get me the
+      news"), so every target, a profile's name included, must start with "the" or "my" and end in an
+      agent noun ("use my portfolio agent", "connect me with the stock picker agent").
     """
 
 
 _PHRASINGS: tuple[_Phrasing, ...] = (
+    _Phrasing(("switch", "me", "over", "to"), "switch"),
+    _Phrasing(("switch", "me", "to"), "switch"),
+    _Phrasing(("switch", "over", "to"), "switch"),
     _Phrasing(("switch", "to"), "switch"),
+    _Phrasing(("change", "me", "to"), "switch"),
     _Phrasing(("change", "to"), "switch"),
+    _Phrasing(("swap", "to"), "switch"),
     _Phrasing(("talk", "to"), "switch"),
     _Phrasing(("talk", "with"), "switch"),
     _Phrasing(("speak", "to"), "switch"),
@@ -46,11 +55,17 @@ _PHRASINGS: tuple[_Phrasing, ...] = (
     _Phrasing(("go", "to"), "place"),
     _Phrasing(("move", "me", "to"), "place"),
     _Phrasing(("take", "me", "to"), "place"),
+    _Phrasing(("put", "me", "through", "to"), "place"),
     _Phrasing(("put", "me", "on"), "place"),
+    _Phrasing(("id", "like"), "named"),
+    _Phrasing(("hand", "me", "over", "to"), "named"),
     _Phrasing(("use",), "agent"),
     _Phrasing(("connect", "me", "with"), "agent"),
     _Phrasing(("connect", "me", "to"), "agent"),
     _Phrasing(("give", "me"), "agent"),
+    _Phrasing(("get", "me"), "agent"),
+    _Phrasing(("bring", "up"), "agent"),
+    _Phrasing(("can", "i", "have"), "agent"),
     _Phrasing(("i", "need"), "agent"),
     _Phrasing(("i", "want"), "agent"),
 )
@@ -63,13 +78,16 @@ _AGENT_NOUNS = frozenset({"agent", "profile", "assistant", "bot"})
 """Words that say the target is an agent ("the stock trader profile"). They may follow a profile's
 name ("switch to the general profile"), end a target that names no profile by name, and let a
 target's meaning be matched against what each profile is for (``router.knn.ProfileMatcher``)."""
+_NAME_NOUNS = _AGENT_NOUNS | {"one"}
+"""Words that may follow a profile's name or alias in a target ("the general profile", "the news
+one"). "one" counts only there: "give me the latest one" says nothing of an agent."""
 NOT_A_TARGET = frozenset({"me", "us", "you"})
 """Words that, said right after a switch phrase, make it no switch request: "talk to me about the
 weather" is a request for the voice model."""
 _ARTICLE = "the"
 _AGENT_DETERMINERS = frozenset({_ARTICLE, "my"})
-"""What an ``"agent"`` phrasing's target starts with ("use my portfolio agent"); a target that
-starts with "a" ("use a different approach", "I need a travel agent") is no switch."""
+"""What a ``"named"`` or ``"agent"`` phrasing's target starts with ("use my portfolio agent"); a
+target that starts with "a" ("use a different approach", "I need a travel agent") is no switch."""
 
 # What a person may say before a switch phrase that opens what they say, or one of its sentences ("let
 # me talk to stocks", "hmm, ok, go back to general"); lead-ins may follow one another. A phrase
@@ -141,8 +159,8 @@ _TOPIC_CONNECTOR = "about"
 _POLITE_WORDS = frozenset({"please", "thanks", "thank", "you", "now", "ok", "okay"})
 _TARGET_ENDS = _CONNECTORS | {_TOPIC_CONNECTOR}
 """Words a target never runs past: what follows them is a further request or a topic."""
-_NOT_TOLD = _AGENT_DETERMINERS | {"a", "an"} | _POLITE_WORDS | _AGENT_NOUNS
-"""Words of a target that do not say which agent it is."""
+_NOT_TOLD = _AGENT_DETERMINERS | {"a", "an", "other", "another", "different"} | _POLITE_WORDS | _AGENT_NOUNS
+"""Words of a target that do not say which agent it is ("switch to another agent")."""
 _UNCOUNTED = _AGENT_DETERMINERS | _POLITE_WORDS | _AGENT_NOUNS
 """Words a target may hold besides ``UNKNOWN_TARGET_MAX_WORDS`` others ("a" counts: "switch to a
 cheaper phone plan" is too long)."""
@@ -220,9 +238,9 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
     further request said after it.
 
     ``names`` maps each profile name to its spoken aliases. A switch request is a switch phrasing
-    (``_PHRASINGS``: "switch to", "talk to", "back to", "go to", "move me to", "put me on", "use",
-    "connect me with", ...) followed by a target; a leading "the" before the target is ignored. Where
-    the phrasing stands decides what the target may be:
+    (``_PHRASINGS``: "switch to", "switch me over to", "talk to", "back to", "go to", "put me through
+    to", "I'd like", "use", "connect me with", "get me", ...) followed by a target; a leading "the"
+    before the target is ignored. Where the phrasing stands decides what the target may be:
 
     - When it opens what is said or one of its sentences (after ".", ";", "!" or "?", not a comma), after
       lead-ins such as "let me", "can we", "I need to", "I'd rather", "please", "go", "hmm", or "ok",
@@ -232,21 +250,24 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
       no name or alias (``SwitchRequest.target`` None), if they hold at most
       ``UNKNOWN_TARGET_MAX_WORDS`` words and either end in an agent noun ("connect me with the
       investing agent, what's Apple at", which has a further request) or, for a ``"switch"`` phrasing,
-      are all that is said but polite words ("switch to finance"). Said otherwise ("Switch to Celsius.
-      What's the weather in Paris?", "switch to finance and check NVDA", "back to Tesla, what's it
-      at?", "go to the gym"), such words make no switch request.
+      are all that is said but polite words ("switch to finance"); whether such words switch at
+      all is ``profiles.resolve_switch_request``'s rule. Said otherwise ("Switch to Celsius. What's
+      the weather in Paris?", "switch to finance and check NVDA", "back to Tesla, what's it at?", "go
+      to the gym"), such words make no switch request.
     - Anywhere else, only a profile's exact name is a target: "remind me to talk to Sarah" and "should
       I move my savings back to stocks" make no request, even with an alias "stocks".
 
-    An ``"agent"`` phrasing ("use", "connect me with", "give me", "I need", "I want") counts only with
-    a target that starts with "the" or "my" and ends in an agent noun ("use my portfolio agent"; not
-    "use a different approach" or "connect me with my accountant"). A phrasing whose sentence holds a
-    negation before it (a lone "no," interjection aside) ("don't switch to stocks", "I never want to
-    talk to general") makes no request, nor does one followed by "me", "us", or "you" ("talk to me
-    about Tesla"). After the target, the clause may hold only polite words, an agent noun, or a joined
-    further request (``SwitchRequest.rest``); anything else ("switch to stocks from bonds") makes no
-    request. Returns the first request whose target names a profile, else the first other one, else
-    None.
+    An ``"agent"`` phrasing ("use", "connect me with", "give me", "get me", "can I have", ...) counts
+    only with a target that starts with "the" or "my" and ends in an agent noun ("use my portfolio
+    agent"; not "use a different approach" or "connect me with my accountant"); a ``"named"`` one ("I'd
+    like", "hand me over to") also with "the" or "my" and a profile's name or alias ("I'd like the
+    coder"). A phrasing whose sentence holds a negation before it (a lone "no," interjection aside)
+    ("don't switch to stocks", "I never want to talk to general") makes no request, nor does one
+    followed by "me", "us", or "you" ("talk to me about Tesla"). After the target, the clause may hold
+    only polite words, an agent noun (or "one" after a name or alias: "switch me over to the news
+    one"), or a joined further request (``SwitchRequest.rest``); anything else ("switch to stocks from
+    bonds") makes no request. Returns the first request whose target names a profile, else the first
+    other one, else None.
     """
     spans = list(_WORD.finditer(text))
     words = [_spoken(span.group()) for span in spans]
@@ -284,7 +305,7 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
         profile, length = _resolve(target, names, aliases=opening)
         if profile is not None:
             after = target_start + length
-            named_an_agent = after < clause_end and words[after] in _AGENT_NOUNS
+            named_an_agent = after < clause_end and words[after] in _NAME_NOUNS
             if phrasing.kind == "agent" and not named_an_agent:
                 continue
             if profile == "ambiguous":
@@ -293,9 +314,10 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
                         "ambiguous", _said(text, spans, target_start, after), None
                     )
                 continue
+            after += named_an_agent
             fits, rest = _after_target(text, spans, words, after, breaks, opening=opening)
             if fits:
-                return SwitchRequest(profile, _said(text, spans, target_start, after + named_an_agent), rest)
+                return SwitchRequest(profile, _said(text, spans, target_start, after), rest)
             continue
 
         if start not in opens_all or result is not None:
@@ -400,15 +422,17 @@ def _lead_in_ends(words: Sequence[str], start: int) -> list[int]:
 
 
 def _phrasing_at(words: Sequence[str], start: int) -> _Phrasing | None:
-    """The longest switch phrasing (``_PHRASINGS``) that ``words`` hold at index ``start``, or None; an
-    ``"agent"`` phrasing counts only when "the" or "my" follows it."""
+    """The longest switch phrasing (``_PHRASINGS``) that ``words`` hold at index ``start``, or None; a
+    ``"named"`` or ``"agent"`` phrasing counts only when "the" or "my" follows it."""
     for length in range(_LONGEST_PHRASING, 0, -1):
         said = tuple(words[start : start + length])
         phrasing = next((phrasing for phrasing in _PHRASINGS if phrasing.words == said), None)
         if phrasing is None:
             continue
         follows = start + length
-        if phrasing.kind == "agent" and (follows >= len(words) or words[follows] not in _AGENT_DETERMINERS):
+        if phrasing.kind in ("named", "agent") and (
+            follows >= len(words) or words[follows] not in _AGENT_DETERMINERS
+        ):
             return None
         return phrasing
     return None
@@ -481,8 +505,6 @@ def _after_target(
     phrase opens what is said.
     """
     position = after
-    if position < len(words) and position not in breaks and words[position] in _AGENT_NOUNS:
-        position += 1
     if position < len(words) and position not in breaks:
         if words[position] in _CONNECTORS:
             return True, _request_from(text, spans, words, position)

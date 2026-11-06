@@ -403,6 +403,52 @@ def test_switch_phrasings_and_agent_nouns(text: str, expected: SwitchRequest) ->
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # "switch" phrasings.
+        ("switch me to the stock picker please", SwitchRequest("stock-picker", "stock picker", None)),
+        ("can you switch me to the money agent", SwitchRequest(None, "money agent", None)),
+        ("switch me over to the house one?", SwitchRequest("home", "house one", None)),
+        ("switch over to stocks", SwitchRequest("stock-picker", "stocks", None)),
+        ("change me to general", SwitchRequest("general", "general", None)),
+        ("swap to the stock picker", SwitchRequest("stock-picker", "stock picker", None)),
+        ("switch me to a cheaper plan", SwitchRequest(None, "a cheaper plan", None)),  # left to resolve
+        # A "place" phrasing: a name or alias, or an agent noun.
+        ("put me through to the money agent", SwitchRequest(None, "money agent", None)),
+        ("put me through to stocks", SwitchRequest("stock-picker", "stocks", None)),
+        # "named" phrasings: "the" or "my", then a name or alias, or an agent noun.
+        ("I'd like the stock picker", SwitchRequest("stock-picker", "stock picker", None)),
+        ("hand me over to the money agent", SwitchRequest(None, "money agent", None)),
+        # "agent" phrasings: "the" or "my", and an agent noun.
+        ("get me the house profile", SwitchRequest("home", "house profile", None)),
+        ("can I have the money assistant", SwitchRequest(None, "money assistant", None)),
+        ("bring up the trading bot", SwitchRequest(None, "trading bot", None)),
+    ],
+)
+def test_the_phrasings_added_for_review_10b(text: str, expected: SwitchRequest) -> None:
+    assert read_switch_request(text, NAMES) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "put me through to my accountant",
+        "put me through to customer support",
+        "get me a coffee",
+        "get me the stock picker",  # an "agent" phrasing needs an agent noun
+        "bring up stocks",
+        "can I have the bill",
+        "I'd like the salmon",
+        "I'd like stocks",  # a "named" phrasing needs "the" or "my"
+        "bring up my calendar",
+        "give me the latest one",  # "one" says it is an agent only after a name or alias
+    ],
+)
+def test_the_added_phrasings_leave_things_that_are_no_agent_alone(text: str) -> None:
+    assert read_switch_request(text, NAMES) is None
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "can I talk to Sarah about the stock picker",
@@ -442,6 +488,8 @@ def test_wordings_that_only_sound_like_a_switch_are_none(text: str) -> None:
         ("talk to Sarah about the stock picker", TargetWords("sarah", False)),
         ("switch to the money agent and check NVDA", TargetWords("money", True)),
         ("I want to switch to the stock agent", TargetWords("stock", True)),
+        ("switch to another agent", TargetWords("", True)),  # says not which
+        ("talk to a different assistant", TargetWords("", True)),
         ("", TargetWords("", False)),
     ],
 )

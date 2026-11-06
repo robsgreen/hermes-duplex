@@ -287,10 +287,10 @@ async def test_a_switch_request_switches_and_is_confirmed_without_routing_or_a_t
 
 
 @pytest.mark.parametrize(("speaker", "offered"), [("rob", EVERY_PROFILE), ("alex", ["general"])])
-async def test_a_switch_to_a_name_that_fits_no_profile_asks_which_and_changes_nothing(
+async def test_a_switch_to_an_agent_that_says_not_which_asks_which_and_changes_nothing(
     harness: _Harness, speaker: str, offered: list[str]
 ) -> None:
-    harness.start([_handoff("call_1", "switch to finance")], _frames(1000, speaker))
+    harness.start([_handoff("call_1", "switch to another agent")], _frames(1000, speaker))
 
     await harness.wait_for(lambda: bool(harness.said()))
 
@@ -381,6 +381,10 @@ async def test_a_request_after_a_switch_that_does_not_happen_is_dropped(
         "talk to the travel agent about my trip",
         "connect me with the Sarah agent",
         "go to the insurance agent",
+        # Words without an agent noun that are no near-exact profile name: the whole hand-off is a task.
+        "switch to finance",
+        "talk to my dad",
+        "switch to the stock trader",
     ],
 )
 async def test_words_that_ask_for_no_switch_are_routed_and_run_as_a_task(
@@ -460,7 +464,7 @@ async def test_polite_words_after_a_switch_are_no_request(harness: _Harness, wor
 @pytest.mark.parametrize(
     ("words", "after"),
     [
-        ("switch to the stock trader", "stock-picker"),  # the parser asks which; the meaning tells
+        ("switch to the stock trader agent", "stock-picker"),  # the parser leaves it to the meaning
         ("go to the holdings profile", "stock-picker"),
     ],
 )
@@ -517,7 +521,7 @@ async def test_a_switch_to_an_agent_by_meaning_then_runs_the_request_said_with_i
 @pytest.mark.parametrize(
     ("speaker", "words", "notice"),
     [
-        ("rob", "switch to the Sarah", which_profile(EVERY_PROFILE)),  # no single profile
+        ("rob", "let me talk to a different agent", which_profile(EVERY_PROFILE)),  # says not which
         ("alex", "use my portfolio agent", switch_refused("stock-picker")),
     ],
 )

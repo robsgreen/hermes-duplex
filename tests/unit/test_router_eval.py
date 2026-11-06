@@ -230,7 +230,7 @@ async def test_scores_how_well_the_parser_and_matcher_tell_switch_requests_from_
             "go to the trades profile", SWITCH_LABEL, "medium", active="general", target="general"
         ),
         LabelledPhrase("switch agents", SWITCH_LABEL, "medium", active="general"),  # the parser misses it
-        LabelledPhrase("switch to Sarah", "general", "low", active="general"),  # a task taken as a switch
+        LabelledPhrase("switch to another agent", "general", "low", active="general"),  # taken as a switch
         LabelledPhrase("talk to the travel agent about Rome", "general", "low", active="general"),
     )
     clock = _Clock()
@@ -239,7 +239,7 @@ async def test_scores_how_well_the_parser_and_matcher_tell_switch_requests_from_
 
     [report] = await evaluate(phrases, PROFILES, ROUTER, [stub], ["knn"], resolver=resolver, clock=clock)
 
-    # Taken: two labelled ones, and "switch to Sarah" (which asks which agent). "go to the trades
+    # Taken: two labelled ones, and "switch to another agent" (which asks which agent). "go to the trades
     # profile" and "talk to the travel agent about Rome" name an agent that is no profile, so the
     # session hands them off as tasks.
     assert report.switch_precision == pytest.approx(2 / 3)

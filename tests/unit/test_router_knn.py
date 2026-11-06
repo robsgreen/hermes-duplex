@@ -198,13 +198,24 @@ async def test_profile_phrases_are_embedded_once() -> None:
         ("my holdings agent", "stock-picker"),
         ("the reminders", None),
         ("the reminders bot", "general"),
-        ("the stock trader", "stock-picker"),  # near its name, so no agent noun is needed
+        ("the stock trader", None),  # near its name, but not near enough without an agent noun
+        ("the stock trader agent", "stock-picker"),
     ],
 )
 async def test_a_description_counts_only_when_the_words_call_it_an_agent(
     words: str, profile: str | None
 ) -> None:
     assert await ProfileMatcher(MATCHED_PROFILES, fake_embed).resolve(words) == profile
+
+
+async def test_words_without_an_agent_noun_resolve_only_to_a_near_exact_name() -> None:
+    # The fake embedder ignores word order, so "picker stock" is as near to "stock picker" as words
+    # that are not the name itself get; "stock trader" shares only one of its two words.
+    matcher = ProfileMatcher(MATCHED_PROFILES, fake_embed)
+
+    assert await matcher.resolve("the picker stock") == "stock-picker"
+    assert await matcher.resolve("the stock trader") is None
+    assert knn.NAME_MIN_SIMILARITY > knn.TARGET_MIN_SIMILARITY
 
 
 async def test_a_further_request_in_the_words_is_not_matched() -> None:
