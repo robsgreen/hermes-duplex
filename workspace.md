@@ -12,7 +12,7 @@ Notes: `origin/HEAD` is not set locally; `main` comes from the GitHub REST API (
 | Build | ✅ hatchling (`uv build`); no separate build step needed for tests or `serve` |
 | Type-check | ✅ `uv run pyright` |
 | Lint/Format | ✅ `uv run ruff check .` ; `uv run ruff format --check .` (format only changed files: `uv run ruff format <files>`) |
-| Unit Tests | ✅ `uv run pytest -m "not live and not e2e"` — 1285 tests: unit, contract, in-process end-to-end; no network or keys |
+| Unit Tests | ✅ `uv run pytest -m "not live and not e2e"` — 1309 tests: unit, contract, in-process end-to-end; no network or keys |
 | Integration Tests | ✅ Real Hermes e2e: `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` — 6 tests; needs hermes-agent @ `6112c2adb9e11f69734a29be9d2696f345ffa06a` installed in its own venv (recipe in README "Test"); skips without `hermes` on PATH. CI job `e2e` (not yet run on GitHub Actions). |
 | Live (opt-in) | ✅ `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` — 1 test; needs `OPENAI_API_KEY`, hermes-agent, and the spoken WAV fixtures (`OPENAI_API_KEY=... uv run python -m tests.live.make_audio_fixtures`; not committed yet). Optional `HERMES_DUPLEX_LIVE_MODEL`, `HERMES_DUPLEX_LIVE_BASE_URL`, `HERMES_DUPLEX_LIVE_KEY_ENV`. Spends money. |
 | Local Dev | ✅ `uv run hermes-duplex serve --config duplex.yaml` ; `uv run hermes-duplex doctor --config duplex.yaml` ; `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` |

@@ -239,3 +239,22 @@ Seat B: R1, R2, R3, R5, R6, R8, R11 resolved; R4 partial; Preserve held. New:
 
 ### User decision V6 (2026-11-05)
 Keep "ask": with one open task and words naming a different topic, nothing stops; the voice asks "The only one running is <topic>. Cancel that?".
+
+## Review round 9 — 1d641d2..d7ba585 (test race, CI fetch, davey pin, router default-to-task, Hermes context files)
+Seat B (opus):
+- F1 high (run) — session._notify_tasks rebuilds context from files on every task change; on GPT-Live a changed file text (background rewrite landing, briefing refresh, hand edit) restarts the provider at once mid-call.
+- F2 medium — HermesWriter fixed session ids: every rewrite/briefing shares one growing Hermes conversation (stale facts, growing cost). Fix: fresh session id per write.
+- F3 medium — CONTROL_MIN_PROB 0.995 justified by knn only; with backend decisions + knn fast path, near-miss cancels ("kill that job") become new runs and the original isn't stopped; Decisions always gives status for control.
+- F4 medium mechanical — README/architecture disagree on when context changes reach the prompt.
+- F5 low — briefing_refresh_h accepts nan/inf.
+- F6 low — context person never moves back when the last-heard person leaves (owner's USER.md stays out).
+- F7 low — mtime/size cache unnecessary state.
+- U1 per-backend control bar / near-miss cancels; U2 briefing refresh during calls (brief said never); U3 Grok background size vs xAI guide.
+Seat A (opus):
+- A1 CRITICAL (run) — service.prompt_context sets person only when it "says anything" (incl. open tasks); person flips None↔name on a task change → GPT-Live _same_instructions sees a change → immediate restart on EVERY hand-off, even with voice_context_files off (default config). Pushed in d7ba585.
+- A2 high (run) = B-F1 — task-change rebuilds re-read files; mid-call file change restarts GPT-Live / swaps Realtime instructions; Hermes writes USER.md mid-run.
+- A3 high (run) — on someone joining the owner: held pacer audio keeps playing to the newcomer, and the GPT-Live reseed history carries lines drawn from USER.md/briefing.
+- A4 medium = B-F2 — shared rewrite session ids.
+- A5 medium — SOUL rewrite runs with the owner's memory in context; prompt doesn't forbid facts about the owner/people, yet SOUL goes to guests too.
+- A6 low mechanical — cache write OSError skips the failure backoff → repeated rewrite runs.
+- Needs user decision: reseed after someone joins (suggest: open tasks only, no transcript).
