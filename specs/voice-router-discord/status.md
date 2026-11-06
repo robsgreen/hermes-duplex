@@ -180,3 +180,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-06 05:54 - User: Hermes should do the rewrite. Dispatching coder for context-files change.
 - 2026-11-06 06:10 - User: add open tasks in prompt + background briefing to context-files change; sent to coder.
 - 2026-11-06 06:10 - Pushed 540ddcb (davey pin) + d9beb40 (router default-to-task) to PR #1 with user yes; context-files change still uncommitted (in progress)
+- 2026-11-06 06:41 - Context-files change committed (1285 pass; coder e2e 6 pass). Review (two seats) next.
