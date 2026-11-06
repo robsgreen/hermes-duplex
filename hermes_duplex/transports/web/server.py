@@ -160,7 +160,7 @@ class WebConversation:
         if not isinstance(name, str):
             logger.warning("ignoring an unrecognised text message on web conversation %s", self.id)
             return
-        target = self._active_profiles.resolve(name)
+        target = await self._active_profiles.resolve(name)
         outcome = (
             "unknown" if target is None else (await self._active_profiles.switch(self.person, target)).outcome
         )

@@ -305,10 +305,43 @@ async def test_concurrent_switches_reach_every_listener_in_order(store: ActivePr
         ("finance", None),
     ],
 )
-def test_resolve_names_a_profile_by_name_or_alias(
+async def test_resolve_names_a_profile_by_name_or_alias(
     store: ActiveProfiles, words: str, profile: str | None
 ) -> None:
-    assert store.resolve(words) == profile
+    assert await store.resolve(words) == profile
+
+
+class _MeaningResolver:
+    """A resolver that takes "the money one" for stock-picker, raises for "boom", and records its words."""
+
+    def __init__(self) -> None:
+        self.words: list[str] = []
+
+    async def resolve(self, words: str) -> str | None:
+        self.words.append(words)
+        if words == "boom":
+            raise RuntimeError("the embedding model could not be loaded")
+        return "stock-picker" if words == "the money one" else None
+
+
+async def test_resolve_asks_the_resolver_for_every_word_it_is_given(tmp_path: Path, path: Path) -> None:
+    config = _config(tmp_path)
+    resolver = _MeaningResolver()
+    store = ActiveProfiles(path, PermissionChecker(config), config, resolver=resolver)
+
+    assert await store.resolve("the money one") == "stock-picker"
+    assert await store.resolve("finance") is None
+    assert resolver.words == ["the money one", "finance"]
+
+
+async def test_a_resolver_that_fails_leaves_only_exact_names(
+    tmp_path: Path, path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = _config(tmp_path)
+    store = ActiveProfiles(path, PermissionChecker(config), config, resolver=_MeaningResolver())
+
+    assert await store.resolve("boom") is None
+    assert "could not resolve 'boom' by meaning" in caplog.text
 
 
 def test_permitted_lists_a_persons_profiles_in_config_order(store: ActiveProfiles) -> None:

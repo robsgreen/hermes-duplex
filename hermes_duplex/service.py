@@ -20,7 +20,7 @@ from .prompts.base import PromptContext
 from .providers.registry import ProviderFactory, provider_factory
 from .router.composite import CompositeRouter
 from .router.factory import build_backends
-from .router.knn import Embedder
+from .router.knn import Embedder, ProfileMatcher
 from .session import VoiceSession
 from .tasks import Task, TaskTracker
 from .transports.base import Conversation, Transport
@@ -229,15 +229,19 @@ class DuplexService:
 def build_service(config: Config, *, embed: Embedder | None = None) -> DuplexService:
     """Build the service ``config`` describes, without starting anything.
 
-    ``embed`` replaces the knn router backend's embedding model (tests pass a deterministic one);
-    by default the backend loads its model2vec model on ``start``.
+    ``embed`` replaces the embedding model of the knn router backend and of the switch-target matcher
+    (tests pass a deterministic one); by default the backend loads its model2vec model on ``start``,
+    and the matcher the same model on the first switch whose words name no profile exactly.
 
     Raises ``ConfigError`` for an unknown provider or router backend name, or a router backend whose
     settings are missing.
     """
     permissions = PermissionChecker(config)
     active_profiles = ActiveProfiles(
-        config.hermes_home / "duplex" / ACTIVE_PROFILES_FILE_NAME, permissions, config
+        config.hermes_home / "duplex" / ACTIVE_PROFILES_FILE_NAME,
+        permissions,
+        config,
+        resolver=ProfileMatcher(config.profiles, embed),
     )
     providers = provider_factory(config.provider.name)
     hermes = HermesApiClient(config.hermes.api_base, lambda profile: _profile_key(config, profile))

@@ -84,7 +84,7 @@ def session_tools(ctx: PromptContext) -> tuple[Mapping[str, Any], ...]:
     Always ``delegate``, ``task_status``, ``cancel_task``, and ``confirm_switch``; ``switch_profile``
     too when ``ctx.profiles`` names any profile. Its description lists those profiles with their
     descriptions, and its ``profile`` argument is the user's own words for the agent, which the session
-    resolves to a profile by name or alias.
+    resolves to a profile by name, alias, or meaning (``ActiveProfiles.resolve``).
     """
     delegate = (
         f"Hand a request to Hermes. Returns at once with only {json.dumps(DELEGATE_RECEIPT)}: the request "

@@ -563,7 +563,7 @@ def test_unknown_key_next_to_the_new_keys_is_rejected(
     _assert_error(tmp_path, mutate, ".".join((*path, key)))
 
 
-@pytest.mark.parametrize("name", ["_control", "ambiguous"])
+@pytest.mark.parametrize("name", ["_control", "_switch", "ambiguous"])
 def test_reserved_profile_name_is_rejected(tmp_path: Path, name: str) -> None:
     error = _assert_error(tmp_path, lambda raw: raw["profiles"].update({name: {}}), f"profiles.{name}")
     assert "reserved" in str(error)

@@ -446,7 +446,8 @@ class DiscordTransport:
         return f"Left {conversation.channel.mention}."
 
     async def switch_profile(self, member: discord.Member | discord.User, name: str) -> str:
-        """Make the profile ``name`` (a profile name or one of its aliases) ``member``'s active profile;
+        """Make the profile ``name`` (a profile name, one of its aliases, or words for it that
+        ``ActiveProfiles.resolve`` matches by meaning) ``member``'s active profile;
         returns the reply for ``member``.
 
         Every live conversation that has heard ``member`` and that they are still in confirms the
@@ -456,7 +457,7 @@ class DiscordTransport:
         person = self._permissions.by_discord_id(member.id)
         if person is None:
             return REFUSAL
-        target = self._active_profiles.resolve(name)
+        target = await self._active_profiles.resolve(name)
         if target is None:
             return switch_reply("unknown", None, self._active_profiles.permitted(person.name))
         result = await self._active_profiles.switch(person.name, target)

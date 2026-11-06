@@ -310,8 +310,14 @@ provider each result is for. Start each on `general` (say "back to general" firs
    then "back to Tesla, what's it at?"
 9. On Discord: leave the voice channel, run `/duplex profile stock-picker`, rejoin, and say "what's
    NVDA at?"
+10. Say "go to the stock trader profile", then "back to general", then "use my portfolio agent",
+    then "back to general", then "go to stocks and check NVDA".
+11. Say "remind me to go to the dentist on Friday", then "can I talk to you about my weekend plans",
+    then "connect me with the Sarah agent".
+12. On Discord, run `/duplex profile the stock trader` (typed, not picked from the list).
 
-Expected: step 1 is confirmed aloud ("You're now talking to stock-picker.") and the log shows `switch
+Expected: step 1 is confirmed aloud ("You're now talking to stock-picker."; on `gpt-live`,
+"Switching you to stock-picker." just before a short pause) and the log shows `switch
 of <you> to profile stock-picker: switched` and `voice instructions now speak for profile
 stock-picker`; no Hermes run starts. On `openai-realtime` and `xai-realtime` the model calls
 `switch_profile` or hands the words to `delegate`; on `gpt-live` the words are handed off. Step 2
@@ -325,7 +331,14 @@ In step 8 the first switches to `general` (on `gpt-live` too); the other two nev
 do you mean?": each is handed off whole as an ordinary request. In step 9 the reply says the switch
 applies next time; once you speak again the log shows `voice instructions now speak for profile
 stock-picker` (on `gpt-live` a restart once the call is quiet), no "You're now talking to" is spoken,
-and the request runs on `stock-picker`.
+and the request runs on `stock-picker`. Step 10 switches to `stock-picker` each time without a
+Hermes run: the first is read by the switch parser and resolved by meaning (the log shows `switch
+target 'stock trader' by meaning: stock-picker`), the second goes through the router (its `route`
+line shows `switch=True`; if it shows `switch=False`, record its `top3`: a switch needs `_switch` at
+0.95 or more) and then the same resolution; the last switches and then runs "check NVDA" on
+`stock-picker`. In step 11 the first two run as ordinary tasks on `general` (`switch=False`), and
+the third, if the router takes it for a switch, gets "Sorry, which agent do you mean?" and runs
+nothing. Step 12 switches to `stock-picker`.
 
 ### 17. Switch suggestions
 
@@ -363,9 +376,18 @@ With `gpt-live`:
 
 1. Start a slow task, then say "switch to stock-picker" while it runs.
 2. Right after the confirmation, ask "what did we just talk about?"
+3. Ask a question with a long answer, and while it is being spoken run `/duplex profile general` on
+   Discord (or pick `general` on the web page).
+4. Ask another long one, and while it is spoken run `/duplex profile stock-picker`, then at once
+   `/duplex profile general`.
 
-Expected: the log shows `restarting the voice provider for profile stock-picker`, then `reconnected
-the voice provider` within about a second; the pause is short and the conversation carries on. The
+Expected: the assistant finishes what it is saying, then says "Switching you to stock-picker." and
+only then the log shows `restarting the voice provider for profile stock-picker`, then `reconnected
+the voice provider` within about a second; the pause is short, the conversation carries on, and the
+restarted session does not say "You're now talking to stock-picker." too. In step 3 the answer is
+not cut off: the restart comes after it and after "Switching you to general.". In step 4 the
+assistant says "You're now talking to general." without a restart (the call was already on
+`general`). The
 model remembers the recent conversation, the slow task's result is still spoken when it finishes,
 and the conversation does not end even after several switches in a row. With `openai-realtime` and
 `xai-realtime` the same switch causes no restart: the log shows no `restarting the voice provider`

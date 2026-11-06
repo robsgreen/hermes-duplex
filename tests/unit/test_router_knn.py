@@ -1,4 +1,5 @@
-"""KnnBackend: phrase matching over injected embeddings, ``_control`` intents, and off-loop embedding."""
+"""KnnBackend: phrase matching over injected embeddings, ``_control`` intents, and off-loop embedding;
+ProfileMatcher: switch targets by name and by meaning."""
 
 import threading
 from collections.abc import Sequence
@@ -7,9 +8,9 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from hermes_duplex.config import CONTROL_PROFILE, ControlExamples
+from hermes_duplex.config import CONTROL_PROFILE, ControlExamples, ProfileConfig
 from hermes_duplex.router.base import ProfileSpec, RouteRequest, control_spec
-from hermes_duplex.router.knn import KnnBackend
+from hermes_duplex.router.knn import KnnBackend, ProfileMatcher
 from tests.fakes.fake_embedder import fake_embed
 
 PROFILES = (
@@ -119,3 +120,71 @@ async def test_embeds_off_the_event_loop_thread_and_only_once_per_phrase_set() -
     # One call embeds every description and example; each classify embeds just the request.
     assert [count for _, count in calls] == [7, 1, 1]
     assert all(thread != loop_thread for thread, _ in calls)
+
+
+# --- ProfileMatcher -----------------------------------------------------------------------------
+
+MATCHED_PROFILES = {
+    "stock-picker": ProfileConfig(
+        description="Portfolio, holdings, stock research, trades", aliases=("stocks", "the stock picker")
+    ),
+    "general": ProfileConfig(description="Weather, reminders, and anything else"),
+}
+
+
+class _CountingEmbedder:
+    """``fake_embed``, counting the texts it is asked to embed."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def __call__(self, texts: Sequence[str]) -> npt.NDArray[np.floating]:
+        self.texts.extend(texts)
+        return fake_embed(texts)
+
+
+@pytest.mark.parametrize(
+    ("words", "profile"),
+    [("stock-picker", "stock-picker"), ("the stock picker please", "stock-picker"), ("general", "general")],
+)
+async def test_a_name_or_alias_resolves_without_embedding_anything(words: str, profile: str) -> None:
+    embed = _CountingEmbedder()
+
+    assert await ProfileMatcher(MATCHED_PROFILES, embed).resolve(words) == profile
+    assert embed.texts == []
+
+
+@pytest.mark.parametrize(
+    ("words", "profile"),
+    [
+        ("go to the stock trader profile", "stock-picker"),  # "stock" is in its name and description
+        ("use my holdings agent", "stock-picker"),
+        ("can I talk to the reminders assistant", "general"),
+    ],
+)
+async def test_other_words_resolve_by_meaning_to_a_clear_winner(words: str, profile: str) -> None:
+    assert await ProfileMatcher(MATCHED_PROFILES, fake_embed).resolve(words) == profile
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "switch to Sarah",  # like nothing a profile is
+        "switch agents",  # nothing left once the asking is dropped
+        "go to the stocks general agent",  # as near to one as to the other
+    ],
+)
+async def test_words_without_a_clear_winner_name_no_profile(words: str) -> None:
+    assert await ProfileMatcher(MATCHED_PROFILES, fake_embed).resolve(words) is None
+
+
+async def test_profile_phrases_are_embedded_once() -> None:
+    embed = _CountingEmbedder()
+    matcher = ProfileMatcher(MATCHED_PROFILES, embed)
+
+    await matcher.resolve("the trades one")
+    await matcher.resolve("the holdings one")
+
+    phrases = ["stock picker", "stocks", "the stock picker", MATCHED_PROFILES["stock-picker"].description]
+    phrases += ["general", MATCHED_PROFILES["general"].description]
+    assert embed.texts == [*phrases, "trades", "holdings"]

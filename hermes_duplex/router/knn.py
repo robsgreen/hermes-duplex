@@ -1,21 +1,40 @@
-"""The local phrase matcher: nearest neighbour over static embeddings of each choice's phrases.
+"""The local phrase matchers: nearest neighbour over static embeddings.
 
-It answers in a few milliseconds and judges only the profile, never effort.
+``KnnBackend`` scores a request against each router choice's phrases; it answers in a few
+milliseconds and judges only the choice, never effort. ``ProfileMatcher`` finds the profile a person's
+words for an agent mean, when they name none exactly.
 """
 
 import asyncio
+import functools
+import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 import numpy.typing as npt
 
+from ..config import ProfileConfig
+from ..switching import resolve_profile, spoken_form, target_words
 from .base import BackendResult, ControlIntent, ControlSpec, ProfileSpec, RouteRequest
+
+logger = logging.getLogger(__name__)
 
 Embedder = Callable[[Sequence[str]], npt.NDArray[np.floating]]
 """Turns n texts into an (n, d) array of embeddings. It runs in a worker thread."""
 
 DEFAULT_MODEL = "minishlab/potion-base-8M"
+TARGET_MIN_SIMILARITY = 0.4
+"""``ProfileMatcher`` takes a profile only when the words' cosine similarity to one of its phrases is
+at least this. With ``DEFAULT_MODEL`` on the router eval's profiles, the words of every labelled switch
+target that resolves ("stock trader", "portfolio", "investing", "markets", "for reminders and
+weather") score 0.448 or more, while names of nothing a profile covers (people, places, units, foods,
+"money", "news", "Tesla") score 0.273 or less; topics a description names ("finance", "weather",
+"calendar", 0.41 to 0.45) resolve to that profile."""
+TARGET_MARGIN = 0.15
+"""How much the top profile's similarity must beat every other profile's by; a closer call names no
+single profile, so the person is asked which. On the router eval every resolving target wins by 0.33
+or more."""
 DEFAULT_TEMPERATURE = 0.05
 """Softmax temperature over cosine scores; lower is sharper. Cosines between paraphrases and
 unrelated phrases differ by a few tenths, which this turns into a clear winner."""
@@ -68,7 +87,7 @@ class KnnBackend:
                     phrase_choice.append(index)
 
         if self._embed is None:
-            self._embed = await asyncio.to_thread(self._load_model)
+            self._embed = await asyncio.to_thread(load_model, self._model)
         vectors = await asyncio.to_thread(self._embed, phrases)
         self._choices = choices
         self._phrase_choice = np.array(phrase_choice, dtype=np.intp)
@@ -110,12 +129,88 @@ class KnnBackend:
     async def close(self) -> None:
         """Does nothing: the backend holds nothing open."""
 
-    def _load_model(self) -> Embedder:
-        # Imported here so that importing this module, and tests with an injected embedder, never
-        # load the model library or touch the network.
-        from model2vec import StaticModel
 
-        return StaticModel.from_pretrained(self._model, force_download=False).encode
+class ProfileMatcher:
+    """Resolves a person's words for an agent ("the stock trader", "go to my portfolio agent") to a
+    profile, by name first and then by meaning.
+
+    Words that start with a profile's name or alias resolve as a spoken switch target does
+    (``switching.resolve_profile``). Any others are stripped of their switch phrasing
+    (``switching.target_words``) and compared, by cosine similarity of static embeddings, with each
+    profile's name, aliases, and description; a profile's score is its best similarity. The top
+    profile is taken when its score is at least ``TARGET_MIN_SIMILARITY`` and beats every other
+    profile's by at least ``TARGET_MARGIN``; otherwise the words name no single profile. Whether the
+    person may use the profile is not considered here.
+    """
+
+    def __init__(
+        self,
+        profiles: Mapping[str, ProfileConfig],
+        embed: Embedder | None = None,
+        *,
+        model: str = DEFAULT_MODEL,
+    ) -> None:
+        """``profiles`` are the configured profiles, in config order. ``embed`` defaults to the
+        model2vec static model ``model``, shared with ``KnnBackend`` and loaded on the first
+        ``resolve`` that needs it."""
+        self._names = {name: profile.aliases for name, profile in profiles.items()}
+        self._phrases = [
+            (name, phrase)
+            for name, profile in profiles.items()
+            for phrase in (" ".join(spoken_form(name)), *profile.aliases, profile.description)
+            if phrase
+        ]
+        self._embed = embed
+        self._model = model
+        self._vectors: npt.NDArray[np.float64] | None = None
+        self._ready = asyncio.Lock()
+
+    async def resolve(self, words: str) -> str | None:
+        """The profile ``words`` mean, by the rule in the class docstring; None when they name no
+        single profile. Raises what the embedding model raises when it cannot be loaded."""
+        if (exact := resolve_profile(words, self._names)) is not None:
+            return exact
+        wanted = target_words(words)
+        if not wanted or not self._phrases:
+            return None
+        vectors = await self._phrase_vectors()
+        assert self._embed is not None
+        query = _unit_rows(await asyncio.to_thread(self._embed, [wanted]))[0]
+        best: dict[str, float] = {}
+        for (name, _), similarity in zip(self._phrases, vectors @ query, strict=True):
+            best[name] = max(best.get(name, -1.0), float(similarity))
+        ranked = sorted(best.items(), key=lambda item: item[1], reverse=True)
+        (top, score), runner_up = ranked[0], ranked[1][1] if len(ranked) > 1 else -1.0
+        clear = score >= TARGET_MIN_SIMILARITY and score - runner_up >= TARGET_MARGIN
+        logger.info(
+            "switch target %r by meaning: %s (similarity %.3f, runner-up %.3f)",
+            wanted,
+            top if clear else "no single profile",
+            score,
+            runner_up,
+        )
+        return top if clear else None
+
+    async def _phrase_vectors(self) -> npt.NDArray[np.float64]:
+        """The unit embedding of each of ``_phrases``, embedded on first use."""
+        async with self._ready:
+            if self._vectors is None:
+                if self._embed is None:
+                    self._embed = await asyncio.to_thread(load_model, self._model)
+                texts = [phrase for _, phrase in self._phrases]
+                self._vectors = _unit_rows(await asyncio.to_thread(self._embed, texts))
+            return self._vectors
+
+
+@functools.cache
+def load_model(model: str) -> Embedder:
+    """The encoder of the model2vec static model ``model``, from the Hugging Face cache, or downloaded
+    into it when missing; loaded once per process and shared. Blocks: call it in a worker thread."""
+    # Imported here so that importing this module, and tests with an injected embedder, never load
+    # the model library or touch the network.
+    from model2vec import StaticModel
+
+    return StaticModel.from_pretrained(model, force_download=False).encode
 
 
 def _unit_rows(vectors: npt.NDArray[np.floating]) -> npt.NDArray[np.float64]:

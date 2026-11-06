@@ -440,6 +440,31 @@ async def test_a_profile_frame_that_changes_nothing_says_why_and_resets_the_pick
     assert (store.get("rob"), store.get("alex")) == ("general", "general")
 
 
+class _TableResolver:
+    """Resolves words by a fixed table, as matching by meaning would."""
+
+    async def resolve(self, words: str) -> str | None:
+        return {"the stock trader": "stock-picker"}.get(words)
+
+
+async def test_a_profile_frame_with_words_for_the_agent_switches_by_their_meaning(
+    tmp_path: Path, http: aiohttp.ClientSession
+) -> None:
+    config = _config(tmp_path)
+    permissions = PermissionChecker(config)
+    store = ActiveProfiles(tmp_path / "active_profiles.json", permissions, config, resolver=_TableResolver())
+    server = Server(_transport(tmp_path, store))
+    await server.transport.start(server.on_conversation)
+    try:
+        async with await _connect(server, http) as page:
+            await page.send_str(json.dumps({"type": "profile", "name": "the stock trader"}))
+
+            assert (await _receive_json(page))["active_profile"] == "stock-picker"
+        assert store.get("rob") == "stock-picker"
+    finally:
+        await server.transport.stop()
+
+
 @pytest.mark.parametrize(
     "text",
     ["not json", "[1, 2]", '{"type": "profile"}', '{"type": "profile", "name": 3}', '{"type": "other"}'],

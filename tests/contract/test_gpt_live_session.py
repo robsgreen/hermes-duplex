@@ -19,7 +19,7 @@ from hermes_duplex.config import load_config
 from hermes_duplex.dispatch.hermes_api import HermesApiClient
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
-from hermes_duplex.prompts.notices import suggest_switch, switched_to
+from hermes_duplex.prompts.notices import suggest_switch, switching_to
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.gpt_live.adapter import GptLiveProvider
 from hermes_duplex.providers.gpt_live.prompt import GptLivePrompter, frame_result
@@ -491,13 +491,17 @@ async def test_a_context_change_restarts_gpt_live_with_new_instructions_and_the_
         ]
 
 
-async def test_a_switch_handed_off_as_words_restarts_gpt_live_on_the_new_profile_and_confirms_it(
-    tmp_path: Path, api: FakeHermesApi
+async def test_a_switch_handed_off_as_words_says_so_then_restarts_gpt_live_on_the_new_profile(
+    tmp_path: Path, api: FakeHermesApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
     script = [
         *STARTED,
         _input("switch to general", 1000, 1800),
         _delegation("del_1", 1900),
+        {"wait_for": "session.commentary.append"},
+        _audio(300, 0),  # the model says the line
         {"wait_for": "session.close"},
         {"close": {}},
         {"wait_for": "session.start"},
@@ -506,20 +510,23 @@ async def test_a_switch_handed_off_as_words_restarts_gpt_live_on_the_new_profile
     async with _session(tmp_path, api, script) as harness:
         harness.conversation.feed(4000, _voiced(("rob", 1000, 1800)))
         harness.start()
-        await harness.wait_for(lambda: bool(harness.sent("session.commentary.append")))
+        await harness.wait_for(lambda: len(harness.server.connections) == 2)
+        await asyncio.sleep(0.1)
 
         assert harness.active_profiles.get("rob") == "general"
         first, second = harness.server.connections
         assert [event["type"] for event in first.events if event["type"] != "session.input_audio.append"] == [
             "session.start",
+            "session.commentary.append",
             "session.close",
         ], "no task was started or announced"
+        assert harness.conversation.played, "the line was played before the restart"
         assert second.events[0]["session"]["instructions"] == GptLivePrompter().instructions(
             prompt_context(harness.config, "general")
         )
         assert harness.sent("session.commentary.append") == [
-            {"type": "session.commentary.append", "content": switched_to("general"), "delegation_id": None}
-        ]
+            {"type": "session.commentary.append", "content": switching_to("general"), "delegation_id": None}
+        ], "the line before the restart is the only confirmation"
         assert harness.router.requests == []
         assert api.requests_to("POST", "/runs") == []
 

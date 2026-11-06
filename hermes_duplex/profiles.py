@@ -12,7 +12,7 @@ import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, Protocol
 
 from .config import Config
 from .people import PermissionChecker
@@ -27,6 +27,15 @@ SwitchListener = Callable[[str], Awaitable[bool]]
 """Called with the person's new active profile after they switch; returns whether a live voice
 conversation now uses it (False, for example, for a conversation the person has left, or for a page
 that only shows the profile)."""
+
+
+class ProfileResolver(Protocol):
+    """Resolves a person's words for an agent to a profile beyond its exact name or alias
+    (``router.knn.ProfileMatcher``, which matches by meaning)."""
+
+    async def resolve(self, words: str) -> str | None:
+        """The profile ``words`` name, exactly or otherwise; None when they name no single profile."""
+        ...
 
 
 class SwitchResult(NamedTuple):
@@ -50,10 +59,20 @@ class ActiveProfiles:
     listeners included, so every listener hears them in the order they were made.
     """
 
-    def __init__(self, path: Path, permissions: PermissionChecker, config: Config) -> None:
+    def __init__(
+        self,
+        path: Path,
+        permissions: PermissionChecker,
+        config: Config,
+        *,
+        resolver: ProfileResolver | None = None,
+    ) -> None:
         """``path`` is the file switches persist to (normally ``$HERMES_HOME/duplex/active_profiles.json``);
-        nothing is read until ``load``, so until then everyone is on their default."""
+        nothing is read until ``load``, so until then everyone is on their default. ``resolver``
+        resolves words that name no profile exactly (``resolve``); None resolves only exact names
+        and aliases."""
         self._path = path
+        self._resolver = resolver
         self._permissions = permissions
         self._profiles = frozenset(config.profiles)
         self.names: Mapping[str, Sequence[str]] = MappingProxyType(
@@ -119,11 +138,19 @@ class ActiveProfiles:
         """The profiles ``person`` may switch to, in config order; empty for anyone not in config."""
         return [profile for profile in self.names if self._may_use(person, profile)]
 
-    def resolve(self, words: str) -> str | None:
-        """The profile ``words`` name ("stock-picker", "the stock picker"), matched exactly as a spoken
-        switch request's target is (``switching.resolve_profile``: a profile name first, then an alias);
-        None when they name no single profile."""
-        return resolve_profile(words, self.names)
+    async def resolve(self, words: str) -> str | None:
+        """The profile ``words`` name: matched exactly as a spoken switch request's target is
+        (``switching.resolve_profile``: a profile name first, then an alias), else by the
+        ``resolver`` ("the stock trader" by meaning); None when they name no single profile. Every way
+        to switch resolves its words here. A resolver that fails is logged and leaves only the exact
+        match."""
+        if self._resolver is None:
+            return resolve_profile(words, self.names)
+        try:
+            return await self._resolver.resolve(words)
+        except Exception:
+            logger.exception("could not resolve %r by meaning; only exact names count", words)
+            return resolve_profile(words, self.names)
 
     def fallback_pending(self, person: str) -> str | None:
         """The default ``person`` was moved back to by ``load`` because their saved profile became

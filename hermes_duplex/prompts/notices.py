@@ -179,6 +179,12 @@ def switched_to(profile: str) -> str:
     return f"You're now talking to {profile}."
 
 
+def switching_to(profile: str) -> str:
+    """Notice said just before the voice service pauses to restart on ``profile``, the speaker's new
+    active profile; it confirms the switch, so the restarted session does not say ``switched_to``."""
+    return f"Switching you to {profile}."
+
+
 def switch_refused(profile: str) -> str:
     """Notice for a switch to ``profile``, which the speaker may not use; the active profile stays."""
     return f"Sorry, you don't have access to the {profile} agent, so I didn't switch."

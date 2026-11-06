@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from hermes_duplex import cli
-from hermes_duplex.config import CONTROL_PROFILE, ProfileConfig, RouterConfig, load_config
+from hermes_duplex.config import CONTROL_PROFILE, SWITCH_PROFILE, ProfileConfig, RouterConfig, load_config
 from hermes_duplex.router.base import BackendResult, Effort, ProfileSpec, RouteRequest
 from hermes_duplex.router.eval import (
     COMPOSITE,
@@ -145,11 +145,16 @@ async def test_scores_a_backend_alone() -> None:
     assert report.choice_accuracy == pytest.approx(3 / 5)
     # F1: general 2·1/(2+2), stock-picker 2·1/(2+1), _control 2·1/(1+1).
     assert report.macro_f1 == pytest.approx((1 / 2 + 2 / 3 + 1) / 3)
+    none = {"general": 0, "stock-picker": 0, CONTROL_PROFILE: 0, SWITCH_PROFILE: 0, NO_ANSWER: 0}
     assert report.confusion == {
-        "general": {"general": 1, "stock-picker": 0, CONTROL_PROFILE: 0, NO_ANSWER: 1},
-        "stock-picker": {"general": 1, "stock-picker": 1, CONTROL_PROFILE: 0, NO_ANSWER: 0},
-        CONTROL_PROFILE: {"general": 0, "stock-picker": 0, CONTROL_PROFILE: 1, NO_ANSWER: 0},
+        "general": {**none, "general": 1, NO_ANSWER: 1},
+        "stock-picker": {**none, "general": 1, "stock-picker": 1},
+        CONTROL_PROFILE: {**none, CONTROL_PROFILE: 1},
+        SWITCH_PROFILE: none,
     }
+    # No phrase asks to switch, and none was taken as a switch request.
+    assert (report.switch_precision, report.switch_recall, report.task_as_switch_rate) == (None, None, 0.0)
+    assert report.target_accuracy is None
     # Nearest rank over 10, 20, 30, 350, 400 ms.
     assert (report.latency_p50_ms, report.latency_p95_ms, report.latency_p99_ms) == pytest.approx(
         (30.0, 400.0, 400.0)
@@ -200,6 +205,51 @@ async def test_control_scores_are_none_with_nothing_to_score() -> None:
     [report] = await evaluate(phrases, PROFILES, ROUTER, [_StubBackend(clock, {})], ["knn"], clock=clock)
 
     assert (report.control_precision, report.control_recall, report.task_as_control_rate) == (None, None, 0.0)
+
+
+class _Resolver:
+    """Resolves each text to the profile ``targets`` maps it to, else None."""
+
+    def __init__(self, targets: Mapping[str, str]) -> None:
+        self._targets = targets
+
+    async def resolve(self, words: str) -> str | None:
+        return self._targets.get(words)
+
+
+async def test_scores_how_well_switch_requests_are_told_from_tasks_and_resolved() -> None:
+    answers = {
+        "p1": _Answer(1.0, SWITCH_PROFILE, prob=0.99),  # a task taken as a switch request
+        "s1": _Answer(1.0, SWITCH_PROFILE, prob=0.99),  # a switch request taken as one
+        "s2": _Answer(1.0, SWITCH_PROFILE, prob=0.6),  # on top, below the bar: a task
+        "s3": _Answer(1.0, SWITCH_PROFILE, prob=0.99),
+    }
+    phrases = (
+        *PHRASES,
+        LabelledPhrase("s1", SWITCH_PROFILE, "medium", active="general", target="stock-picker"),
+        LabelledPhrase("s2", SWITCH_PROFILE, "medium", active="general", target="general"),
+        LabelledPhrase("s3", SWITCH_PROFILE, "medium", active="general"),  # names no profile
+    )
+    clock = _Clock()
+    resolver = _Resolver({"s1": "stock-picker", "s2": "stock-picker"})
+
+    [report] = await evaluate(
+        phrases, PROFILES, ROUTER, [_StubBackend(clock, answers)], ["knn"], resolver=resolver, clock=clock
+    )
+
+    assert report.switch_precision == pytest.approx(2 / 3)
+    assert report.switch_recall == pytest.approx(2 / 3)
+    assert report.task_as_switch_rate == pytest.approx(1 / 4)
+    assert report.target_accuracy == pytest.approx(1 / 2), "s1 resolves to its target, s2 does not"
+    assert report.task_as_control_rate == 0.0
+
+
+async def test_a_switch_target_the_router_does_not_have_is_a_phrase_file_error() -> None:
+    phrases = (LabelledPhrase("go to crypto", SWITCH_PROFILE, "medium", active="general", target="crypto"),)
+    clock = _Clock()
+
+    with pytest.raises(PhraseFileError, match="target profiles the router does not have: crypto"):
+        await evaluate(phrases, PROFILES, ROUTER, [_StubBackend(clock, {})], ["knn"], clock=clock)
 
 
 async def test_a_backend_that_judges_no_effort_is_scored_on_the_default_effort() -> None:
@@ -291,8 +341,12 @@ def test_the_fixture_loads_with_profiles_active_profiles_and_follow_ups() -> Non
     phrases = phrase_file.phrases
     for label in ("general", "stock-picker", CONTROL_PROFILE):
         assert 30 <= sum(phrase.profile == label for phrase in phrases) <= 50
+    switch_requests = [phrase for phrase in phrases if phrase.profile == SWITCH_PROFILE]
+    assert len(switch_requests) >= 10 and sum(phrase.target is not None for phrase in switch_requests) >= 8
     assert {phrase.active for phrase in phrases} == {"general", "stock-picker"}
-    switches = sum(phrase.profile not in (CONTROL_PROFILE, phrase.active) for phrase in phrases)
+    switches = sum(
+        phrase.profile not in (CONTROL_PROFILE, SWITCH_PROFILE, phrase.active) for phrase in phrases
+    )
     stays = sum(phrase.profile == phrase.active for phrase in phrases)
     assert switches >= 20 and stays >= 20
     assert any(phrase.follows is not None for phrase in phrases)
@@ -323,6 +377,7 @@ HI: dict[str, Any] = {"text": "hi", "profile": "general", "active": "general", "
         ([{key: value for key, value in HI.items() if key != "active"}], "active"),
         ([{**HI, "active": CONTROL_PROFILE}], "active"),
         ([{**HI, "active": "crypto"}], "'crypto' is not a profile"),
+        ([{**HI, "target": "general"}], "target"),
     ],
     ids=[
         "empty",
@@ -333,6 +388,7 @@ HI: dict[str, Any] = {"text": "hi", "profile": "general", "active": "general", "
         "no-active",
         "control-active",
         "undefined-active",
+        "target-on-a-task",
     ],
 )
 def test_a_malformed_phrase_file_is_rejected(tmp_path: Path, phrases: list[Any], message: str) -> None:
@@ -369,6 +425,10 @@ def test_command_prints_json_for_each_backend_and_the_composite(capsys: pytest.C
             "control_precision",
             "control_recall",
             "task_as_control_rate",
+            "switch_precision",
+            "switch_recall",
+            "task_as_switch_rate",
+            "target_accuracy",
             "choice_accuracy",
             "macro_f1",
             "latency_p50_ms",
@@ -378,7 +438,7 @@ def test_command_prints_json_for_each_backend_and_the_composite(capsys: pytest.C
             "unanswered",
             "confusion",
         }
-        assert set(report["confusion"]) == {"general", "stock-picker", CONTROL_PROFILE}
+        assert set(report["confusion"]) == {"general", "stock-picker", CONTROL_PROFILE, SWITCH_PROFILE}
         assert 0.0 <= report["effort_accuracy"] <= 1.0
         assert report["suggestion_recall"] is not None
 

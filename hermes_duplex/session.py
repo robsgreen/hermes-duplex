@@ -46,6 +46,7 @@ from .prompts.notices import (
     suggest_switch,
     switch_reply,
     switched_to,
+    switching_to,
     task_already_ended,
     task_cancelled,
     task_failed,
@@ -139,9 +140,17 @@ LATE_ANSWER_S = 30.0
 nothing else asked since, is taken for a late answer to it and is not run (``_whose_question``)."""
 
 RESTART_QUIET_S = 2.0
-"""A prompt-context change from first hearing a person restarts a provider that cannot replace its
-instructions only once nobody has been voiced for this many seconds, longer than
+"""A prompt-context change from first hearing a person, or from an explicit switch, restarts a provider
+that cannot replace its instructions only once nobody has been voiced for this many seconds, longer than
 ``TRANSCRIPT_GRACE_MS``, so the restart cuts off no one's words, nor a live hand-off's transcript."""
+
+SWITCH_LINE_MAX_WAIT_S = 5.0
+"""A restart for an explicit switch waits at most this long, from when it was asked to say it, for
+its ``switching_to`` line to be heard, so a model that never speaks it cannot hold the switch back."""
+
+SWITCH_LINE_SETTLE_S = 0.5
+"""On a provider without speech events, the ``switching_to`` line counts as heard once its audio has
+arrived, none has arrived for this many seconds, and nothing is left held or playing."""
 
 _NAMED_TASK = re.compile(r"\btask\s+(?:number\s+|#\s*)?(\d+)\b", re.IGNORECASE)
 """A task named by its number: "task 2", "task number 2", "task #2". Accepted, never advertised."""
@@ -487,7 +496,10 @@ class VoiceSession:
     a change of the open tasks alone, which waits for the next restart or reconnect. A restart for a
     person first heard, for a person who left, or for a person alone again, waits until the call is
     quiet (``RESTART_QUIET_S``), so it does not cut off what they are saying; one for someone joining
-    them happens at once. A provider session whose instructions carry the owner's ``USER.md`` or
+    them happens at once. A restart for an explicit switch waits until the call is quiet too, and
+    then for the old provider session to say ``switching_to``, which confirms the switch
+    (``_restart_for_switch``); requests run on the new profile at once, while the old instructions
+    stay until the restart. A provider session whose instructions carry the owner's ``USER.md`` or
     briefing, open or still opening, is muted as soon as the owner is no longer alone, and always
     restarted, whether or not it ``replaces_instructions`` (an update in place would keep its
     conversation, said with the owner's notes) and whatever instruction changes are under way
@@ -498,16 +510,20 @@ class VoiceSession:
     Hand-offs always run on the speaker's own active profile, whatever the instructions speak for.
 
     People switch their active profile only by asking: a ``switch_profile`` call, whose ``profile``
-    is the user's words for the agent (``ActiveProfiles.resolve``), or a hand-off whose words are a
-    switch request (``read_switch_request`` over ``ActiveProfiles.names``), which is checked before
-    routing and so never reaches the router or Hermes. The session listens to ``active_profiles`` for
-    every person it hears (and the conversation's ``person``) until it ends, so a switch made
-    anywhere, here, in another conversation, or through a transport's own control, moves the
-    instructions to the new profile and is confirmed aloud (``switched_to``) once, while that person
-    is still in the conversation (``Conversation.present``); a switch of someone who has left changes
-    nothing here. A switch that does not happen is answered as ``notices.switch_reply`` words it:
-    ``already_active``, ``switch_refused``, or, for words that name no single profile,
-    ``which_profile``. When the session first hears a person whose saved profile could no longer be
+    is the user's words for the agent (``ActiveProfiles.resolve``: by name, alias, or meaning), or a
+    hand-off whose words are a switch request. Those the parser reads (``read_switch_request`` over
+    ``ActiveProfiles.names``) are carried out before routing and never reach the router; one that asks
+    only to switch, to words that fit no name or alias ("switch to the stock trader"), has its words
+    resolved by meaning. Those it does not read but the router takes for a switch request
+    (``RouteDecision.switch_request``: "use my portfolio agent") have their whole words resolved the
+    same way, and no further request in them runs. Neither reaches Hermes. The session listens to
+    ``active_profiles`` for every person it hears (and the conversation's ``person``) until it ends,
+    so a switch made anywhere, here, in another conversation, or through a transport's own control,
+    moves the instructions to the new profile and is confirmed aloud once (``switched_to``, or
+    ``switching_to`` before a restart), while that person is still in the conversation
+    (``Conversation.present``); a switch of someone who has left changes nothing here. A switch that
+    does not happen is answered as ``notices.switch_reply`` words it: ``already_active``,
+    ``switch_refused``, or, for words that name no single profile, ``which_profile``. When the session first hears a person whose saved profile could no longer be
     used, it tells them they are back on their default (``fallback_to_default``).
 
     A switch request followed by a further request ("switch to stock-picker and check NVDA",
@@ -677,6 +693,12 @@ class VoiceSession:
         """Set when the session closed the provider itself to restart it with new instructions."""
         self._last_voiced_s = 0.0
         """``time.monotonic()`` when an input frame last had someone voiced."""
+        self._last_output_s = 0.0
+        """``time.monotonic()`` when output audio last arrived from a provider session not muted."""
+        self._switch_target: str | None = None
+        """The profile of the latest explicit switch a pending ``_restart_for_switch`` confirms."""
+        self._switch_restart: asyncio.Task[None] | None = None
+        """The pending ``_restart_for_switch``, or None; there is at most one."""
         self._switch_subscriptions: dict[str, Callable[[], None]] = {}
         """Per person the session listens to ``active_profiles`` for, how to stop listening."""
         self._questions: dict[str, _Question] = {}
@@ -897,11 +919,27 @@ class VoiceSession:
                 logger.info("%s switched to %s after leaving the conversation; ignored", person, profile)
                 self._people_heard.discard(person)  # so their return is taken in afresh
                 return False
-            self._change_prompt_context(profile, person)
-            self._announce(switched_to(profile))
+            self._follow_switch(profile, person)
             return True
 
         self._switch_subscriptions[person] = self._active_profiles.subscribe(person, switched)
+
+    def _follow_switch(self, profile: str, person: str) -> None:
+        """Move the instructions to ``person``'s new active ``profile`` and confirm the switch aloud.
+
+        A provider that ``replaces_instructions`` gets the new instructions at once (restarting at
+        once only should the update fail), and the switch is confirmed with ``switched_to``. Any other
+        keeps its instructions until ``_restart_for_switch`` restarts it in the next pause, after
+        saying ``switching_to``; a switch made while one is pending joins it.
+        """
+        if self._capabilities["replaces_instructions"]:
+            self._change_prompt_context(profile, person)
+            self._announce(switched_to(profile))
+            return
+        self._move_prompt_context(profile, person)
+        self._switch_target = profile
+        if self._switch_restart is None:
+            self._switch_restart = self._spawn(self._restart_for_switch())
 
     async def _pump_adoptions(self) -> None:
         """Adopt the tasks other sessions leave unattended or untold for the people heard here who are
@@ -937,8 +975,9 @@ class VoiceSession:
         """Discard the output the user has not heard yet; the provider decides whether to go on.
         ``reason`` says why, for the log.
 
-        Where the provider supports it, the interrupted item is truncated to what the user heard, as
-        the pacer counts it: the conversation's own count spans its playback, not the provider's items.
+        Where the provider supports it and a provider session is open, the interrupted item is
+        truncated to what the user heard, as the pacer counts it: the conversation's own count spans
+        its playback, not the provider's items.
         """
         item_id, heard_ms = self._pacer.item_id, round(self._pacer.item_played_ms)
         # Drop before flushing: the output pump must not release held audio while the flush runs.
@@ -947,7 +986,8 @@ class VoiceSession:
         logger.info(
             "%s: flushed playback after %d ms of the item, dropped %.0f ms held", reason, heard_ms, dropped_ms
         )
-        if item_id is not None and self._capabilities["supports_truncate"]:
+        # Only an open provider session has an item to truncate: one still connecting has none.
+        if item_id is not None and self._capabilities["supports_truncate"] and self._provider_open.is_set():
             await self._provider.truncate(item_id, heard_ms)
 
     async def _input_reached(self, t_ms: int, connection: int) -> bool:
@@ -996,6 +1036,7 @@ class VoiceSession:
                         logger.info("ignored call %s (%s): someone had joined", event.id, event.target)
                         self._announce(NOT_HEARD)
                     case OutputAudio(pcm=pcm, item_id=item_id):
+                        self._last_output_s = time.monotonic()
                         self._pacer.push(pcm, item_id)
                     case InputTranscript(delta=delta, final=final, start_ms=start_ms):
                         self._input_transcript.add(self._sent_ms if start_ms is None else start_ms, delta)
@@ -1047,16 +1088,22 @@ class VoiceSession:
         await self._conversation.notify({"transcript": {"speaker": "assistant", "text": PROVIDER_LOST}})
 
     def _change_prompt_context(self, profile: str, person: str | None, *, when_quiet: bool = False) -> None:
-        """Make the instructions speak for ``profile`` and to ``person``, with the context built afresh
-        (``_current_context``), and bring the open provider session's instructions up to date in the
-        background; nothing happens when the context comes out as it was. With ``when_quiet``, a
-        provider that must restart for them waits until the call is quiet first
-        (``_apply_prompt_context``)."""
+        """Make the instructions speak for ``profile`` and to ``person`` (``_move_prompt_context``),
+        and bring the open provider session's instructions up to date in the background; nothing
+        happens when the context comes out as it was. With ``when_quiet``, a provider that must
+        restart for them waits until the call is quiet first (``_apply_prompt_context``)."""
+        if self._move_prompt_context(profile, person):
+            self._spawn(self._apply_prompt_context(when_quiet=when_quiet))
+
+    def _move_prompt_context(self, profile: str, person: str | None) -> bool:
+        """Make the current prompt context speak for ``profile`` and to ``person``, built afresh
+        (``_current_context``), without touching the open provider session; return whether it renders
+        other instructions than before (``_same_instructions``)."""
         before = (self._context_profile, self._context_person, self._context_alone)
         self._context_profile, self._context_person = profile, person
         context = self._current_context()
         if self._same_instructions(context, self._prompt_context):
-            return
+            return False
         if before != (profile, person, self._context_alone):
             logger.info(
                 "voice instructions now speak for profile %s, to %s%s",
@@ -1065,7 +1112,7 @@ class VoiceSession:
                 " alone" if self._context_alone else "",
             )
         self._prompt_context = context
-        self._spawn(self._apply_prompt_context(when_quiet=when_quiet))
+        return True
 
     def _same_instructions(self, context: PromptContext, other: PromptContext | None) -> bool:
         """Whether instructions rendered from ``context`` need not replace ones rendered from ``other``:
@@ -1121,12 +1168,15 @@ class VoiceSession:
             if self._same_instructions(context, self._rendered_context):
                 return
             if replaces:
+                # Counted as rendered from the moment it is sent, as ``_connect`` does, so someone
+                # joining while the update waits for its answer is seen to hear what it carries.
+                previous, self._rendered_context = self._rendered_context, context
                 try:
                     await self._provider.update_instructions(self._provider.prompter.instructions(context))
                 except Exception:
+                    self._rendered_context = previous
                     logger.exception("could not update the voice instructions; restarting the provider")
                 else:
-                    self._rendered_context = context
                     return
             if not (when_quiet and replaces):
                 await self._restart_provider(context)
@@ -1146,6 +1196,66 @@ class VoiceSession:
         self._restarting = True
         self._provider_open.clear()
         await self._provider.close()
+
+    async def _restart_for_switch(self) -> None:
+        """Restart a provider that cannot replace its instructions for the latest explicit switch
+        (``_switch_target``) without cutting anyone off.
+
+        Once the call is quiet (``_wait_for_quiet``: the reply under way has finished and nobody
+        speaks), the open provider session says ``switching_to`` and, once that has been heard
+        (``_say_and_wait``), is restarted (``_apply_prompt_context``). That line confirms the switch;
+        the restarted session does not repeat it. A switch made meanwhile is followed instead: only the
+        latest is said and restarted for. When no restart is needed by then, because the person
+        switched back to the profile the open session speaks for, or because a reconnect, or the
+        restart of a muted provider session (``_muted``), renders the switch, it is confirmed with
+        ``switched_to`` and nothing restarts here.
+        """
+        try:
+            while True:
+                await self._wait_for_quiet()
+                profile, connection = self._switch_target, self._connection
+                assert profile is not None, "a switch sets its target before it is restarted for"
+                if not self._provider_ready() or self._same_instructions(
+                    self._prompt_context, self._rendered_context
+                ):
+                    self._announce(switched_to(profile))
+                    return
+                await self._say_and_wait(switching_to(profile))
+                if self._connection != connection or not self._provider_ready():
+                    continue  # the provider session ended or was muted while saying it
+                if profile != self._switch_target:
+                    continue  # switched again while it was said: say the latest
+                await self._apply_prompt_context()
+                if profile == self._switch_target:
+                    return
+        finally:
+            self._switch_restart = None
+
+    async def _say_and_wait(self, text: str) -> None:
+        """Have the open provider session say ``text``, then wait until it has been heard: where the
+        provider emits speech events, until the floor is free; otherwise until its audio has arrived
+        and none has for ``SWITCH_LINE_SETTLE_S``; either way with nothing left held or playing.
+
+        Waits at most ``SWITCH_LINE_MAX_WAIT_S``, and stops as soon as the provider session is no
+        longer ready (closed, or muted). A failure to say it is logged and ends the wait.
+        """
+        said_s = time.monotonic()
+        self._floor.response_requested()
+        try:
+            await self._provider.say(text)
+        except Exception:
+            logger.exception("could not say %r before restarting", text)
+            return
+        gated = self._capabilities["emits_speech_events"]
+        while self._provider_ready() and time.monotonic() - said_s < SWITCH_LINE_MAX_WAIT_S:
+            if gated:
+                heard = self._floor.free
+            else:
+                settled_s = time.monotonic() - self._last_output_s
+                heard = self._last_output_s > said_s and settled_s >= SWITCH_LINE_SETTLE_S
+            if heard and not self._output_pending():
+                return
+            await asyncio.sleep(FRAME_MS / 1000)
 
     async def _wait_for_quiet(self) -> None:
         """Wait until nobody has been voiced for ``RESTART_QUIET_S``, no output is held or playing,
@@ -1242,7 +1352,7 @@ class VoiceSession:
         elif request.target == SWITCH_PROFILE_TOOL:
             # The user's words for the agent, resolved as a spoken switch request's target would be.
             words = args.get("profile")
-            target = self._active_profiles.resolve(words) if isinstance(words, str) else None
+            target = await self._active_profiles.resolve(words) if isinstance(words, str) else None
             outcome, notice = await self._switch(speaker, target)
             await self._answer(request, _switch_output(outcome, notice))
             self._end_question(speaker)
@@ -1357,7 +1467,11 @@ class VoiceSession:
 
         switch = read_switch_request(text, self._active_profiles.names)
         if switch is not None:
-            outcome, notice = await self._switch(speaker, switch.target)
+            target = switch.target
+            if target == "ambiguous":
+                # Asks only to switch, to words that fit no single name or alias: try their meaning.
+                target = await self._active_profiles.resolve(text)
+            outcome, notice = await self._switch(speaker, target)
             if notice is not None:
                 self._announce(notice)
             self._end_question(speaker)
@@ -1380,6 +1494,13 @@ class VoiceSession:
             return
         if decision.control_intent == "status":
             self._announce(self._status(speaker, text))
+            return
+        if decision.switch_request:
+            # Worded too freely for the parser ("go to the stock trader profile"): the whole request
+            # names the profile, and no further request is run.
+            _, notice = await self._switch(speaker, await self._active_profiles.resolve(text))
+            if notice is not None:
+                self._announce(notice)
             return
 
         request = _Request(call, speaker, text, context, decision.effort)

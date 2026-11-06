@@ -1,8 +1,8 @@
 """The routing policy: runs both paths, picks the effort, suggests a better profile, and looks up the model.
 
-``CompositeRouter`` is what the rest of the service routes through. It owns the ``_control`` choice,
-the main path's deadline and circuit breaker, the switch-suggestion rule, and the decision log. It
-never picks the profile a task runs on: that is the speaker's active profile.
+``CompositeRouter`` is what the rest of the service routes through. It owns the ``_control`` and
+``_switch`` choices, the main path's deadline and circuit breaker, the switch-suggestion rule, and the
+decision log. It never picks the profile a task runs on: that is the speaker's active profile.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 
-from ..config import CONTROL_PROFILE, ProfileConfig, RouterConfig
+from ..config import CONTROL_PROFILE, SWITCH_PROFILE, ProfileConfig, RouterConfig
 from ..providers.base import ModelChoice
 from .base import (
     BackendResult,
@@ -36,6 +36,13 @@ a status question taken as a task is only a wasted run, so the bar is high. Prob
 this also means ``_control`` beats every profile by at least 0.99. On the router eval ``knn`` gives
 tasks up to 0.989 for ``_control`` when profiles have only a description; 0.995 keeps every task a
 task there and keeps the same status and cancel requests as 0.999 would."""
+SWITCH_MIN_PROB = 0.95
+"""The deciding answer's ``_switch`` probability must be at least this for the request to be a switch
+request; below it the request is a task. A task taken as a switch request is never run (and may switch
+the speaker), while a switch request taken as a task is a visible wasted run, so the bar is high. On
+the router eval ``knn`` gives tasks at most 0.926 for ``_switch`` ("can I talk to you about dinner
+plans", with profiles that have only a description) and 0.860 with examples; 0.95 keeps every task a
+task there and still takes the switch requests ``knn`` is sure of (0.98 and above)."""
 CONTROL_MATCH_SIMILARITY = 0.9
 """A fast-path ``_control`` answer is accepted without waiting for the main path only when the request
 is at least this similar (``BackendResult.control_similarity``) to one of the ``_control`` phrases: a
@@ -100,25 +107,28 @@ class _Breaker:
 
 
 class CompositeRouter:
-    """Decides a request's effort and model, whether it is a ``_control`` request, and whether another
-    profile would suit it better.
+    """Decides a request's effort and model, whether it is a ``_control`` or a ``_switch`` request, and
+    whether another profile would suit it better.
 
-    Every configured profile is a choice for the backends, and ``_control`` is too. The request runs
-    on the speaker's active profile, which the caller gives and the router never changes; the model
-    comes from that profile's effort table. The router suggests another profile
+    Every configured profile is a choice for the backends, and ``_control`` and ``_switch`` are too.
+    The request runs on the speaker's active profile, which the caller gives and the router never
+    changes; the model comes from that profile's effort table. The router suggests another profile
     (``RouteDecision.suggestion``) only when ``config.suggest_switch`` is on, the speaker may use it,
     its probability is at least ``config.suggest_threshold``, and it beats the active profile's by at
     least ``SUGGEST_MARGIN``.
 
-    A request is a task unless the deciding answer gives ``_control`` at least ``CONTROL_MIN_PROB``;
-    a weaker ``_control`` answer, even the top one, leaves it a task on the active profile.
+    A request is a task unless the deciding answer gives ``_control`` at least ``CONTROL_MIN_PROB``,
+    or ``_switch`` at least ``SWITCH_MIN_PROB`` (a switch request: ``RouteDecision.switch_request``,
+    with no suggestion and no model); a weaker answer for either, even the top one, leaves it a task
+    on the active profile.
 
     Each request goes to the main path (``config.backend``) and, when configured, the fast path
     (``config.fast_path``) at once. The router waits up to ``config.deadline_ms`` for the main path.
     It stops early when the fast path is sure (``EARLY_ACCEPT_PROB``, ``EARLY_ACCEPT_MARGIN``) of the
     active profile, so a suggestion always waits for the main path, or when its ``_control`` answer
     passes ``CONTROL_MIN_PROB`` for a near-exact match of a ``_control`` phrase
-    (``CONTROL_MATCH_SIMILARITY``). The first confident answer of main, then fast path decides.
+    (``CONTROL_MATCH_SIMILARITY``); a fast-path ``_switch`` answer always waits. The first confident
+    answer of main, then fast path decides.
     Without one (``source`` ``fallback``), the request is a task, nothing is suggested, and the effort
     is the main path's judgement when it answered, else the fast path's, else ``DEFAULT_EFFORT``.
     """
@@ -149,12 +159,13 @@ class CompositeRouter:
         self._fast = by_name[config.fast_path] if config.fast_path not in (None, config.backend) else None
         self._breaker = _Breaker(self._main.name)
         self._clock = clock
-        self._choices = (*profiles, CONTROL_PROFILE)
+        self._choices = (*profiles, CONTROL_PROFILE, SWITCH_PROFILE)
         self._abandoned: set[asyncio.Task[BackendResult]] = set()
         """Backend calls cancelled mid-flight, referenced until they finish unwinding."""
 
     async def configure(self) -> None:
-        """Give each path's backend the choices: each profile, then ``_control`` with its examples."""
+        """Give each path's backend the choices: each profile, then ``_control`` and ``_switch`` with
+        their examples."""
         specs = choice_specs(self._profiles, self._config.control_examples)
         for backend in (self._main, self._fast):
             if backend is not None:
@@ -253,8 +264,11 @@ class CompositeRouter:
     def _accepts_early(self, fast: BackendResult, active: str) -> bool:
         """Whether the fast path is sure enough to stop waiting for the main path: a clear winner that
         is the speaker's active profile, so there is no switch to suggest, or a ``_control`` answer
-        strong enough to decide that matches a ``_control`` phrase near-exactly."""
+        strong enough to decide that matches a ``_control`` phrase near-exactly; never a ``_switch``
+        answer, which always waits for the main path."""
         probs = fast.profile_probs
+        if self._winner(probs) == SWITCH_PROFILE:
+            return False
         if self._winner(probs) == CONTROL_PROFILE:
             similarity = fast.control_similarity
             near_exact = similarity is not None and similarity >= CONTROL_MATCH_SIMILARITY
@@ -285,22 +299,27 @@ class CompositeRouter:
         probs: Mapping[str, float] = judge.profile_probs if judge is not None else {}
         source: RouteSource = "fallback"
         control_intent = None
+        switch_request = False
         suggestion = None
         if decider is not None:
             probs, source = decider.profile_probs, _backend_source(decider)
             if _is_control(probs):
                 # A backend that cannot tell the intents apart gets ``status``, which changes nothing.
                 control_intent = decider.control_intent or "status"
+            elif probs.get(SWITCH_PROFILE, 0.0) >= SWITCH_MIN_PROB:
+                switch_request = True
             else:
                 suggestion = self._suggestion(probs, active, permitted)
+        task = control_intent is None and not switch_request
         return RouteDecision(
             effort=effort,
-            model=None if control_intent is not None else self.model_for(active, effort),
+            model=self.model_for(active, effort) if task else None,
             suggestion=suggestion,
             control_intent=control_intent,
             probabilities=probs,
             source=source,
             latency_ms=round((self._clock() - started) * 1000),
+            switch_request=switch_request,
         )
 
     def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
@@ -362,7 +381,8 @@ def _top_effort(result: BackendResult | None) -> Effort:
 def _log_decision(speaker: str, active_profile: str, decision: RouteDecision) -> None:
     """Log one line per decision; the fields are also attached to the record as ``route_decision``.
 
-    ``profile`` is the speaker's active profile, which the request runs on unless ``control`` is set.
+    ``profile`` is the speaker's active profile, which the request runs on unless ``control`` or
+    ``switch`` is set.
     """
     top3 = sorted(decision.probabilities.items(), key=lambda item: item[1], reverse=True)[:3]
     model = decision.model
@@ -370,6 +390,7 @@ def _log_decision(speaker: str, active_profile: str, decision: RouteDecision) ->
         "speaker": speaker,
         "profile": active_profile,
         "control": decision.control_intent,
+        "switch": decision.switch_request,
         "effort": decision.effort,
         "model": f"{model.provider}/{model.model}" if model is not None else None,
         "suggestion": decision.suggestion,

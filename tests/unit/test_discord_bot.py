@@ -284,6 +284,37 @@ async def test_profile_switch_that_changes_nothing_says_why(
     assert (store.get("rob"), store.get("alex")) == ("general", "general")
 
 
+class _TableResolver:
+    """Resolves words by a fixed table, as matching by meaning would."""
+
+    def __init__(self, table: dict[str, str]) -> None:
+        self._table = table
+
+    async def resolve(self, words: str) -> str | None:
+        return self._table.get(words)
+
+
+@pytest.mark.parametrize(
+    ("user_id", "reply", "rob_after"),
+    [
+        (ROB_ID, switched_for_next_time("stock-picker"), "stock-picker"),
+        (ALEX_ID, switch_refused("stock-picker"), "general"),
+    ],
+    ids=["switched", "refused"],
+)
+async def test_profile_switch_by_words_for_the_agent_resolves_them_by_meaning(
+    tmp_path: Path, user_id: int, reply: str, rob_after: str
+) -> None:
+    config = _config(tmp_path)
+    permissions = PermissionChecker(config)
+    resolver = _TableResolver({"the stock trader": "stock-picker"})
+    store = ActiveProfiles(tmp_path / "active_profiles.json", permissions, config, resolver=resolver)
+    transport = _transport(tmp_path, active_profiles=store)
+
+    assert await transport.switch_profile(_member(user_id), "the stock trader") == reply
+    assert (store.get("rob"), store.get("alex")) == (rob_after, "general")
+
+
 @pytest.mark.parametrize(
     ("user_id", "typed", "choices"),
     [

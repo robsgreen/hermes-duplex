@@ -17,9 +17,11 @@ _SENTENCE_BREAK = re.compile(r"[.,;:!?]")
 _SENTENCE_END = re.compile(r"[.;!?]")
 
 _RETURN_PHRASE = ("back", "to")
-"""The switch phrase people also use to return to a topic ("back to Tesla"), so with a target that is no
-profile it never asks which one is meant."""
-_SWITCH_PHRASES = frozenset({("switch", "to"), ("talk", "to"), _RETURN_PHRASE, ("change", "to")})
+_GO_PHRASE = ("go", "to")
+_PLACE_PHRASES = frozenset({_RETURN_PHRASE, _GO_PHRASE})
+"""The switch phrases people also use for a topic or a place ("back to Tesla", "go to the gym"), so with
+a target that is no profile they never ask which one is meant."""
+_SWITCH_PHRASES = frozenset({("switch", "to"), ("talk", "to"), ("change", "to"), *_PLACE_PHRASES})
 NOT_A_TARGET = frozenset({"me", "us", "you"})
 """Words that, said right after a switch phrase, make it no switch request: "talk to me about the
 weather" is a request for the voice model."""
@@ -151,7 +153,7 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
     further request said after it.
 
     ``names`` maps each profile name to its spoken aliases. A switch request is a switch phrase
-    ("switch to", "talk to", "back to", "change to") followed by a target; a leading "the" before the
+    ("switch to", "talk to", "back to", "change to", "go to") followed by a target; a leading "the" before the
     target is ignored. Where the phrase stands decides what the target may be:
 
     - When it opens what is said or one of its sentences (after ".", ";", "!" or "?", not a comma), after
@@ -161,7 +163,8 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
       when the phrase is all that is said: lead-ins before it, a short target
       (``UNKNOWN_TARGET_MAX_WORDS``), and nothing after it but polite words. Said with anything else
       ("Switch to Celsius. What's the weather in Paris?", "switch to finance and check NVDA"), or with
-      "back to" ("back to Tesla, what's it at?"), it makes no switch request.
+      "back to" or "go to" and a target that does not end in "profile" or "agent" ("back to Tesla,
+      what's it at?", "go to the gym"), it makes no switch request.
     - Anywhere else, only a profile's exact name is a target: "remind me to talk to Sarah" and "should
       I move my savings back to stocks" make no request, even with an alias "stocks".
 
@@ -182,7 +185,7 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
     sentence_starts = [
         index for index in breaks if _SENTENCE_END.search(text, spans[index - 1].end(), spans[index].start())
     ]
-    openings = {_after_lead_ins(words, start) for start in (0, *sentence_starts)}
+    openings = {position for start in (0, *sentence_starts) for position in _lead_in_ends(words, start)}
     result: SwitchRequest | None = None
 
     for start in range(len(words) - 1):
@@ -206,7 +209,8 @@ def read_switch_request(text: str, names: Mapping[str, Sequence[str]]) -> Switch
 
         profile, length = _resolve(target, names, aliases=opening)
         if profile is None:
-            if phrase != _RETURN_PHRASE and _asks_only_to_switch(words, start, target_start):
+            names_an_agent = phrase not in _PLACE_PHRASES or _ends_with_target_noun(words, target_start)
+            if names_an_agent and _asks_only_to_switch(words, start, target_start):
                 result = result or SwitchRequest("ambiguous", None)
             continue
         if profile == "ambiguous":
@@ -227,6 +231,66 @@ def resolve_profile(words: str, names: Mapping[str, Sequence[str]]) -> str | Non
     None when they fit no name or alias, or when the longest fit is an alias of two profiles."""
     profile, _ = _resolve(spoken_form(words), names, aliases=True)
     return None if profile == "ambiguous" else profile
+
+
+_PHRASING_WORDS = frozenset(
+    {
+        "a",
+        "agent",
+        "agents",
+        "an",
+        "another",
+        "assistant",
+        "back",
+        "bot",
+        "can",
+        "change",
+        "chat",
+        "connect",
+        "could",
+        "go",
+        "i",
+        "id",
+        "like",
+        "let",
+        "lets",
+        "me",
+        "move",
+        "my",
+        "now",
+        "ok",
+        "okay",
+        "on",
+        "one",
+        "over",
+        "please",
+        "profile",
+        "profiles",
+        "put",
+        "speak",
+        "switch",
+        "take",
+        "talk",
+        "thanks",
+        "the",
+        "to",
+        "use",
+        "want",
+        "wanna",
+        "with",
+        "would",
+        "you",
+    }
+)
+"""Words of a switch request that say how it is asked, not which agent it asks for."""
+
+
+def target_words(text: str) -> str:
+    """The words of a switch request ``text`` that say which agent it asks for: its words as compared
+    (``spoken_form`` per word) without the ones that only phrase the asking ("go to the stock trader
+    profile" is "stock trader", "can I talk to my portfolio agent" is "portfolio"). Empty when nothing
+    else is said."""
+    return " ".join(word for word in _words(text) if word not in _PHRASING_WORDS)
 
 
 def spoken_form(name: str) -> tuple[str, ...]:
@@ -264,15 +328,26 @@ def _spoken(word: str) -> str:
     return _APOSTROPHES.sub("", word.casefold())
 
 
-def _after_lead_ins(words: Sequence[str], start: int) -> int:
-    """The index of the first word from ``start`` on that is not part of a lead-in (``_LEAD_INS``)."""
-    position = start
+def _lead_in_ends(words: Sequence[str], start: int) -> list[int]:
+    """``start`` and the index after each lead-in (``_LEAD_INS``) that follows from there, one after
+    another: where a switch phrase may stand and still open what is said. A phrase may start with a
+    word that is also a lead-in ("go to stocks", where "go" also leads in "go back to general")."""
+    positions = [start]
     while True:
+        position = positions[-1]
         fits = (tuple(words[position : position + n]) for n in range(_LONGEST_LEAD_IN, 0, -1))
         lead_in = next((candidate for candidate in fits if candidate in _LEAD_INS), None)
         if lead_in is None:
-            return position
-        position += len(lead_in)
+            return positions
+        positions.append(position + len(lead_in))
+
+
+def _ends_with_target_noun(words: Sequence[str], target_start: int) -> bool:
+    """Whether the target starting at word ``target_start`` ends, before any polite words, with
+    "profile" or "agent", so it names an agent rather than a place or a topic ("go to the stock trader
+    profile", but not "go to the gym")."""
+    told = [word for word in words[target_start:] if word not in _POLITE_WORDS]
+    return bool(told) and told[-1] in _TARGET_NOUNS
 
 
 def _asks_only_to_switch(words: Sequence[str], start: int, target_start: int) -> bool:
@@ -281,7 +356,7 @@ def _asks_only_to_switch(words: Sequence[str], start: int, target_start: int) ->
     besides polite ones, "profile", and "agent", and after the target only polite words and connectors.
     The target ends at the first connector, "about", or sentence break ("talk to Mom about dinner" is
     more than a switch)."""
-    if _after_lead_ins(words, 0) != start:
+    if start not in _lead_in_ends(words, 0):
         return False
     ends = _CONNECTORS | {_TOPIC_CONNECTOR}
     target = list(itertools.takewhile(lambda word: word not in ends, words[target_start:]))

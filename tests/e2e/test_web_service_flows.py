@@ -62,6 +62,7 @@ ROUTE_FIELDS = {
     "speaker",
     "profile",
     "control",
+    "switch",
     "effort",
     "model",
     "suggestion",

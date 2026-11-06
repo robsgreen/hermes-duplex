@@ -10,6 +10,7 @@ from hermes_duplex.switching import (
     read_switch_request,
     resolve_profile,
     spoken_form,
+    target_words,
 )
 
 NAMES = {
@@ -57,6 +58,10 @@ def _target(text: str, names: dict[str, list[str]]) -> str:
         # An exact profile name counts wherever the phrase stands.
         ("should I switch to stock-picker", "stock-picker"),
         ("I'm done here so back to general", "general"),
+        # "go to", where "go" is also a lead-in.
+        ("go to stocks", "stock-picker"),
+        ("let me go to the stock picker", "stock-picker"),
+        ("Okay, go to general please", "general"),
     ],
 )
 def test_switch_phrase_names_a_profile(text: str, profile: str) -> None:
@@ -302,3 +307,51 @@ def test_short_no_is_negative(text: str) -> None:
 def test_other_text_is_neither_yes_nor_no(text: str) -> None:
     assert not is_affirmative(text)
     assert not is_negative(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "rest"),
+    [
+        ("go to stocks and check NVDA", "check NVDA"),
+        ("Go to the house, then turn on the lights", "turn on the lights"),
+    ],
+)
+def test_go_to_a_profile_and_a_request_switches_then_hands_off_the_rest(text: str, rest: str) -> None:
+    request = read_switch_request(text, NAMES)
+
+    assert request is not None and request.rest == rest
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "go to the gym",
+        "remind me to go to the dentist",
+        "I want to go to Paris",
+        "go to sleep",
+        "don't go to stocks",
+    ],
+)
+def test_go_to_a_place_is_no_switch_request(text: str) -> None:
+    assert read_switch_request(text, NAMES) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["go to the stock trader profile", "go back to the markets agent please", "let me go to the money agent"],
+)
+def test_go_to_an_agent_that_fits_no_name_asks_which(text: str) -> None:
+    assert _target(text, NAMES) == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    ("text", "words"),
+    [
+        ("go to the stock trader profile", "stock trader"),
+        ("Can I talk to my portfolio agent, please?", "portfolio"),
+        ("connect me with the agent for reminders", "for reminders"),
+        ("switch agents", ""),
+    ],
+)
+def test_target_words_drop_the_asking(text: str, words: str) -> None:
+    assert target_words(text) == words

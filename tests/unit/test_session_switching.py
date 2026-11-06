@@ -26,9 +26,11 @@ from hermes_duplex.prompts.notices import (
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.providers.fake.adapter import FakeProvider, SentCall
 from hermes_duplex.router.base import Effort, RouteDecision
+from hermes_duplex.router.knn import ProfileMatcher
 from hermes_duplex.session import VoiceSession
 from hermes_duplex.tasks import TaskTracker
 from hermes_duplex.transports.base import InputFrame
+from tests.fakes.fake_embedder import fake_embed
 from tests.fakes.fake_hermes_api import FakeHermesApi
 
 RATE = 24000
@@ -81,10 +83,12 @@ class _MemoryConversation:
 
 
 class _RecordingRouter:
-    """A router that must not be asked: it records each request and routes it as a medium-effort task."""
+    """A router that records each request and routes it as a medium-effort task, or as a switch request
+    when its text is in ``switches``."""
 
     def __init__(self) -> None:
         self.requests: list[str] = []
+        self.switches: set[str] = set()
 
     def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
         return None
@@ -107,6 +111,7 @@ class _RecordingRouter:
             probabilities={},
             source="knn",
             latency_ms=1,
+            switch_request=text in self.switches,
         )
 
 
@@ -165,7 +170,12 @@ class _Harness:
         self.config = _config(tmp_path)
         self.permissions = PermissionChecker(self.config)
         self.store_path = tmp_path / "home" / "duplex" / "active_profiles.json"
-        self.active_profiles = ActiveProfiles(self.store_path, self.permissions, self.config)
+        self.active_profiles = ActiveProfiles(
+            self.store_path,
+            self.permissions,
+            self.config,
+            resolver=ProfileMatcher(self.config.profiles, fake_embed),
+        )
         self.router = _RecordingRouter()
         self.tracker = TaskTracker(tmp_path / "home")
         self.provider: FakeProvider | None = None
@@ -229,9 +239,10 @@ class _Harness:
                     raise AssertionError("the session ended before the condition held")
                 await asyncio.sleep(0.01)
 
-    def assert_nothing_ran(self) -> None:
-        """No switch request reaches the router, and none becomes a task or a Hermes run."""
-        assert self.router.requests == []
+    def assert_nothing_ran(self, *, routed: Sequence[str] = ()) -> None:
+        """No switch request reaches the router but ``routed``, and none becomes a task or a Hermes
+        run."""
+        assert self.router.requests == list(routed)
         assert self.tracker.active_for("rob") == [] and self.tracker.active_for("alex") == []
         assert self.api.requests_to("POST", "/runs") == []
 
@@ -437,6 +448,61 @@ async def test_polite_words_after_a_switch_are_no_request(harness: _Harness, wor
     harness.assert_nothing_ran()
 
 
+@pytest.mark.parametrize(
+    ("words", "after"),
+    [
+        ("switch to the stock trader", "stock-picker"),  # the parser asks which; the meaning tells
+        ("go to the holdings profile", "stock-picker"),
+    ],
+)
+async def test_a_switch_to_words_that_fit_no_name_switches_by_their_meaning(
+    harness: _Harness, words: str, after: str
+) -> None:
+    harness.start([_handoff("call_1", words)], _frames(1000, "rob"))
+
+    await harness.wait_for(lambda: bool(harness.said()))
+    await asyncio.sleep(0.1)
+
+    assert harness.said() == [switched_to(after)]
+    assert harness.active_profiles.get("rob") == after
+    harness.assert_nothing_ran()
+
+
+async def test_a_switch_request_the_router_recognises_switches_by_meaning_and_runs_nothing(
+    harness: _Harness,
+) -> None:
+    harness.router.switches = {"use my portfolio agent"}
+    harness.start([_handoff("call_1", "use my portfolio agent")], _frames(1000, "rob"))
+
+    await harness.wait_for(lambda: bool(harness.said()))
+    await asyncio.sleep(0.1)
+
+    assert harness.said() == [switched_to("stock-picker")]
+    assert harness.active_profiles.get("rob") == "stock-picker"
+    harness.assert_nothing_ran(routed=["use my portfolio agent"])
+
+
+@pytest.mark.parametrize(
+    ("speaker", "words", "notice"),
+    [
+        ("rob", "connect me with the Sarah agent", which_profile(EVERY_PROFILE)),  # no single profile
+        ("alex", "use my portfolio agent", switch_refused("stock-picker")),
+    ],
+)
+async def test_a_switch_request_the_router_recognises_that_does_not_switch_is_answered_and_runs_nothing(
+    harness: _Harness, speaker: str, words: str, notice: str
+) -> None:
+    harness.router.switches = {words}
+    harness.start([_handoff("call_1", words)], _frames(1000, speaker))
+
+    await harness.wait_for(lambda: bool(harness.said()))
+    await asyncio.sleep(0.1)
+
+    assert harness.said() == [notice]
+    assert harness.active_profiles.get(speaker) == "general"
+    harness.assert_nothing_ran(routed=[words])
+
+
 async def test_switch_profile_call_switches_and_answers_with_the_outcome(harness: _Harness) -> None:
     harness.start([_switch_call("call_1", "stock-picker")], _frames(1000, "rob"))
 
@@ -459,6 +525,8 @@ async def test_switch_profile_call_switches_and_answers_with_the_outcome(harness
         ("rob", "stocks", "switched", None),  # an alias resolves as a spoken one would
         ("rob", "The Stock Picker", "switched", None),  # the user's words for the agent, as said
         ("rob", "finance", "unknown", which_profile(EVERY_PROFILE)),
+        ("rob", "my portfolio agent", "switched", None),  # matched by meaning
+        ("rob", "the Sarah agent", "unknown", which_profile(EVERY_PROFILE)),
         ("rob", 7, "unknown", which_profile(EVERY_PROFILE)),
     ],
 )
