@@ -79,6 +79,7 @@ class _StubBackend:
         *,
         effort_probs: Mapping[Effort, float] | None = None,
         control_intent: ControlIntent | None = None,
+        control_similarity: float | None = None,
     ) -> None:
         self.results.append(
             BackendResult(
@@ -87,6 +88,7 @@ class _StubBackend:
                 latency_ms=1,
                 backend=self.name,
                 control_intent=control_intent,
+                control_similarity=control_similarity,
             )
         )
 
@@ -267,10 +269,15 @@ async def test_never_suggests_a_profile_the_speaker_may_not_use(stub: _StubBacke
     assert next_best.suggestion == "news"
 
 
+@pytest.mark.parametrize(
+    "probs",
+    [{"general": 0.49, "stock-picker": 0.3}, {CONTROL_PROFILE: 0.49, "general": 0.3}],
+    ids=["profile", "control"],
+)
 async def test_unconfident_backend_falls_back_without_a_suggestion(
-    router: CompositeRouter, stub: _StubBackend
+    router: CompositeRouter, stub: _StubBackend, probs: Mapping[str, float]
 ) -> None:
-    stub.answer({"general": 0.49, "stock-picker": 0.3})
+    stub.answer(probs)
 
     decision = await _route(router, active="stock-picker")
 
@@ -332,7 +339,7 @@ async def test_control_requests_carry_their_intent(clock: _Clock, text: str, int
 async def test_control_takes_the_intent_the_backend_tells(
     router: CompositeRouter, stub: _StubBackend
 ) -> None:
-    stub.answer({CONTROL_PROFILE: 0.55, "general": 0.45}, control_intent="cancel")
+    stub.answer({CONTROL_PROFILE: 0.996, "general": 0.004}, control_intent="cancel")
 
     decision = await _route(router, "stop it")
 
@@ -342,9 +349,60 @@ async def test_control_takes_the_intent_the_backend_tells(
 async def test_control_without_an_intent_is_a_status_request(
     router: CompositeRouter, stub: _StubBackend
 ) -> None:
-    stub.answer({CONTROL_PROFILE: 0.9, "general": 0.1})
+    stub.answer({CONTROL_PROFILE: 0.999, "general": 0.001})
 
     assert (await _route(router, "what's happening")).control_intent == "status"
+
+
+@pytest.mark.parametrize(
+    ("control_prob", "intent"),
+    [
+        (0.995, "cancel"),  # exactly the bar
+        (0.994, None),  # just below it
+        (0.9, None),  # the top choice, and confident, but not strong evidence
+    ],
+)
+async def test_control_needs_strong_evidence_else_the_request_is_a_task(
+    router: CompositeRouter, stub: _StubBackend, control_prob: float, intent: ControlIntent | None
+) -> None:
+    stub.answer(
+        {CONTROL_PROFILE: control_prob, "general": 1 - control_prob, "stock-picker": 0.0},
+        control_intent="cancel",
+    )
+
+    decision = await _route(router, "stop it", active="stock-picker")
+
+    assert (decision.control_intent, decision.suggestion, decision.source) == (intent, None, "knn")
+    assert decision.model == (None if intent is not None else FALLBACK)
+
+
+async def test_profiles_with_only_a_description_still_run_tasks(clock: _Clock) -> None:
+    """The live test on picard: with profiles that had no examples, every hand-off was answered as a
+    status question. The main path leaned to ``_control`` for tasks; the ``knn`` fast path only knows
+    each profile's description but matches the built-in status and cancel phrases."""
+    profiles = {
+        "general": ProfileConfig(description="Everyday help: questions and errands"),
+        "stock-picker": ProfileConfig(description="Portfolio, holdings, stock research, trades"),
+    }
+    main = _main(delay_s=0.02)
+    fast = KnnBackend(fake_embed)
+    router = CompositeRouter(TWO_PATHS, profiles, [main, fast], clock=clock)
+    await router.configure()
+    # What a main path sees with descriptions alone: ``_control`` on top, but not sure of it.
+    main.answer({CONTROL_PROFILE: 0.9, "general": 0.08, "stock-picker": 0.02})
+    main.answer({CONTROL_PROFILE: 0.7, "general": 0.2, "stock-picker": 0.1})
+
+    weather = await _route(router, "what's the weather tomorrow", active="general")
+    reminder = await _route(router, "remind me to call mom", active="general")
+    status = await _route(router, "what are you working on", active="general")
+    cancel = await _route(router, "cancel that", active="general")
+
+    assert (weather.control_intent, weather.source) == (None, "decisions")
+    assert (reminder.control_intent, reminder.source) == (None, "decisions")
+    # The two control phrases match built-in ones exactly, so the fast path settles them.
+    assert (status.control_intent, status.source) == ("status", "knn")
+    assert (cancel.control_intent, cancel.source) == ("cancel", "knn")
+    assert len(main.requests) == 4 and not main.results
 
 
 async def test_logs_one_structured_line_per_decision(clock: _Clock, caplog: pytest.LogCaptureFixture) -> None:
@@ -466,20 +524,59 @@ async def test_deadline_is_configurable() -> None:
     assert main.deadlines_ms == [50]
 
 
-@pytest.mark.parametrize("winner", ["stock-picker", CONTROL_PROFILE])
-async def test_sure_fast_path_for_the_active_profile_or_control_is_accepted_without_waiting(
-    winner: str,
+@pytest.mark.parametrize(
+    ("fast_probs", "similarity", "intent"),
+    [
+        ({"stock-picker": 0.9, "general": 0.1}, None, None),  # sure of the active profile
+        ({CONTROL_PROFILE: 0.999, "general": 0.001}, 0.95, "cancel"),  # a near-exact control phrase
+        ({CONTROL_PROFILE: 0.999, "general": 0.001}, 0.9, "cancel"),  # exactly the similarity bar
+    ],
+)
+async def test_sure_fast_path_for_the_active_profile_or_an_exact_control_phrase_is_accepted_without_waiting(
+    fast_probs: Mapping[str, float], similarity: float | None, intent: ControlIntent | None
 ) -> None:
     main, fast = _main(delay_s=SLOW_S), _StubBackend()
-    fast.answer({winner: 0.9, "general": 0.1})
+    fast.answer(fast_probs, control_intent="cancel", control_similarity=similarity)
 
     decision = await _route(_two_path_router(main, fast), "how's my portfolio", active="stock-picker")
 
-    assert (decision.source, decision.suggestion) == ("knn", None)
-    assert decision.control_intent == ("status" if winner == CONTROL_PROFILE else None)
+    assert (decision.source, decision.suggestion, decision.control_intent) == ("knn", None, intent)
     assert decision.latency_ms < 100
     await asyncio.sleep(0)  # let the cancelled call unwind
     assert main.cancelled
+
+
+@pytest.mark.parametrize(
+    ("fast_probs", "similarity"),
+    [
+        ({CONTROL_PROFILE: 0.999, "general": 0.001}, 0.89),  # strong, but not a near-exact match
+        ({CONTROL_PROFILE: 0.999, "general": 0.001}, None),  # a backend that measures no similarity
+        ({CONTROL_PROFILE: 0.9, "general": 0.1}, 0.99),  # an exact match, but weak evidence
+    ],
+)
+async def test_fast_path_control_waits_for_the_main_path(
+    fast_probs: Mapping[str, float], similarity: float | None
+) -> None:
+    main, fast = _main(delay_s=0.05), _StubBackend()
+    main.answer({"stock-picker": 0.8, "general": 0.2})
+    fast.answer(fast_probs, control_similarity=similarity)
+
+    decision = await _route(_two_path_router(main, fast), "is my portfolio done", active="stock-picker")
+
+    assert (decision.source, decision.control_intent, decision.model) == ("decisions", None, FALLBACK)
+    assert not main.cancelled
+
+
+@pytest.mark.parametrize(("control_prob", "intent"), [(0.999, "status"), (0.9, None)])
+async def test_after_a_main_path_timeout_only_a_strong_fast_path_control_answer_counts(
+    control_prob: float, intent: ControlIntent | None
+) -> None:
+    main, fast = _main(delay_s=SLOW_S), _StubBackend()
+    fast.answer({CONTROL_PROFILE: control_prob, "general": 1 - control_prob}, control_similarity=0.5)
+
+    decision = await _route(_two_path_router(main, fast, SHORT_DEADLINE), "is it done", active="general")
+
+    assert (decision.source, decision.control_intent) == ("knn", intent)
 
 
 @pytest.mark.parametrize(

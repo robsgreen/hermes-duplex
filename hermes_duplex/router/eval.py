@@ -12,9 +12,10 @@ A phrase file is YAML with a ``phrases`` list and an optional ``profiles`` secti
   ``active``. A follow-up names the phrase it ``follows``, said earlier by the same speaker. A
   ``control_intent`` key is allowed and not scored.
 
-For each target the eval reports effort accuracy, suggestion precision and recall, how often the
-deciding backend's top choice is the labelled one (with macro-F1 and the confusion matrix), latency
-percentiles, and the deadline-miss rate (``EvalReport``).
+For each target the eval reports effort accuracy, suggestion precision and recall, how well it tells
+``_control`` requests from tasks (precision, recall, and how often a task is taken as ``_control``),
+how often the deciding backend's top choice is the labelled one (with macro-F1 and the confusion
+matrix), latency percentiles, and the deadline-miss rate (``EvalReport``).
 """
 
 import dataclasses
@@ -95,8 +96,19 @@ class EvalReport:
     suggestion_recall: float | None
     """Of the phrases labelled with a profile other than ``active``, the share that got a suggestion
     of that profile; None when there are none."""
+    control_precision: float | None
+    """Of the phrases routed as ``_control`` requests (``RouteDecision.control_intent`` set), the
+    share labelled ``_control``; None when none were."""
+    control_recall: float | None
+    """Of the phrases labelled ``_control``, the share routed as ``_control`` requests; None when there
+    are none."""
+    task_as_control_rate: float | None
+    """Of the task phrases, the share routed as ``_control`` requests, so never run; None when there
+    are none."""
     choice_accuracy: float
-    """Share of phrases whose top-scored choice (profile or ``_control``) is the labelled one."""
+    """Share of phrases whose top-scored choice (profile or ``_control``) is the labelled one. This
+    is the deciding backend's scoring: a top ``_control`` below the router's bar still counts as
+    ``_control`` here, though the request is routed as a task."""
     macro_f1: float
     """Mean F1 of the top-scored choice over every label that was expected or predicted."""
     latency_p50_ms: float
@@ -114,11 +126,13 @@ class EvalReport:
 
 @dataclass(frozen=True)
 class _Outcome:
-    """What a target decided for one phrase; ``choice`` None means no backend answered."""
+    """What a target decided for one phrase; ``choice`` None means no backend answered. ``control``
+    is whether it was routed as a ``_control`` request."""
 
     choice: str | None
     effort: Effort
     suggestion: str | None
+    control: bool
     latency_ms: float
     in_time: bool
 
@@ -251,6 +265,9 @@ def format_table(reports: Sequence[EvalReport]) -> str:
             ("suggestions made", str(report.suggestions_made)),
             ("suggestion precision", _rate(report.suggestion_precision)),
             ("suggestion recall", _rate(report.suggestion_recall)),
+            ("control precision", _rate(report.control_precision)),
+            ("control recall", _rate(report.control_recall)),
+            ("task taken as control", _rate(report.task_as_control_rate)),
             ("choice accuracy", _rate(report.choice_accuracy)),
             ("choice macro-F1", _rate(report.macro_f1)),
             ("latency p50/p95/p99", f"{latencies} ms"),
@@ -309,7 +326,8 @@ async def _run(
         probs = decision.probabilities
         choice = max(choices, key=lambda choice: probs.get(choice, 0.0)) if probs else None
         in_time = choice is not None and latency_ms <= deadline_ms
-        outcomes.append(_Outcome(choice, decision.effort, decision.suggestion, latency_ms, in_time))
+        control = decision.control_intent is not None
+        outcomes.append(_Outcome(choice, decision.effort, decision.suggestion, control, latency_ms, in_time))
     return outcomes
 
 
@@ -343,6 +361,8 @@ def _report(
         for phrase, outcome in scored
         if phrase.profile not in (CONTROL_PROFILE, phrase.active)
     ]
+    controls = [outcome.control for phrase, outcome in scored if phrase.profile == CONTROL_PROFILE]
+    tasks_as_control = [outcome.control for phrase, outcome in scored if phrase.profile != CONTROL_PROFILE]
     p50, p95, p99 = np.percentile(
         [outcome.latency_ms for outcome in outcomes], [50, 95, 99], method="inverted_cdf"
     )
@@ -357,6 +377,9 @@ def _report(
         suggestion_recall=_share(
             sum(outcome.suggestion == phrase.profile for phrase, outcome in switches), len(switches)
         ),
+        control_precision=_share(sum(controls), sum(controls) + sum(tasks_as_control)),
+        control_recall=_share(sum(controls), len(controls)),
+        task_as_control_rate=_share(sum(tasks_as_control), len(tasks_as_control)),
         choice_accuracy=sum(confusion[choice][choice] for choice in choices) / count,
         macro_f1=_macro_f1(confusion, choices),
         latency_p50_ms=float(p50),

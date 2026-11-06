@@ -105,7 +105,7 @@ router never picks the profile a task runs on. Full narrative: `docs/system/arch
 ```bash
 uv sync --frozen                                   # install (Python 3.14)
 uv run ruff check . && uv run ruff format --check . && uv run pyright
-uv run pytest -m "not live and not e2e"            # 1193 tests: unit, contract, in-process end-to-end
+uv run pytest -m "not live and not e2e"            # 1210 tests: unit, contract, in-process end-to-end
 uv run pytest -m e2e -rs                           # 5 tests, real Hermes gateway; skip without `hermes` on PATH
 HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs     # real keys and WAV fixtures, spends money
 uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn

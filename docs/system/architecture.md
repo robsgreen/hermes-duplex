@@ -269,15 +269,15 @@ cancel phrases ("cancel that", "stop that task", "never mind"), plus `router.con
 flowchart TD
   T[text + speaker + active profile] --> K[fast path: knn]
   T --> D[main path, deadline_ms]
-  K -->|top ≥ 0.85, margin ≥ 0.3, active profile or _control| W
+  K -->|active profile: top ≥ 0.85, margin ≥ 0.3; _control: ≥ 0.995 and phrase similarity ≥ 0.9| W
   D --> C{main confident? top ≥ 0.5}
   K --> C
   C -- yes --> W{winner}
   C -- no --> F{fast path confident?}
   F -- yes --> W
   F -- no --> N[fallback: no suggestion, not _control]
-  W -- _control --> X[control_intent]
-  W -- profile --> S[suggestion rule]
+  W -- _control ≥ 0.995 --> X[control_intent]
+  W -- otherwise --> S[suggestion rule]
   N --> E[effort: main, else fast, else medium]
   S --> E
   E --> M[model = active profile's models.effort, else default_model, else Hermes default]
@@ -285,13 +285,22 @@ flowchart TD
 
 1. The router waits up to `router.deadline_ms` (default 300) for the main path. It stops early when
    the fast path's top choice has probability ≥ 0.85, beats the runner-up by ≥ 0.3, and is the
-   speaker's active profile or `_control`, so a possible suggestion always waits for the main path.
-   Calls still running at the end are cancelled.
+   speaker's active profile, so a possible suggestion always waits for the main path. The fast path
+   settles `_control` alone only when it passes the `_control` bar below and the request is a
+   near-exact match of a `_control` phrase (cosine similarity ≥ 0.9, `CONTROL_MATCH_SIMILARITY`,
+   from `knn`'s `control_similarity`); any other `_control` answer waits for the main path. Calls
+   still running at the end are cancelled.
 2. The first confident answer (top probability ≥ 0.5) of main, then fast path decides; its source is
    that backend's name. With none, the source is `fallback`: no suggestion, not `_control`.
-3. **`_control`.** When the deciding answer's winner is `_control`, `control_intent` is the backend's
-   `status` or `cancel`; Decisions and Jev cannot tell the two apart and get `status`, which changes
-   nothing. The session answers it from the tracker, and it never reaches Hermes.
+3. **`_control`.** A request is a task unless the deciding answer gives `_control` a probability of
+   at least 0.995 (`CONTROL_MIN_PROB`; as probabilities sum to 1, `_control` then beats every
+   profile by at least 0.99). A weaker `_control` answer, even the top one, leaves it a task on the
+   active profile, and so does a main-path timeout or failure when the fast path's `_control` is
+   weaker. The cost is asymmetric: a request taken as status fails silently, while a status question
+   taken as a task is a visible wasted run. On the router eval, `knn` with profiles that have only a
+   description gives tasks up to 0.989 for `_control`. Past the bar, `control_intent` is the
+   backend's `status` or `cancel`; Decisions and Jev cannot tell the two apart and get `status`,
+   which changes nothing. The session answers it from the tracker, and it never reaches Hermes.
 4. **Suggestion.** With `router.suggest_switch` on (default), the router suggests the other profile
    the speaker may use with the highest probability when that probability is at least
    `router.suggest_threshold` (default 0.85) and beats the active profile's by at least 0.2
@@ -307,8 +316,8 @@ flowchart TD
 Every decision logs one `route ...` line with the speaker, the active profile, the control intent,
 effort, model, suggestion, top-3 probabilities, source, and latency, and attaches the same fields to
 the log record as `route_decision`. `hermes duplex eval-router` runs the same router over labelled
-phrases, each with the speaker's `active` profile, and scores effort accuracy and suggestion precision
-and recall besides choice accuracy.
+phrases, each with the speaker's `active` profile, and scores effort accuracy, suggestion precision
+and recall, and `_control` precision, recall, and task-taken-as-control rate besides choice accuracy.
 
 A `_control` decision never reaches Hermes. People hear tasks only by topic; a task's number is an
 internal id for the tracker, `tasks.jsonl`, logs, `/duplex`, tool arguments, and what the model reads.

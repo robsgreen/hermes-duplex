@@ -136,6 +136,9 @@ class BackendResult:
     control_intent: ControlIntent | None = None
     """The intent the request expresses if it is a ``_control`` request; None when the backend
     cannot tell (the router then assumes ``status``, which changes nothing)."""
+    control_similarity: float | None = None
+    """Cosine similarity, from -1 to 1, of the request to the nearest ``_control`` example phrase;
+    None when the backend does not measure similarity."""
 
 
 class RouterBackend(Protocol):

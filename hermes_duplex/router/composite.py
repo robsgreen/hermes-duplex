@@ -29,9 +29,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_EFFORT: Effort = "medium"
 CONFIDENT_PROB = 0.5
 """A backend's top probability below this is not trusted; the router falls back instead."""
+CONTROL_MIN_PROB = 0.995
+"""The deciding answer's ``_control`` probability must be at least this for the request to be a
+``_control`` request; below it the request is a task. A request taken as status fails silently while
+a status question taken as a task is only a wasted run, so the bar is high. Probabilities sum to 1, so
+this also means ``_control`` beats every profile by at least 0.99. On the router eval ``knn`` gives
+tasks up to 0.989 for ``_control`` when profiles have only a description; 0.995 keeps every task a
+task there and keeps the same status and cancel requests as 0.999 would."""
+CONTROL_MATCH_SIMILARITY = 0.9
+"""A fast-path ``_control`` answer is accepted without waiting for the main path only when the request
+is at least this similar (``BackendResult.control_similarity``) to one of the ``_control`` phrases: a
+near-exact match, such as "cancel it" for "cancel that"."""
 EARLY_ACCEPT_PROB = 0.85
-"""A fast-path top probability at or above this (with ``EARLY_ACCEPT_MARGIN``) settles the request
-without waiting for the main path."""
+"""A fast-path top probability at or above this (with ``EARLY_ACCEPT_MARGIN``) for the active profile
+settles the request without waiting for the main path."""
 EARLY_ACCEPT_MARGIN = 0.3
 """How much the fast path's top choice must beat its runner-up by to be accepted early."""
 SUGGEST_MARGIN = 0.2
@@ -99,13 +110,17 @@ class CompositeRouter:
     its probability is at least ``config.suggest_threshold``, and it beats the active profile's by at
     least ``SUGGEST_MARGIN``.
 
+    A request is a task unless the deciding answer gives ``_control`` at least ``CONTROL_MIN_PROB``;
+    a weaker ``_control`` answer, even the top one, leaves it a task on the active profile.
+
     Each request goes to the main path (``config.backend``) and, when configured, the fast path
-    (``config.fast_path``) at once. The router waits up to ``config.deadline_ms`` for the main path,
-    and stops early when the fast path is sure (``EARLY_ACCEPT_PROB``, ``EARLY_ACCEPT_MARGIN``) of the
-    active profile or ``_control``, so a suggestion always waits for the main path. The first
-    confident answer of main, then fast path decides. Without one (``source`` ``fallback``), the
-    request is not a ``_control`` request, nothing is suggested, and the effort is the main path's
-    judgement when it answered, else the fast path's, else ``DEFAULT_EFFORT``.
+    (``config.fast_path``) at once. The router waits up to ``config.deadline_ms`` for the main path.
+    It stops early when the fast path is sure (``EARLY_ACCEPT_PROB``, ``EARLY_ACCEPT_MARGIN``) of the
+    active profile, so a suggestion always waits for the main path, or when its ``_control`` answer
+    passes ``CONTROL_MIN_PROB`` for a near-exact match of a ``_control`` phrase
+    (``CONTROL_MATCH_SIMILARITY``). The first confident answer of main, then fast path decides.
+    Without one (``source`` ``fallback``), the request is a task, nothing is suggested, and the effort
+    is the main path's judgement when it answered, else the fast path's, else ``DEFAULT_EFFORT``.
     """
 
     def __init__(
@@ -229,11 +244,16 @@ class CompositeRouter:
 
     def _accepts_early(self, fast: BackendResult, active: str) -> bool:
         """Whether the fast path is sure enough to stop waiting for the main path: a clear winner that
-        is the speaker's active profile or ``_control``, so there is no switch to suggest."""
+        is the speaker's active profile, so there is no switch to suggest, or a ``_control`` answer
+        strong enough to decide that matches a ``_control`` phrase near-exactly."""
         probs = fast.profile_probs
+        if self._winner(probs) == CONTROL_PROFILE:
+            similarity = fast.control_similarity
+            near_exact = similarity is not None and similarity >= CONTROL_MATCH_SIMILARITY
+            return near_exact and _is_control(probs)
         top, runner_up = sorted((probs.get(choice, 0.0) for choice in self._choices), reverse=True)[:2]
         sure = top >= EARLY_ACCEPT_PROB and top - runner_up >= EARLY_ACCEPT_MARGIN
-        return sure and self._winner(probs) in (active, CONTROL_PROFILE)
+        return sure and self._winner(probs) == active
 
     def _decide(
         self,
@@ -260,7 +280,7 @@ class CompositeRouter:
         suggestion = None
         if decider is not None:
             probs, source = decider.profile_probs, _backend_source(decider)
-            if self._winner(probs) == CONTROL_PROFILE:
+            if _is_control(probs):
                 # A backend that cannot tell the intents apart gets ``status``, which changes nothing.
                 control_intent = decider.control_intent or "status"
             else:
@@ -312,6 +332,11 @@ def _result(call: asyncio.Task[BackendResult], backend: RouterBackend) -> Backen
     except Exception:
         logger.exception("router backend %s failed", backend.name)
         return None
+
+
+def _is_control(probs: Mapping[str, float]) -> bool:
+    """Whether ``probs`` make the request a ``_control`` request (``CONTROL_MIN_PROB``)."""
+    return probs.get(CONTROL_PROFILE, 0.0) >= CONTROL_MIN_PROB
 
 
 def _backend_source(result: BackendResult) -> RouteSource:

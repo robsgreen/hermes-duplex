@@ -386,26 +386,39 @@ uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backe
 `eval-router` routes a file of labelled phrases, each said while the speaker is on a given `active`
 profile, and prints, for each configured backend alone and then for the composite router: effort
 accuracy and off-by-one rate; how many switch suggestions it made, with their precision and recall
-(it should suggest exactly when a phrase belongs to a profile other than the active one); how often
-the top choice is the labelled profile (choice accuracy, macro-F1, and the confusion matrix); latency
-p50/p95/p99; and the deadline-miss rate. `--json` prints JSON instead, `--backend NAME` scores only
+(it should suggest exactly when a phrase belongs to a profile other than the active one); how well it
+tells status and cancel requests from tasks (control precision and recall, and how often a task is
+taken as one and so never runs); how often the top choice is the labelled profile (choice accuracy,
+macro-F1, and the confusion matrix); latency p50/p95/p99; and the deadline-miss rate. `--json` prints JSON instead, `--backend NAME` scores only
 `knn`, `decisions`, `jev`, or `composite`, and `--config duplex.yaml` uses that file's router
 settings and keys (every env var it names must be set). Without `--config` it scores `knn` alone and
 a composite router over `knn` with default settings. The phrase file's format is described in
 `hermes_duplex/router/eval.py`.
 
-On the 103 phrases of `tests/fixtures/router_eval/phrases.yaml`, with the `minishlab/potion-base-8M`
-embedding model, `knn` scores:
+A request is a status or cancel request only on strong evidence: the deciding backend must give
+`_control` a probability of at least 0.995. Anything weaker runs as a task on your active profile,
+because a request taken as a status question is silently lost while a status question taken as a task
+is only a wasted run. `tests/fixtures/router_eval/descriptions_only.yaml` holds the same kind of
+phrases for profiles configured with only a description, where tasks look most like status phrases.
 
-| Measure | `knn` |
-|---|---|
-| Choice accuracy | 0.825 |
-| Choice macro-F1 | 0.823 |
-| Suggestions made | 20 |
-| Suggestion precision | 1.000 (every suggestion was right) |
-| Suggestion recall | 0.526 (20 of the 38 phrases that should have one) |
-| Effort accuracy | 0.306 (`knn` judges no effort, so this is the share labelled `medium`) |
-| Latency p50 / p95 / p99 | under 1 ms |
+With the `minishlab/potion-base-8M` embedding model, `knn` scores:
+
+| Measure | `phrases.yaml` (103 phrases) | `descriptions_only.yaml` (40 phrases) |
+|---|---|---|
+| Choice accuracy | 0.825 | 0.700 |
+| Choice macro-F1 | 0.823 | 0.724 |
+| Control precision | 1.000 | 1.000 |
+| Control recall | 0.613 (19 of 31) | 0.857 (12 of 14) |
+| Task taken as control | 0.000 | 0.000 |
+| Suggestions made | 20 | 2 |
+| Suggestion precision | 1.000 (every suggestion was right) | 1.000 |
+| Suggestion recall | 0.526 (20 of the 38 phrases that should have one) | 1.000 (2 of 2) |
+| Effort accuracy | 0.306 (`knn` judges no effort, so this is the share labelled `medium`) | 0.308 |
+| Latency p50 / p95 / p99 | under 1 ms | under 1 ms |
+
+Choice accuracy counts the backend's top choice, so a `_control` below the bar counts as `_control`
+there though it runs as a task. Before the bar, `knn` took 0.462 of the description-only tasks (and
+0.056 of `phrases.yaml`'s) as status or cancel requests.
 
 Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 
@@ -414,10 +427,10 @@ Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 | Tier | Command | Needs |
 |---|---|---|
 | Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | nothing |
-| Default (1193 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
+| Default (1210 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
 | Real Hermes end-to-end (5 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
 | Live (1 test) | `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` | hermes-agent, real API keys, the spoken WAV fixtures (below); spends money |
-| Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |
+| Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` (or `descriptions_only.yaml`) | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |
 | Manual | [docs/live-checklist.md](docs/live-checklist.md) | a Discord server, keys, people to talk |
 
 Install the toolchain first with `uv sync --frozen`.

@@ -26,7 +26,7 @@ class KnnBackend:
 
     A choice's score is its best similarity to any of its phrases; ``profile_probs`` is the softmax
     of those scores. For ``_control`` (a ``ControlSpec``), the intent of its nearest phrase is
-    reported as ``control_intent``.
+    reported as ``control_intent`` and that phrase's similarity as ``control_similarity``.
     """
 
     name = "knn"
@@ -92,7 +92,11 @@ class KnnBackend:
         probs = weights / weights.sum()
 
         nearest_control = max(self._control_rows, key=lambda row: similarity[row[0]], default=None)
-        control_intent = nearest_control[1] if nearest_control is not None else None
+        control_intent: ControlIntent | None = None
+        control_similarity: float | None = None
+        if nearest_control is not None:
+            phrase_row, control_intent = nearest_control
+            control_similarity = float(similarity[phrase_row])
 
         return BackendResult(
             profile_probs={choice: float(p) for choice, p in zip(self._choices, probs, strict=True)},
@@ -100,6 +104,7 @@ class KnnBackend:
             latency_ms=round((time.perf_counter() - started) * 1000),
             backend=self.name,
             control_intent=control_intent,
+            control_similarity=control_similarity,
         )
 
     async def close(self) -> None:

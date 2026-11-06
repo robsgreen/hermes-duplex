@@ -90,7 +90,13 @@ never by a number, and for a running task says it will tell you when it finishes
 the run in Hermes (its status turns cancelled) and the model confirms `Cancelled "<topic>"`. Neither request
 creates a Hermes run of its own. With GPT-Live both are routed as `_control` (the `route` line shows
 `control=status` or `control=cancel`); Realtime models call the `task_status` and `cancel_task` tools
-instead.
+instead. The router takes a request as status or cancel only on strong evidence, so with GPT-Live a
+question worded far from the built-in phrases may run as a task instead; that is by design.
+
+Then, with a profile configured with only a `description` (no `examples`), ask for something that is
+plainly a task ("what's the weather tomorrow?", "remind me to call mom"). Expected: each runs as a task
+(a start notice, a Hermes run, `control=None` on its `route` line), never a status answer such as "no
+tasks running".
 
 ### 6. Multi-speaker attribution
 

@@ -29,6 +29,7 @@ from hermes_duplex.router.eval import (
 from tests.fakes.fake_embedder import fake_embed
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "router_eval" / "phrases.yaml"
+DESCRIPTIONS_ONLY = FIXTURE.with_name("descriptions_only.yaml")
 PROFILES: Mapping[str, ProfileConfig] = {
     "general": ProfileConfig(description="Anything else"),
     "stock-picker": ProfileConfig(description="Portfolio and trades"),
@@ -54,12 +55,13 @@ class _Clock:
 
 @dataclass(frozen=True)
 class _Answer:
-    """What the stub says for one text after ``latency_ms``: ``profile`` with ``effort``, or, when
-    ``profile`` is empty, an exception."""
+    """What the stub says for one text after ``latency_ms``: ``profile`` with probability ``prob``
+    (the rest shared evenly) and ``effort``, or, when ``profile`` is empty, an exception."""
 
     latency_ms: float
     profile: str = ""
     effort: Effort | None = None
+    prob: float = 0.9
 
 
 GENERAL = _Answer(1.0, "general")
@@ -98,8 +100,11 @@ class _StubBackend:
         effort_probs: Mapping[Effort, float] | None = None
         if answer.effort is not None:
             effort_probs = {answer.effort: 0.9}
+        rest = (1 - answer.prob) / (len(self._choices) - 1)
         return BackendResult(
-            profile_probs={choice: 0.9 if choice == answer.profile else 0.05 for choice in self._choices},
+            profile_probs={
+                choice: answer.prob if choice == answer.profile else rest for choice in self._choices
+            },
             effort_probs=effort_probs,
             latency_ms=round(answer.latency_ms),
             backend=self.name,
@@ -169,6 +174,32 @@ async def test_a_phrase_on_its_own_profile_counts_no_suggestion_as_right_and_a_s
     [report] = await evaluate(phrases, PROFILES, ROUTER, [eager], ["knn"], clock=clock)
     assert report.suggestions_made == 1
     assert report.suggestion_precision == 0.0
+
+
+async def test_scores_how_well_control_requests_are_told_from_tasks() -> None:
+    answers = {
+        "p1": _Answer(1.0, CONTROL_PROFILE, prob=0.999),  # a task taken as _control
+        "p5": _Answer(1.0, CONTROL_PROFILE, prob=0.999),  # a _control request taken as one
+        "p6": _Answer(1.0, CONTROL_PROFILE),  # a _control request on top, below the bar: a task
+    }
+    phrases = (*PHRASES, LabelledPhrase("p6", CONTROL_PROFILE, "medium", active="general"))
+    clock = _Clock()
+
+    [report] = await evaluate(phrases, PROFILES, ROUTER, [_StubBackend(clock, answers)], ["knn"], clock=clock)
+
+    assert report.control_precision == pytest.approx(1 / 2)
+    assert report.control_recall == pytest.approx(1 / 2)
+    assert report.task_as_control_rate == pytest.approx(1 / 4)
+    assert report.choice_accuracy == pytest.approx(4 / 6), "p6's top choice is still _control"
+
+
+async def test_control_scores_are_none_with_nothing_to_score() -> None:
+    clock = _Clock()
+    phrases = (LabelledPhrase("weather", "general", "low", active="general"),)
+
+    [report] = await evaluate(phrases, PROFILES, ROUTER, [_StubBackend(clock, {})], ["knn"], clock=clock)
+
+    assert (report.control_precision, report.control_recall, report.task_as_control_rate) == (None, None, 0.0)
 
 
 async def test_a_backend_that_judges_no_effort_is_scored_on_the_default_effort() -> None:
@@ -267,6 +298,17 @@ def test_the_fixture_loads_with_profiles_active_profiles_and_follow_ups() -> Non
     assert any(phrase.follows is not None for phrase in phrases)
 
 
+def test_the_descriptions_only_fixture_has_profiles_without_examples_and_both_kinds_of_phrase() -> None:
+    phrase_file = load_phrases(DESCRIPTIONS_ONLY)
+
+    assert phrase_file.profiles is not None
+    assert set(phrase_file.profiles) == {"general", "stock-picker"}
+    assert all(profile.description and not profile.examples for profile in phrase_file.profiles.values())
+    labels = [phrase.profile for phrase in phrase_file.phrases]
+    assert labels.count(CONTROL_PROFILE) >= 10
+    assert len(labels) - labels.count(CONTROL_PROFILE) >= 20
+
+
 HI: dict[str, Any] = {"text": "hi", "profile": "general", "active": "general", "effort": "low"}
 
 
@@ -324,6 +366,9 @@ def test_command_prints_json_for_each_backend_and_the_composite(capsys: pytest.C
             "suggestions_made",
             "suggestion_precision",
             "suggestion_recall",
+            "control_precision",
+            "control_recall",
+            "task_as_control_rate",
             "choice_accuracy",
             "macro_f1",
             "latency_p50_ms",

@@ -69,6 +69,18 @@ async def test_control_phrases_route_to_control_with_their_intent(text: str, int
     assert result.control_intent == intent
 
 
+@pytest.mark.parametrize(
+    ("text", "similarity"),
+    [("cancel that", pytest.approx(1.0)), ("cancel", pytest.approx(0.5**0.5)), ("zxq", 0.0)],
+)
+async def test_reports_the_similarity_of_the_nearest_control_phrase(text: str, similarity: float) -> None:
+    backend = await _configured()
+
+    result = await backend.classify(_request(text), deadline_ms=300)
+
+    assert result.control_similarity == similarity
+
+
 async def test_config_control_examples_extend_the_builtin_ones() -> None:
     backend = await _configured(ControlExamples(cancel=("abort the job",)))
 
