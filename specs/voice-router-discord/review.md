@@ -268,3 +268,15 @@ Seat B: same verdicts; A3 partial. New:
 - F-RR1 medium (run) = A's N1 — GPT-Live has no item ids; in-flight deltas during close play to the newcomer and reach the reseed; also a response still being generated when nothing plays at the join. Test fixture used item ids/truncate GPT-Live never sends. Fix: mute by connection until next _connect; drop pacer in the newcomer restart; realistic fixture.
 - F-RR2 low mechanical — RESEED_LINES_SAID_ALONE / REFRESH_CONTEXT_DURING_CALLS True branches untested; delete once decided (user kept defaults 2026-11-06 → delete).
 - Same user decision as A: Realtime/Grok keep owner-only turns server-side after a join.
+
+### Join-privacy fix (6bc2771) + router (3219250) — scoped re-review
+Seat B: N1/F-RR1, N2 (output), user decision, F-RR2, router fix resolved; Preserve held. New:
+- M-B1 medium (run, pre-existing) — reconnect summary built once before retry_connect backoff; a join during backoff → new session seeded with owner-only lines. Fix: build summary per attempt / inside _connect under the lock.
+- M-B2 medium (run) — late InputTranscript from the muted connection recorded after the cut → reseeded. Fix: ignore InputTranscript while muted (or by start_ms).
+- L-B1 low — re-mute in _apply_prompt_context, muted pacer drop in _reconnect, muted floor wait untested.
+- L-B2 low — README says Realtime/Grok wait for quiet when alone again; they update at once.
+Seat A: same resolved verdicts. New:
+- NF1 high (run) — a queued in-place apply (task change on Realtime/Grok) takes the lock before the join's restart; restart then sees same instructions and returns → connection stays muted forever: silent call, results held, server-side owner conversation kept. Variant: join while _connect holds the lock.
+- NF2 medium (run) = M-B1.
+- L1 low = M-B2 + _report_progress spoken by the muted session.
+- L2 low = L-B1.
