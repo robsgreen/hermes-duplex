@@ -1,0 +1,16 @@
+# Hermes plugin manifest (v2). Use only fields hermes-agent knows; unknown fields log a warning.
+# provides_tools and provides_hooks must list exactly what register() registers, or
+# `hermes plugins validate` fails. register() registers no tools or hooks: it registers the /duplex
+# command, the `hermes duplex` CLI command, and the `duplex` gateway platform that runs the voice
+# service, none of which has a manifest field.
+name: hermes-duplex
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+kind: standalone
+description: Full-duplex voice front end for Hermes over Discord and the web, with per-profile routing.
+author: robsgreen
+license: MIT
+provides_tools: []
+provides_hooks: []
+requires_env: []

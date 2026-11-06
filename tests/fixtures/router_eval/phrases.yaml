@@ -1,0 +1,184 @@
+# Labelled router phrases for the `general` and `stock-picker` profiles and the `_control` choice.
+#
+# `profiles` holds what the router is configured with: each profile's description and examples, in
+# the shape of duplex.yaml's `profiles` section. Tests build their config's profiles from it, so the
+# knn router matches against exactly these examples. None of the labelled phrases below is an
+# example, so routing them is a real test.
+#
+# `phrases` holds the labelled utterances, in order. Each has the `text` a speaker says, the
+# `profile` it belongs to (`_control` for status and cancel requests), the speaker's `active` profile
+# when they say it, and the `effort` it deserves. `active` is required and must be one of `profiles`:
+# the request runs on it, and the router should suggest switching exactly when `profile` is another
+# profile. A `_control` phrase also names its `control_intent` (status or cancel). A `_switch` phrase
+# asks to switch profiles, and names the profile it asks for as its `target` when it names one; it is
+# not routed, but read by the switch-request parser and resolved by meaning. A follow-up names
+# the phrase it `follows`, said earlier by the same speaker; it is routed after that phrase, and keeps
+# that phrase's `active` unless the speaker switched in between. Texts are unique.
+# `hermes-duplex eval-router` reads this file (format: hermes_duplex/router/eval.py).
+#
+# Besides clean requests, each section has ASR-style noise (fillers, misheard words, no punctuation)
+# and follow-ups; the general section also holds out-of-scope requests, which belong to `general`
+# because it handles anything else.
+
+profiles:
+  general:
+    description: General questions, weather, reminders, and anything else
+    examples:
+      - what's the weather like
+      - set a reminder for nine
+      - tell me a joke
+      - what time is it in Tokyo
+  stock-picker:
+    description: Portfolio, holdings, stock research, and trades
+    examples:
+      - how's my portfolio
+      - how are my stocks doing
+      - check my holdings
+      - should I buy NVDA
+      - what did TSLA do today
+
+phrases:
+  # The plan's scenario: a portfolio question on general (the router should suggest stock-picker), a
+  # follow-up once the speaker has switched, then a general question that needs no switch.
+  - {text: how is my portfolio doing, profile: stock-picker, active: general, effort: medium}
+  - {text: and what about Tesla, profile: stock-picker, active: stock-picker, effort: medium, follows: how is my portfolio doing}
+  - {text: what's the weather tomorrow, profile: general, active: general, effort: low}
+
+  - {text: should I sell my Apple shares before earnings, profile: stock-picker, active: general, effort: high}
+  - {text: show me my holdings, profile: stock-picker, active: stock-picker, effort: low}
+  - {text: remind me to call mom at six, profile: general, active: stock-picker, effort: low}
+  - {text: tell me something funny, profile: general, active: general, effort: low}
+
+  - {text: what are you working on right now, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: any updates on that, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: cancel that task, profile: _control, active: general, effort: medium, control_intent: cancel}
+
+  # stock-picker: clean requests.
+  - {text: what's my portfolio worth today, profile: stock-picker, active: general, effort: low}
+  - {text: how much did I make this week on my stocks, profile: stock-picker, active: stock-picker, effort: medium}
+  - {text: which of my holdings is down the most, profile: stock-picker, active: general, effort: medium}
+  - {text: should I buy more Microsoft, profile: stock-picker, active: stock-picker, effort: high}
+  - {text: what's the price of Nvidia right now, profile: stock-picker, active: general, effort: low}
+  - {text: research Amazon's last quarter for me, profile: stock-picker, active: stock-picker, effort: high}
+  - {text: buy ten shares of AMD, profile: stock-picker, active: general, effort: medium}
+  - {text: sell half my Tesla position, profile: stock-picker, active: stock-picker, effort: medium}
+  - {text: compare Google and Meta as investments, profile: stock-picker, active: general, effort: high}
+  - {text: is my portfolio too concentrated in tech, profile: stock-picker, active: stock-picker, effort: high}
+  - {text: what dividends am I getting this month, profile: stock-picker, active: general, effort: medium}
+  - {text: how did the market close today, profile: stock-picker, active: stock-picker, effort: low}
+  - {text: give me a summary of my trades this month, profile: stock-picker, active: general, effort: medium}
+  - {text: what's my best performing stock this year, profile: stock-picker, active: stock-picker, effort: medium}
+  - {text: find me some undervalued dividend stocks, profile: stock-picker, active: general, effort: high}
+  - {text: list my open positions, profile: stock-picker, active: stock-picker, effort: low}
+  - {text: should I rebalance my portfolio, profile: stock-picker, active: general, effort: high}
+  - {text: what's the P/E ratio of Apple, profile: stock-picker, active: stock-picker, effort: low}
+  # stock-picker: ASR-style noise.
+  - {text: uh how's my port folio looking, profile: stock-picker, active: general, effort: low}
+  - {text: whats nvidia trading at, profile: stock-picker, active: stock-picker, effort: low}
+  - {text: um check my stocks real quick, profile: stock-picker, active: general, effort: low}
+  - {text: should i by more apple, profile: stock-picker, active: stock-picker, effort: high}
+  - {text: how is tessla doing today, profile: stock-picker, active: general, effort: low}
+  - {text: show me my holding, profile: stock-picker, active: stock-picker, effort: low}
+  - {text: sell my am d shares, profile: stock-picker, active: general, effort: medium}
+  - {text: what did the stocks do, profile: stock-picker, active: stock-picker, effort: low}
+  # stock-picker: follow-ups.
+  - {text: and Microsoft, profile: stock-picker, active: general, effort: medium, follows: what's the price of Nvidia right now}
+  - {text: what about the dividends on it, profile: stock-picker, active: stock-picker, effort: medium, follows: should I buy more Microsoft}
+  - {text: ok do it, profile: stock-picker, active: general, effort: medium, follows: buy ten shares of AMD}
+  - {text: and how about last month, profile: stock-picker, active: general, effort: medium, follows: give me a summary of my trades this month}
+  - {text: why is that, profile: stock-picker, active: general, effort: medium, follows: which of my holdings is down the most}
+  - {text: and Meta's revenue growth, profile: stock-picker, active: general, effort: high, follows: compare Google and Meta as investments}
+
+  # general: clean requests.
+  - {text: will it rain this afternoon, profile: general, active: stock-picker, effort: low}
+  - {text: what's the temperature outside, profile: general, active: general, effort: low}
+  - {text: set a timer for ten minutes, profile: general, active: stock-picker, effort: low}
+  - {text: remind me to buy milk tomorrow, profile: general, active: general, effort: low}
+  - {text: what time is it in London, profile: general, active: stock-picker, effort: low}
+  - {text: tell me a joke about cats, profile: general, active: general, effort: low}
+  - {text: how many miles is it to the moon, profile: general, active: stock-picker, effort: low}
+  - {text: who wrote Pride and Prejudice, profile: general, active: general, effort: low}
+  - {text: what's a good recipe for pancakes, profile: general, active: stock-picker, effort: medium}
+  - {text: plan a weekend trip to Lisbon, profile: general, active: general, effort: high}
+  - {text: explain how vaccines work, profile: general, active: stock-picker, effort: medium}
+  - {text: what's on my calendar tomorrow, profile: general, active: general, effort: low}
+  - {text: write a short poem for my wife's birthday, profile: general, active: stock-picker, effort: medium}
+  - {text: summarize today's news, profile: general, active: general, effort: medium}
+  # general: out of scope for every specialist profile.
+  - {text: translate good morning into Spanish, profile: general, active: stock-picker, effort: low}
+  - {text: how do I fix a leaky faucet, profile: general, active: general, effort: medium}
+  - {text: what's the capital of Australia, profile: general, active: stock-picker, effort: low}
+  - {text: help me write an email to my landlord, profile: general, active: general, effort: medium}
+  - {text: compare three electric cars for a family of four, profile: general, active: stock-picker, effort: high}
+  - {text: how long should I boil an egg, profile: general, active: general, effort: low}
+  - {text: recommend a good sci-fi book, profile: general, active: stock-picker, effort: medium}
+  - {text: what's the score of the Lakers game, profile: general, active: general, effort: low}
+  # general: ASR-style noise.
+  - {text: uh whats the whether like, profile: general, active: stock-picker, effort: low}
+  - {text: remind me to uh call the dentist, profile: general, active: general, effort: low}
+  - {text: tell me a jock, profile: general, active: stock-picker, effort: low}
+  - {text: what time is it in tokio, profile: general, active: general, effort: low}
+  - {text: set an alarm for seven a m, profile: general, active: stock-picker, effort: low}
+  - {text: hey um is it going to snow, profile: general, active: general, effort: low}
+  # general: follow-ups.
+  - {text: and on Saturday, profile: general, active: stock-picker, effort: low, follows: will it rain this afternoon}
+  - {text: make it twenty, profile: general, active: stock-picker, effort: low, follows: set a timer for ten minutes}
+  - {text: another one, profile: general, active: general, effort: low, follows: tell me a joke about cats}
+  - {text: what about Porto instead, profile: general, active: general, effort: high, follows: plan a weekend trip to Lisbon}
+  - {text: and in Paris, profile: general, active: stock-picker, effort: low, follows: what time is it in London}
+
+  # _control: status.
+  - {text: what's the status of my task, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: are you still working on that, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: is it done yet, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: how far along are you, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: what tasks are running, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: any progress, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: what are you doing right now, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: how's that task coming along, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: did you finish, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: give me an update, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: um what are you working on, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: any up dates, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: hows that task going, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: where are we on that request, profile: _control, active: general, effort: medium, control_intent: status}
+  # _control: cancel.
+  - {text: cancel it, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  - {text: stop working on that, profile: _control, active: general, effort: medium, control_intent: cancel}
+  - {text: never mind cancel the task, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  - {text: forget about it, profile: _control, active: general, effort: medium, control_intent: cancel}
+  - {text: abort the task, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  - {text: stop that, profile: _control, active: general, effort: medium, control_intent: cancel}
+  - {text: cancel the portfolio task, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  - {text: uh cancel that, profile: _control, active: general, effort: medium, control_intent: cancel}
+  - {text: nevermind, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  - {text: stop the task, profile: _control, active: general, effort: medium, control_intent: cancel}
+  - {text: kill that job, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  - {text: don't bother with that anymore, profile: _control, active: general, effort: medium, control_intent: cancel}
+  # _control: follow-ups on a running task.
+  - {text: is that done, profile: _control, active: stock-picker, effort: medium, control_intent: status, follows: how is my portfolio doing}
+  - {text: actually cancel that, profile: _control, active: general, effort: medium, control_intent: cancel, follows: plan a weekend trip to Lisbon}
+  # _switch: requests to switch profiles in words beyond a profile's name; the switch-request parser
+  # must read them, and their words must resolve to the `target`.
+  - {text: go to the stock trader profile, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: use my portfolio agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: can I talk to the investing agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: connect me with the stock research assistant, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: put me on the trading profile, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: let me speak to the markets agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: change profile to the general one, profile: _switch, active: stock-picker, effort: medium, target: general}
+  - {text: take me to the everyday assistant, profile: _switch, active: stock-picker, effort: medium, target: general}
+  - {text: I want the agent for reminders and weather, profile: _switch, active: stock-picker, effort: medium, target: general}
+  - {text: switch agents, profile: _switch, active: general, effort: medium}
+  - {text: can you put me on a different profile, profile: _switch, active: stock-picker, effort: medium}
+  # Tasks that say "go to", "use", "talk to", "connect", or "put", and must stay tasks.
+  - {text: remind me to go to the dentist on Friday, profile: general, active: general, effort: low}
+  - {text: how long does it take to go to the airport, profile: general, active: general, effort: low}
+  - {text: I want to go to Paris in June what's the weather like there, profile: general, active: general, effort: low}
+  - {text: can I talk to you about my weekend plans, profile: general, active: general, effort: medium}
+  - {text: put a reminder on my calendar for Monday, profile: general, active: general, effort: low}
+  - {text: connect my calendar to my reminders, profile: general, active: general, effort: medium}
+  - {text: should I use limit orders when I buy NVDA, profile: stock-picker, active: stock-picker, effort: medium}
+  - {text: use my savings to buy more Apple, profile: stock-picker, active: stock-picker, effort: high}
+  - {text: what app should I use to track my portfolio, profile: stock-picker, active: stock-picker, effort: medium}
+  - {text: did Tesla go up after the earnings call, profile: stock-picker, active: stock-picker, effort: low}

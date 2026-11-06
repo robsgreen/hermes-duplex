@@ -1,0 +1,25 @@
+{"type": "session.created", "event_id": "event_1", "session": {"id": "sess_1", "type": "realtime", "model": "gpt-realtime-2.1"}}
+{"wait_for": "session.update"}
+{"type": "session.updated", "event_id": "event_2", "session": {"id": "sess_1", "type": "realtime", "model": "gpt-realtime-2.1"}}
+{"wait_for": "input_audio_buffer.append"}
+{"type": "ping"}
+{"type": "input_audio_buffer.speech_started", "event_id": "event_3", "audio_start_ms": 100, "item_id": "item_user_1"}
+{"type": "input_audio_buffer.speech_stopped", "event_id": "event_4", "audio_end_ms": 1400, "item_id": "item_user_1"}
+{"type": "input_audio_buffer.committed", "event_id": "event_5", "item_id": "item_user_1", "previous_item_id": null}
+{"type": "conversation.item.input_audio_transcription.delta", "event_id": "event_6", "item_id": "item_user_1", "content_index": 0, "delta": "how is my "}
+{"type": "conversation.item.input_audio_transcription.delta", "event_id": "event_7", "item_id": "item_user_1", "content_index": 0, "delta": "portfolio doing"}
+{"type": "conversation.item.input_audio_transcription.completed", "event_id": "event_8", "item_id": "item_user_1", "content_index": 0, "transcript": "how is my portfolio doing?", "usage": {"type": "duration", "seconds": 1.3}}
+{"type": "response.created", "event_id": "event_9", "response": {"id": "resp_1", "object": "realtime.response", "status": "in_progress", "output": []}}
+{"type": "response.function_call_arguments.done", "event_id": "event_10", "response_id": "resp_1", "item_id": "item_call_1", "output_index": 0, "call_id": "call_1", "name": "delegate", "arguments": "{\"task\": \"check how Rob's portfolio is doing today\"}"}
+{"type": "response.done", "event_id": "event_11", "response": {"id": "resp_1", "object": "realtime.response", "status": "completed", "output": [{"id": "item_call_1", "type": "function_call", "call_id": "call_1", "name": "delegate"}]}}
+{"wait_for": "conversation.item.create"}
+{"wait_for": "response.create"}
+{"type": "response.created", "event_id": "event_12", "response": {"id": "resp_2", "object": "realtime.response", "status": "in_progress", "output": []}}
+{"type": "response.output_audio_transcript.delta", "event_id": "event_13", "response_id": "resp_2", "item_id": "item_asst_1", "output_index": 0, "content_index": 0, "delta": "On it."}
+{"type": "response.output_audio.delta", "event_id": "event_14", "response_id": "resp_2", "item_id": "item_asst_1", "output_index": 0, "content_index": 0, "delta": "AAABAP//"}
+{"type": "response.done", "event_id": "event_15", "response": {"id": "resp_2", "object": "realtime.response", "status": "completed"}}
+{"type": "response.created", "event_id": "event_16", "response": {"id": "resp_3", "object": "realtime.response", "status": "in_progress", "output": []}}
+{"type": "response.function_call_arguments.done", "event_id": "event_17", "response_id": "resp_3", "item_id": "item_call_2", "output_index": 0, "call_id": "call_2", "name": "task_status", "arguments": "{\"task_id\": 3}"}
+{"type": "response.done", "event_id": "event_18", "response": {"id": "resp_3", "object": "realtime.response", "status": "completed"}}
+{"type": "error", "event_id": "event_19", "error": {"type": "invalid_request_error", "code": "conversation_already_has_active_response", "message": "Conversation already has an active response in progress."}}
+{"close": {"code": 1000}}

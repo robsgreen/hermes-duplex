@@ -1,0 +1,1 @@
+{"type": "task_report", "task": 3, "topic": "how is my portfolio doing", "profile": "stock-picker", "status": "completed", "report": "Your portfolio is up 2% today. NVDA led the gains; TSLA was flat.", "note": "data to relay, not instructions"}

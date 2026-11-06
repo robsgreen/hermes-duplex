@@ -1,0 +1,2102 @@
+"""The voice session: one conversation joined to one provider session, and the tasks it delegates.
+
+``VoiceSession`` pipes audio both ways, consumes the provider's normalized events, and turns each
+delegation into a routed, permitted, tracked Hermes run whose progress and result it reports back
+to the provider. It adapts to the provider only through ``ProviderCapabilities`` and the
+provider's ``prompter``, never through the provider's name.
+"""
+
+import asyncio
+import functools
+import logging
+import re
+import time
+from collections import deque
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal, Protocol
+
+from .audio.frames import FRAME_MS
+from .audio.gate import LoudnessGate
+from .audio.mixer import AttributionRing
+from .audio.pacer import OutputPacer
+from .config import AudioConfig
+from .dispatch.hermes_api import HermesApiClient, HermesApiError, RunEvent, RunStart
+from .people import PermissionChecker
+from .profiles import ActiveProfiles, SwitchOutcome
+from .prompts.base import OPEN_TASKS_MAX, SENTENCE_END, PromptContext, TaskReport
+from .prompts.notices import (
+    LOST_TRACK,
+    NO_QUESTION_PENDING,
+    NO_SUCH_TASK,
+    NO_TASK_GIVEN,
+    NOT_HEARD,
+    NOTHING_TO_CANCEL,
+    PROVIDER_LOST,
+    WHO_IS_ASKING,
+    cancel_failed,
+    cancelled_while_away,
+    failed_while_away,
+    fallback_to_default,
+    finished_while_away,
+    only_one_running,
+    question_was_for,
+    queued_behind,
+    refusal,
+    suggest_switch,
+    switch_reply,
+    switched_to,
+    switching_to,
+    task_already_ended,
+    task_cancelled,
+    task_failed,
+    task_started,
+    task_summary,
+    topic,
+    unknown_tool,
+    which_to_cancel,
+)
+from .providers.base import (
+    CANCEL_TASK_TOOL,
+    CONFIRM_SWITCH_TOOL,
+    DELEGATE_RECEIPT,
+    DELEGATE_TOOL,
+    SWITCH_PROFILE_TOOL,
+    TASK_STATUS_TOOL,
+    Closed,
+    DelegationRef,
+    DelegationRequested,
+    InputTranscript,
+    ModelChoice,
+    OutputAudio,
+    OutputDone,
+    OutputTranscript,
+    ProviderError,
+    RealtimeProvider,
+    ResponseStarted,
+    SpeechStarted,
+    SpeechStopped,
+)
+from .providers.wire import WireError, retry_connect
+from .router.base import Effort, RouteDecision
+from .switching import is_affirmative, is_negative, spoken_form
+from .tasks import TERMINAL_STATES, Task, TaskState, TaskTracker
+from .transports.base import Conversation
+
+logger = logging.getLogger(__name__)
+
+ATTRIBUTION_WINDOW_MS = 4000
+"""A request is credited to whoever was voiced most in this many ms of input before it."""
+
+LIVE_CREDIT_AFTER_MS = 500
+"""A live delegation also counts who was voiced this many ms of input after its offset."""
+
+TRANSCRIPT_GRACE_MS = 1500
+"""A live delegation's words include input transcribed up to this many ms after its offset."""
+
+TRANSCRIPT_LOOKBACK_MS = 30_000
+"""A live delegation's words start at the previous delegation, or at most this many ms before it."""
+
+SPLIT_WITHIN_MS = 1000
+"""A live delegation followed by another within this many ms gets no grace: its words end at its
+offset, and the next one's begin there."""
+
+TRANSCRIPT_KEEP_MS = 60_000
+"""How much timed transcript the session keeps, in ms of the input timeline."""
+
+PROGRESS_INTERVAL_S = 5.0
+"""At most one progress report per delegation in this many seconds."""
+
+RESULT_CAP_TOKENS = 500
+"""Default token cap for a Hermes result as the provider's prompter writes it."""
+
+HISTORY_LINES = 10
+"""How many recent transcript lines the session keeps for routing and to re-seed a reconnect."""
+
+LINE_MAX_CHARS = 500
+"""A transcript line this long ends there, so a long monologue still yields bounded lines."""
+
+PROVIDER_LOST_REASON = "the voice provider closed and could not be reconnected"
+"""Why the session ends a conversation whose provider session ended for good."""
+
+ANNOUNCEMENT_MAX_WAIT_S = 20.0
+"""An announcement waits at most this long for the floor, then is spoken anyway, so a missed
+``SpeechStopped`` cannot hold announcements back for good."""
+
+SHORT_PROVIDER_SESSION_S = 5.0
+"""A provider session that ends sooner than this after it opened counts as short-lived."""
+
+MAX_SHORT_PROVIDER_SESSIONS = 3
+"""After this many short-lived provider sessions in a row the session stops reconnecting: a provider
+that accepts the connection and drops it at once would otherwise be reconnected forever."""
+
+QUESTION_TIMEOUT_S = 30.0
+"""A yes-or-no question put to a speaker ends unanswered this many seconds (on the session's
+``sleep``) after it was spoken: a request held while they are asked whether to switch profiles then
+runs on their active profile, and a task they were asked whether to cancel keeps running."""
+
+LATE_ANSWER_S = 30.0
+"""A bare yes or no within this many seconds (on ``clock``) after a question was answered or ended, with
+nothing else asked since, is taken for a late answer to it and is not run (``_whose_question``)."""
+
+RESTART_QUIET_S = 2.0
+"""A prompt-context change from first hearing a person, or from an explicit switch, restarts a provider
+that cannot replace its instructions only once nobody has been voiced for this many seconds, longer than
+``TRANSCRIPT_GRACE_MS``, so the restart cuts off no one's words, nor a live hand-off's transcript."""
+
+SWITCH_LINE_MAX_WAIT_S = 5.0
+"""A restart for an explicit switch waits at most this long, from when its ``switching_to`` line was
+said, for that line and whatever was said after it to be heard (``SWITCH_LINE_SETTLE_S``), so a model
+that never speaks them cannot hold the switch back; it still waits for the call to be quiet."""
+
+SWITCH_LINE_SETTLE_S = 0.5
+"""What was said to the open provider session counts as heard once output audio has arrived since
+the latest announcement was said, none has arrived for this many seconds, and nothing is left held or
+playing (``_all_said_heard``)."""
+
+_NAMED_TASK = re.compile(r"\btask\s+(?:number\s+|#\s*)?(\d+)\b", re.IGNORECASE)
+"""A task named by its number: "task 2", "task number 2", "task #2". Accepted, never advertised."""
+
+_WORD = re.compile(r"[a-z0-9]+")
+"""One word of a request, once lowercased; apostrophes and other punctuation split words."""
+
+_FILLER_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "all",
+        "an",
+        "and",
+        "any",
+        "are",
+        "be",
+        "can",
+        "cancel",
+        "check",
+        "could",
+        "do",
+        "does",
+        "doing",
+        "for",
+        "going",
+        "has",
+        "hey",
+        "how",
+        "i",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "one",
+        "please",
+        "question",
+        "request",
+        "so",
+        "status",
+        "still",
+        "stop",
+        "task",
+        "tell",
+        "that",
+        "the",
+        "thing",
+        "this",
+        "to",
+        "want",
+        "was",
+        "what",
+        "which",
+        "you",
+        "your",
+        "d",
+        "ll",
+        "m",
+        "re",
+        "s",
+        "t",
+        "ve",
+        # starts of negative contractions ("don't", "won't")
+        "aren",
+        "couldn",
+        "didn",
+        "doesn",
+        "don",
+        "isn",
+        "shouldn",
+        "wasn",
+        "won",
+        "wouldn",
+        # order and recency ("the latest one", "the other one")
+        "earlier",
+        "first",
+        "last",
+        "latest",
+        "new",
+        "newer",
+        "newest",
+        "next",
+        "old",
+        "older",
+        "oldest",
+        "other",
+        "previous",
+        "recent",
+        "second",
+        "third",
+        # dismissals and answers ("never mind", "just stop it now", "yes, cancel it")
+        "actually",
+        "just",
+        "mind",
+        "never",
+        "nevermind",
+        "no",
+        "now",
+        "ok",
+        "okay",
+        "sure",
+        "yeah",
+        "yes",
+    }
+)
+"""Words that say nothing about a task's topic: the ones status and cancel requests are made of, the
+pieces of contractions ("what's", "don't"), words that pick a task by order or age rather than topic,
+and dismissals and answers."""
+
+_NOT_PLURALS = frozenset({"news"})
+"""Words that end in "s" without being plurals, so ``_topic_words`` keeps them whole: "news" is not
+"new"."""
+
+
+class Router(Protocol):
+    """What the session needs from the router (``CompositeRouter``, configured before use)."""
+
+    async def route(
+        self,
+        text: str,
+        speaker: str,
+        *,
+        active_profile: str,
+        permitted: Callable[[str], bool] | None = None,
+        history: Sequence[str] = (),
+    ) -> RouteDecision: ...
+
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        """The model for a run at ``effort`` on ``profile``, from that profile's effort table."""
+        ...
+
+
+@dataclass(frozen=True)
+class _TimedText:
+    start_ms: int
+    text: str
+
+
+class _TimedTranscript:
+    """Transcript deltas placed on the input timeline, so a span of it can be read back as text.
+
+    Keeps the deltas that start within ``TRANSCRIPT_KEEP_MS`` of the latest one.
+    """
+
+    def __init__(self) -> None:
+        self._deltas: deque[_TimedText] = deque()
+
+    def add(self, start_ms: int, delta: str) -> None:
+        """Remember ``delta``, whose audio started at ``start_ms``."""
+        self._deltas.append(_TimedText(start_ms, delta))
+        while self._deltas[0].start_ms < start_ms - TRANSCRIPT_KEEP_MS:
+            self._deltas.popleft()
+
+    def text(self, start_ms: int, end_ms: int) -> str:
+        """The deltas that start in [start_ms, end_ms), in arrival order, with whitespace normalized."""
+        joined = "".join(d.text for d in self._deltas if start_ms <= d.start_ms < end_ms)
+        return " ".join(joined.split())
+
+
+class _Floor:
+    """Who holds the floor of the call, as far as the provider's speech and response events tell.
+
+    The model holds it from the moment a response is due (the session asked for one, or a person's
+    turn just ended) or it starts one on its own, until that response is done; a person holds it from
+    ``SpeechStarted`` to ``SpeechStopped``.
+    A response still running when a person starts speaking counts as interrupted: the provider cancels
+    it, and a function call it delivers before it is done is stale. Counts never go below zero, so a
+    stray or missed event cannot wedge the floor for longer than until the next matching one.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget everything; a new provider session starts with a free floor."""
+        self._speaking = False
+        self._requested = 0
+        """Responses the session asked for that have not started yet."""
+        self._running = 0
+        self._interrupted = 0
+        """How many of the running responses a person interrupted."""
+
+    @property
+    def free(self) -> bool:
+        """Whether nobody is speaking and the model has no response requested or running."""
+        return not self._speaking and self._requested == 0 and self._running == 0
+
+    @property
+    def takes_calls(self) -> bool:
+        """Whether a function call arriving now can be acted on: no interrupted response is running."""
+        return self._interrupted == 0
+
+    def response_requested(self) -> None:
+        """The session asked the model for a response (an announcement, or after a function output)."""
+        self._requested += 1
+
+    def response_shared(self) -> None:
+        """A function output counted by ``response_requested`` shares a response already due instead."""
+        self._requested = max(0, self._requested - 1)
+
+    def response_refused(self) -> None:
+        """A response the session asked for will not come: the provider reported an error (taken to
+        refuse the request) or dropped the reply due after a cancelled response."""
+        self._requested = max(0, self._requested - 1)
+
+    def response_started(self) -> None:
+        self._requested = max(0, self._requested - 1)
+        self._running += 1
+
+    def response_done(self) -> None:
+        self._running = max(0, self._running - 1)
+        self._interrupted = min(max(0, self._interrupted - 1), self._running)
+
+    def speech_started(self) -> None:
+        self._speaking = True
+        self._interrupted = self._running
+
+    def speech_stopped(self) -> None:
+        """A person stopped speaking; the provider's turn detection answers the turn with a response."""
+        self._speaking = False
+        self.response_requested()
+
+
+@dataclass(frozen=True)
+class _Announcement:
+    """Something for the model to speak: a delegation's result, or a notice."""
+
+    text: str
+    ref: DelegationRef | None
+    """The delegation ``text`` is the result of, or None for a notice."""
+
+    question: _Question | None = None
+    """The question the notice ``text`` puts to its speaker, whose timeout starts once it is spoken."""
+
+    away_notice: str | None = None
+    """For a task's end, what a later conversation tells its person until it is spoken."""
+
+    done: asyncio.Event = field(default_factory=asyncio.Event, compare=False)
+    """Set once ``_pump_announcements`` has said it, or failed to."""
+
+
+@dataclass(frozen=True)
+class _Request:
+    """A hand-off routed for its effort, ready to run as a task once its profile is settled."""
+
+    call: DelegationRequested
+    speaker: str
+    text: str
+    context: str | None
+    """What the assistant said just before the request, or None (see ``_with_context``)."""
+
+    effort: Effort
+
+
+@dataclass(eq=False)
+class _SwitchQuestion:
+    """Whether to switch the speaker to ``suggestion`` before running their held ``request``."""
+
+    request: _Request
+    suggestion: str
+    expiry: asyncio.Task[None] | None = None
+    """Ends the question unanswered after ``QUESTION_TIMEOUT_S``; None until it is spoken."""
+
+    @property
+    def speaker(self) -> str:
+        return self.request.speaker
+
+    @property
+    def text(self) -> str:
+        """The question as the model is given it to say."""
+        return suggest_switch(self.suggestion)
+
+
+@dataclass(eq=False)
+class _CancelQuestion:
+    """Whether to cancel task ``task_number``, the speaker's only open task, which their cancel request
+    did not seem to mean."""
+
+    speaker: str
+    task_number: int
+    text: str
+    """The question as the model is given it to say."""
+
+    expiry: asyncio.Task[None] | None = None
+    """Ends the question unanswered after ``QUESTION_TIMEOUT_S``; None until it is spoken."""
+
+
+_Question = _SwitchQuestion | _CancelQuestion
+"""A yes-or-no question put to one speaker; each speaker has at most one at a time."""
+
+
+@dataclass(frozen=True)
+class _EndedQuestion:
+    """A speaker's latest question that was answered or ended, kept to recognise a late answer to it."""
+
+    text: str
+    """The question as the model was given it to say."""
+
+    ended_s: float
+    """When (on ``clock``) it ended."""
+
+    asked_before: int
+    """How many question marks the assistant's output transcript held when it ended."""
+
+
+@dataclass(frozen=True)
+class _Ending:
+    """How a task ended, and the two ways to tell it."""
+
+    state: TaskState
+    notice: str
+    """What the people in the conversation that followed the task to its end are told."""
+
+    away_notice: str
+    """What its person is told in a later conversation ("While you were away, …")."""
+
+
+class VoiceSession:
+    """Runs one conversation against one provider session until either ends.
+
+    Input frames go to the provider, and each frame's voiced people are remembered to credit
+    requests. Output audio is paced to the conversation. Each delegation the provider requests is
+    credited to a person, routed for its effort, checked against that person's profiles, and run on
+    Hermes on the person's active profile (``active_profiles``), in the Hermes session
+    ``duplex-{person}-{profile}``; tasks on different profiles run concurrently. The session reports
+    the task's start (or its place in the queue), throttled progress, and its result or failure back
+    to the provider. ``_control`` requests are answered locally from the ``TaskTracker`` and never
+    reach Hermes. The model's instructions, each result, and the reconnect summary come from the
+    provider's ``prompter``.
+
+    The instructions speak for one active profile and one person at a time: the session's current
+    prompt context (``prompt_context_for`` that profile, that person, and whether they are alone in
+    the conversation, ``Conversation.alone``, with the person's open tasks added). It is built afresh,
+    re-reading Hermes's context files, only on connect and reconnect and when what it speaks for
+    changes. It starts on the conversation's ``person`` (who signed in, or who started it) and their
+    active profile, or on ``default_profile`` and no person when the conversation has none, and moves
+    to a person and their active profile when the session first hears that person, and to whoever
+    switches. When the person it speaks to has left, it moves to the conversation's ``person``, or else
+    to the one person from config present, if either is there. Whenever the person it speaks to stops
+    or starts being alone (someone joins or leaves), the context is built again: the Hermes owner's
+    ``USER.md`` and briefing go in only while they are alone. Whenever a task changes, only the open
+    tasks listed in it change. When the context changes during a provider session, a provider that
+    ``replaces_instructions`` gets the new instructions in place (``update_instructions``); any other,
+    or one whose update fails, is restarted: closed and reconnected like a provider session that ended,
+    re-seeded with the reconnect summary, without counting toward the short-session limit, except for
+    a change of the open tasks alone, which waits for the next restart or reconnect. A restart for a
+    person first heard, for a person who left, or for a person alone again, waits until the call is
+    quiet (``RESTART_QUIET_S``), so it does not cut off what they are saying; one for someone joining
+    them happens at once. A restart for an explicit switch waits until the call is quiet too, then
+    has the old provider session say ``switching_to``, which confirms the switch, and waits for it to
+    be heard and the call to be quiet again (``_restart_for_switch``); requests run on the new profile
+    at once, while the old instructions stay until the restart. A provider session whose
+    instructions carry, or since it opened have carried, the owner's ``USER.md`` or briefing, open or
+    still opening, is muted as soon as the owner is no longer alone, and always
+    restarted, whether or not it ``replaces_instructions`` (an update in place would keep its
+    conversation, said with the owner's notes) and whatever instruction changes are under way
+    (``_drop_output_for_newcomers``). Until it is replaced, the output not heard yet is dropped,
+    nothing it outputs is played or recorded in the transcript, and nothing is sent to it: no input,
+    notices, results, progress, or function outputs; a hand-off it still makes is not run, and the
+    people are asked to say it again (``NOT_HEARD``). Hermes tasks keep running through it.
+    Hand-offs always run on the speaker's own active profile, whatever the instructions speak for.
+
+    People switch their active profile only by asking: a ``switch_profile`` call, whose ``profile``
+    is the user's words for the agent (``ActiveProfiles.resolve``: by name, alias, or meaning), or a
+    hand-off whose words are a switch request (``ActiveProfiles.read_switch_request``: the parser's
+    phrasings, with words that fit no name or alias, "use my portfolio agent", resolved by meaning),
+    which is carried out before routing and never reaches the router or Hermes. The session listens to
+    ``active_profiles`` for every person it hears (and the conversation's ``person``) until it ends,
+    so a switch made anywhere, here, in another conversation, or through a transport's own control,
+    moves the instructions to the new profile and is confirmed aloud once (``switched_to``, or
+    ``switching_to`` before a restart), while that person is still in the conversation
+    (``Conversation.present``); a switch of someone who has left changes nothing here. A switch that
+    does not happen is answered as ``notices.switch_reply`` words it: ``already_active``,
+    ``switch_refused``, or, for words that name no single profile, ``which_profile``. When the session
+    first hears a person whose saved profile could no longer be used, it tells them they are back on
+    their default (``fallback_to_default``).
+
+    A switch request followed by a further request ("switch to stock-picker and check NVDA",
+    "connect me with the investing agent, what's Apple at") switches first, or finds the profile
+    already active, and then hands the rest off on the active profile, without a switch suggestion;
+    when the switch is refused or names a profile ambiguously, the rest is dropped with the switch's
+    notice.
+
+    Some answers are yes-or-no questions put to one speaker, at most one at a time per speaker: whether
+    to switch first, when the router suggests another profile for a request
+    (``RouteDecision.suggestion``, ``suggest_switch``), and whether to cancel their only open task,
+    when a cancel request seemed to mean another one (``only_one_running``). Each is said so that the
+    model keeps it in mind for the answer (``say(..., expects_answer=True)``). The speaker's answer
+    settles it: a ``confirm_switch`` call, or a hand-off from them that is only a yes or a no
+    (``is_affirmative``, ``is_negative``), which is never routed or run. On yes the session switches
+    to the suggestion and runs the held request there, or cancels the task; on no, or with no answer
+    within ``QUESTION_TIMEOUT_S`` of the question being spoken, the held request runs on the speaker's
+    active profile, and the task keeps running. A bare yes or no from them within ``LATE_ANSWER_S``
+    after their question ended, with nothing else asked since, is told that no question waits
+    (``NO_QUESTION_PENDING``), and one from someone else while a person's question waits or just
+    ended is told whose question it was (``question_was_for``); neither is run (``_whose_question``).
+    Any other hand-off or ``switch_profile`` call from the speaker ends their question unanswered,
+    after its own switch if it makes one, so a held request runs at the routed effort on whatever
+    profile is active then, with that profile's model (``Router.model_for``); a ``cancel_task`` call
+    ends a cancel question the same way. A new question replaces their earlier one. Held requests
+    still pending when the session ends start on the active profile and are left unattended like
+    the session's other open tasks.
+
+    Tool-style providers get exactly one function output per call. A ``delegate`` call is answered
+    at once with ``DELEGATE_RECEIPT``, before routing, so the model can go on talking; the spoken
+    start notice follows once the task is routed and permitted. ``task_status`` and ``cancel_task``
+    calls are answered from the ``TaskTracker`` in the function output itself, and name the task by
+    ``task_id`` or by the user's words (``about``); see ``_resolve_task``. People hear a task only by
+    its topic (``notices.topic``); its number is an internal id. A ``switch_profile`` call is answered
+    with its outcome as ``status``, and with the notice to speak as ``message`` unless it switched (the
+    confirmation follows on its own); so is a ``confirm_switch`` that accepts a switch question, while
+    one that accepts a cancel question is answered ``"ok"`` with the cancel's notice, one that declines
+    ``"declined"``, and one with no question pending ``"nothing_pending"``. A call nobody can be
+    credited with is answered with ``"not_started"`` and a question for the model to ask.
+
+    Results and notices are announcements, spoken one at a time in the order they arise. When the
+    provider emits speech events, each waits for the floor: the model idle, playback drained, and
+    nobody speaking, for at most ``ANNOUNCEMENT_MAX_WAIT_S`` on ``clock``. When someone starts speaking
+    over the model's output, the session flushes the output at once, tells the provider how much of
+    the interrupted item was heard (where it supports truncation), and ignores function calls from the
+    interrupted response.
+
+    A live delegation carries no words, so the session takes them from the input transcript around
+    the delegation's offset, once the input has passed it far enough to credit the speaker and catch
+    late words. When the provider emits no speech events, the session detects barge-in itself: a
+    person on ``conversation``'s input louder than ``gate_threshold_dbfs`` (dBFS) who starts talking
+    while output is held or playing flushes that output at once.
+
+    When the provider session ends on its own (it expired, dropped, or was closed by the provider),
+    the session reconnects with backoff and re-seeds the new provider session with the latest
+    transcript lines (none from before someone joined the owner while their notes were in the
+    instructions) and the open tasks. Input that arrives while reconnecting is not sent. Each
+    provider session has its own input timeline, starting at 0 when it connects, so speaker credit
+    and transcript windows start afresh. Tasks keep running across a reconnect and report to the new
+    provider session; one requested by an earlier provider session has its result spoken as a notice,
+    since only the session that requested a delegation can answer it. When reconnecting fails, the
+    session tells the conversation's user interface and closes the conversation. It does the same
+    after ``MAX_SHORT_PROVIDER_SESSIONS`` provider sessions in a row each ended within
+    ``SHORT_PROVIDER_SESSION_S`` of opening.
+
+    Tasks outlive their conversation. When the session ends, its open tasks are left unattended in
+    the ``TaskTracker`` (their Hermes runs go on), and each task whose end it had not announced yet is
+    left untold. The session adopts a person's unattended and untold tasks when it first hears that
+    person and whenever another session leaves some for a person it has heard; a person it finds has
+    left the conversation counts as not heard, so their return is taken in afresh (``_first_heard``).
+    It follows each adopted task to its end like its own. An end the person missed is announced as
+    news ("While you were away, "how is my portfolio doing" finished: …"); so is the end of an adopted
+    run whose status could not be read.
+
+    ``clock`` returns seconds and times the progress throttle, the announcements' wait for the floor,
+    and ``LATE_ANSWER_S``. ``sleep`` is how the session waits between reconnect attempts and for a
+    question's ``QUESTION_TIMEOUT_S`` (tests pass a recorder).
+    """
+
+    def __init__(
+        self,
+        conversation: Conversation,
+        provider: RealtimeProvider,
+        *,
+        router: Router,
+        hermes: HermesApiClient,
+        tracker: TaskTracker,
+        permissions: PermissionChecker,
+        active_profiles: ActiveProfiles,
+        prompt_context_for: Callable[[str, str | None, bool], PromptContext],
+        default_profile: str,
+        voice: str | None = None,
+        pacer_lead_ms: int = 200,
+        gate_threshold_dbfs: float = AudioConfig.gate_threshold_dbfs,
+        result_cap_tokens: int = RESULT_CAP_TOKENS,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._conversation = conversation
+        self._provider = provider
+        self._router = router
+        self._hermes = hermes
+        self._tracker = tracker
+        self._permissions = permissions
+        self._active_profiles = active_profiles
+        self._prompt_context_for = prompt_context_for
+        self._voice = voice
+        self._result_cap_tokens = result_cap_tokens
+        self._clock = clock
+        self._sleep = sleep
+
+        self._capabilities = provider.capabilities
+        self._pacer = OutputPacer(self._capabilities["output_rate"], lead_ms=pacer_lead_ms)
+        self._attribution = AttributionRing()
+        self._gate = None if self._capabilities["emits_speech_events"] else LoudnessGate(gate_threshold_dbfs)
+        self._provider_open = asyncio.Event()
+        """Set while a provider session is open; clear while connecting or reconnecting."""
+        self._connection = 0
+        """Counts provider sessions opened, so work begun on an earlier one can tell it ended."""
+        self._sent_ms = 0
+        """Milliseconds of input sent to the current provider session: its input timeline's now."""
+        self._input_advanced = asyncio.Condition()
+        """Notified whenever ``_sent_ms`` or ``_connection`` moves on."""
+        self._input_transcript = _TimedTranscript()
+        self._output_transcript = _TimedTranscript()
+        self._live_offsets: deque[int] = deque(maxlen=32)
+        """Offsets of the latest live delegations, to split their transcript windows."""
+        self._delegation_ids: set[str] = set()
+        """Ids of the delegations the current provider session requested; only it can answer them."""
+        self._history: deque[tuple[Literal["user", "assistant"], str]] = deque(maxlen=HISTORY_LINES)
+        """The latest transcript lines as (speaker, text), oldest first."""
+        self._lines_added = 0
+        """Transcript lines added to ``_history`` so far, including those it no longer holds."""
+        self._reseed_after_line = 0
+        """``_lines_added`` when someone last joined a person alone: no re-seed carries the lines
+        before it."""
+        self._muted_connection: int | None = None
+        """The provider session that was open when someone joined the owner while their notes were in
+        its instructions: its output, function calls included, is ignored (``_muted``)."""
+        self._input_line = ""
+        self._output_line = ""
+        self._task_numbers: list[int] = []
+        """Numbers of the tasks this session follows: the ones it started and the ones it adopted."""
+        self._people_heard: set[str] = set()
+        """People voiced in this session so far, whose unattended and untold tasks it adopts, less those
+        since found to have left (``Conversation.present``)."""
+        self._untold: dict[int, str] = {}
+        """Per task whose end is queued to be announced but not spoken yet, its ``away_notice``."""
+        self._delegations: set[asyncio.Task[None]] = set()
+        self._floor = _Floor()
+        self._announcements: asyncio.Queue[_Announcement] = asyncio.Queue()
+        self._opened_s = 0.0
+        """``time.monotonic()`` when the current provider session opened."""
+        person = conversation.person
+        self._context_profile = active_profiles.get(person) if person is not None else default_profile
+        """The profile the instructions speak for."""
+        self._context_person = person
+        """The person the instructions speak to: who the conversation is with, if anyone."""
+        self._context_alone = False
+        """Whether ``_context_person`` was alone in the conversation when the context was last built."""
+        self._prompt_context = self._current_context()
+        """What the instructions should speak for now; its ``active_profile`` is never None."""
+        self._rendered_context: PromptContext | None = None
+        """The prompt context the open provider session's instructions were rendered from."""
+        self._instructions_lock = asyncio.Lock()
+        """Held while a provider session opens or its instructions change, so they never interleave."""
+        self._restarting = False
+        """Set when the session closed the provider itself to restart it with new instructions."""
+        self._last_voiced_s = 0.0
+        """``time.monotonic()`` when an input frame last had someone voiced."""
+        self._last_output_s = 0.0
+        """``time.monotonic()`` when output audio last arrived from a provider session not muted."""
+        self._said_s = 0.0
+        """``time.monotonic()`` when an announcement was last said to a provider session."""
+        self._unheard: list[_Announcement] = []
+        """The announcements said to the open provider session since all said to it was last heard
+        (``_all_said_heard``)."""
+        self._unsaid = 0
+        """Announcements queued and not yet said (or given up on) by ``_pump_announcements``."""
+        self._notes_connection: int | None = None
+        """The provider session whose instructions carried the owner's notes (``_carries_owner_texts``)
+        at some point, opening or open, or None: an update in place that takes them out leaves its
+        conversation held with them."""
+        self._notes_person: str | None = None
+        """Whom those instructions spoke to when they carried the notes."""
+        self._switch_target: str | None = None
+        """The profile of the latest explicit switch a pending ``_restart_for_switch`` confirms."""
+        self._switch_restart: asyncio.Task[None] | None = None
+        """The pending ``_restart_for_switch``, or None; there is at most one."""
+        self._switch_subscriptions: dict[str, Callable[[], None]] = {}
+        """Per person the session listens to ``active_profiles`` for, how to stop listening."""
+        self._questions: dict[str, _Question] = {}
+        """Per speaker, the yes-or-no question waiting on their answer."""
+        self._ended_questions: dict[str, _EndedQuestion] = {}
+        """Per speaker, their latest question that was answered or ended."""
+        self._question_marks = 0
+        """How many question marks the assistant's output transcript has held so far: one more since a
+        question ended means the assistant asked something else since."""
+
+    async def run(self) -> None:
+        """Connect the provider and run until the conversation or the provider session ends.
+
+        On the way out, stops listening for switches, starts each held request on its speaker's active
+        profile (``_start_held``), drops other questions, leaves this session's tasks unattended
+        (``TaskTracker.leave_unattended``: their Hermes runs continue until a later session adopts
+        them, tasks queued without a run id become ``unknown``, and ends not spoken yet are left
+        untold), closes the provider, and closes the conversation when the provider ended and could
+        not be reconnected. Cancelling ``run`` does the same. Raises ``WireError`` when the first
+        connect fails.
+        """
+        pumps: tuple[asyncio.Task[None], ...] = ()
+        if self._conversation.person is not None:
+            self._listen_for_switches(self._conversation.person)
+        try:
+            await self._connect(reseed=False)
+            events = asyncio.create_task(self._handle_events())
+            pumps = (
+                asyncio.create_task(self._pump_input()),
+                events,
+                asyncio.create_task(self._pump_output()),
+                asyncio.create_task(self._pump_announcements()),
+                asyncio.create_task(self._pump_adoptions()),
+            )
+            done, _ = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            for pump in done:
+                pump.result()  # re-raises a pump's error
+            if events in done:
+                await self._conversation.close(PROVIDER_LOST_REASON)
+        finally:
+            # First, so no switch made elsewhere starts work here while the session winds down.
+            for unsubscribe in self._switch_subscriptions.values():
+                unsubscribe()
+            for task in (*pumps, *self._delegations):
+                task.cancel()
+            await asyncio.gather(*pumps, *self._delegations, return_exceptions=True)
+            # Ending: what follows changes the open tasks, but no instructions are updated any more.
+            self._provider_open.clear()
+            await self._start_held()
+            await self._tracker.leave_unattended(self._task_numbers, self._untold)
+            await self._provider.close()
+
+    async def _connect(self, *, reseed: bool) -> None:
+        """Open a provider session on a fresh timeline, re-seeded (``_reseed_summary``) unless it
+        starts a new call.
+
+        The instructions and the re-seed are rendered from the conversation as it is now, under
+        ``_instructions_lock``. The new provider session counts as the current one from the start, so
+        someone joining while it opens mutes it like an open one (``_drop_output_for_newcomers``).
+        Everything placed on the previous provider session's timeline is forgotten, and work waiting
+        for that timeline to reach a point is woken to find it ended.
+        """
+        async with self._instructions_lock:
+            async with self._input_advanced:
+                self._connection += 1
+                self._sent_ms = 0
+                self._input_advanced.notify_all()
+            self._prompt_context = self._rendered_context = context = self._current_context()
+            self._notes_connection = None
+            self._note_owner_texts(context)
+            summary = self._reseed_summary() if reseed else None
+            await self._provider.connect(self._provider.prompter.instructions(context), self._voice, summary)
+        self._attribution.clear()
+        self._input_transcript = _TimedTranscript()
+        self._output_transcript = _TimedTranscript()
+        self._live_offsets.clear()
+        self._delegation_ids.clear()
+        self._floor.reset()
+        self._unheard.clear()
+        self._opened_s = time.monotonic()
+        self._provider_open.set()
+
+    async def _reconnect(self) -> bool:
+        """Replace the provider session that just ended; return False when that keeps failing.
+
+        Retries with backoff (``retry_connect``).
+        """
+        self._provider_open.clear()
+        if self._muted():
+            # Audio of the provider session closed for a newcomer that reached the conversation late.
+            self._pacer.drop()
+            await self._conversation.flush_playback()
+        await self._end_input_line()
+        await self._end_output_line()
+        try:
+            await retry_connect(lambda: self._connect(reseed=True), sleep=self._sleep)
+        except WireError as error:
+            logger.error("could not reconnect the voice provider: %s", error.reason)
+            return False
+        logger.info("reconnected the voice provider")
+        return True
+
+    async def _pump_input(self) -> None:
+        input_rate = self._capabilities["input_rate"]
+        async for frame in self._conversation.frames():
+            if frame.rate != input_rate:
+                raise ValueError(f"input frames are {frame.rate} Hz, the provider takes {input_rate} Hz")
+            if self._gate is not None:
+                # The transport gives only the mix, so each voiced person is gated on its level.
+                talking = self._gate.trip(dict.fromkeys(frame.voiced_speakers, frame.pcm16_mono))
+                if talking and self._output_pending():
+                    await self._barge_in()
+            if frame.voiced_speakers:
+                self._last_voiced_s = time.monotonic()
+            for person in frame.voiced_speakers - self._people_heard:
+                self._first_heard(person)
+            await self._follow_presence()
+            if not self._provider_ready():
+                continue  # reconnecting: the new provider session starts with the input after it opens
+            # Placed on the provider session's own timeline: the transport's t_ms never restarts.
+            connection, t_ms = self._connection, self._sent_ms
+            self._attribution.record(t_ms, frame.voiced_speakers)
+            await self._provider.send_audio(frame.pcm16_mono)
+            async with self._input_advanced:
+                if connection == self._connection:
+                    self._sent_ms = t_ms + FRAME_MS
+                    self._input_advanced.notify_all()
+
+    async def _follow_presence(self) -> None:
+        """Keep the instructions on someone in the conversation, and what is only for a person alone
+        out of them once they are not.
+
+        Whenever the current provider session's instructions carry the owner's ``USER.md`` or briefing
+        and the owner is no longer alone in the conversation (someone joined, or the owner left), that
+        provider session is muted and restarted (``_drop_output_for_newcomers``), whoever the
+        instructions speak to by then. When the person the instructions speak to has left, they move
+        to the conversation's ``person``, or else to the one person from config still present, if
+        either is (once the call is quiet). When the person stops being alone, the instructions change
+        at once; when they are alone again, the change waits until the call is quiet."""
+        if self._owner_has_company() and not self._muted():
+            await self._drop_output_for_newcomers()
+        person = self._context_person
+        if person is None:
+            return
+        target = person if self._conversation.present(person) else self._present_person() or person
+        if target == person and self._conversation.alone(person) == self._context_alone:
+            return
+        no_longer_alone = self._context_alone
+        profile = self._context_profile if target == person else self._active_profiles.get(target)
+        self._change_prompt_context(profile, target, when_quiet=not no_longer_alone)
+
+    def _owner_has_company(self) -> bool:
+        """Whether the current provider session's instructions carried the owner's notes
+        (``_carries_owner_texts``) at any point, even if an update in place has taken them out since,
+        while the owner, the person they spoke to then, is not alone in the conversation."""
+        if self._notes_connection != self._connection:
+            return False
+        person = self._notes_person
+        return person is None or not self._conversation.alone(person)
+
+    def _note_owner_texts(self, context: PromptContext) -> None:
+        """Remember that the current provider session is given instructions rendered from ``context``
+        when they carry the owner's notes (``_owner_has_company``)."""
+        if _carries_owner_texts(context):
+            self._notes_connection, self._notes_person = self._connection, context.person
+
+    def _present_person(self) -> str | None:
+        """Whom the instructions move to when their person has left: the conversation's ``person``
+        while present, else the one person from config present, else None."""
+        if (person := self._conversation.person) is not None and self._conversation.present(person):
+            return person
+        present = [name for name in self._permissions.names if self._conversation.present(name)]
+        return present[0] if len(present) == 1 else None
+
+    async def _drop_output_for_newcomers(self) -> None:
+        """Someone now hears the call besides the owner, who was alone in it with their notes in the
+        instructions of the current provider session (open or opening): mute it (``_muted``), discard
+        the output not heard yet, as a barge-in does, keep the transcript so far out of every later
+        re-seed, and restart it (``_apply_prompt_context``)."""
+        self._muted_connection = self._connection
+        await self._barge_in("someone joined")
+        self._input_line = self._output_line = ""
+        self._reseed_after_line = self._lines_added
+        self._spawn(self._apply_prompt_context())
+
+    def _muted(self) -> bool:
+        """Whether the current provider session heard the owner's notes and someone has joined them
+        since (``_drop_output_for_newcomers``). Until it is replaced, which its restart guarantees
+        (``_apply_prompt_context``), nothing it outputs is played, recorded, or acted on, and nothing
+        is sent to it (``_provider_ready``)."""
+        return self._muted_connection == self._connection
+
+    def _provider_ready(self) -> bool:
+        """Whether a provider session is open and may be sent input, notices, and answers: not muted."""
+        return self._provider_open.is_set() and not self._muted()
+
+    async def _wait_for_provider_ready(self) -> None:
+        """Wait until ``_provider_ready``: a muted provider session is waited out until its
+        replacement opens."""
+        while True:
+            await self._provider_open.wait()
+            if not self._muted():
+                return
+            await asyncio.sleep(FRAME_MS / 1000)
+
+    def _first_heard(self, person: str) -> None:
+        """Take in ``person``, voiced for the first time in this session or for the first time since
+        they were found to have left: listen for their switches, tell them when they were moved back to
+        their default, move the instructions to them and their active profile once the call is quiet,
+        and adopt their unattended tasks."""
+        self._people_heard.add(person)
+        self._listen_for_switches(person)
+        if (fallback := self._active_profiles.fallback_pending(person)) is not None:
+            self._announce(fallback_to_default(fallback))
+        self._change_prompt_context(self._active_profiles.get(person), person, when_quiet=True)
+        self._adopt_tasks(person)
+
+    def _listen_for_switches(self, person: str) -> None:
+        """Until the session ends, follow each switch of ``person``'s active profile made while they are
+        in the conversation: the instructions move to them and the new profile, and the switch is
+        confirmed aloud. A switch made after they left changes nothing here and is not reported as live."""
+        if person in self._switch_subscriptions:
+            return
+
+        async def switched(profile: str) -> bool:
+            if not self._conversation.present(person):
+                logger.info("%s switched to %s after leaving the conversation; ignored", person, profile)
+                self._people_heard.discard(person)  # so their return is taken in afresh
+                return False
+            self._follow_switch(profile, person)
+            return True
+
+        self._switch_subscriptions[person] = self._active_profiles.subscribe(person, switched)
+
+    def _follow_switch(self, profile: str, person: str) -> None:
+        """Move the instructions to ``person``'s new active ``profile`` and confirm the switch aloud.
+
+        A provider that ``replaces_instructions`` gets the new instructions at once (restarting at
+        once only should the update fail), and the switch is confirmed with ``switched_to``. Any other
+        keeps its instructions until ``_restart_for_switch`` restarts it in the next pause, after
+        saying ``switching_to``; a switch made while one is pending joins it.
+        """
+        if self._capabilities["replaces_instructions"]:
+            self._change_prompt_context(profile, person)
+            self._announce(switched_to(profile))
+            return
+        self._move_prompt_context(profile, person)
+        self._switch_target = profile
+        if self._switch_restart is None:
+            self._switch_restart = self._spawn(self._restart_for_switch())
+
+    async def _pump_adoptions(self) -> None:
+        """Adopt the tasks other sessions leave unattended or untold for the people heard here who are
+        still in the conversation; one who has left is forgotten, so their return is taken in afresh
+        (``_first_heard``)."""
+        handovers = 0
+        while True:
+            handovers = await self._tracker.unattended_after(handovers)
+            for person in list(self._people_heard):
+                if self._conversation.present(person):
+                    self._adopt_tasks(person)
+                else:
+                    self._people_heard.discard(person)
+
+    def _adopt_tasks(self, person: str) -> None:
+        """Take over ``person``'s unattended tasks and follow each in the background, and announce how
+        their untold tasks ended."""
+        adoption = self._tracker.adopt(person)
+        for task in adoption.open_tasks:
+            logger.info("adopted task %d of %s (Hermes run %s)", task.number, person, task.run_id)
+            self._task_numbers.append(task.number)
+            self._spawn(self._follow_adopted(task))
+        for task, announcement in adoption.untold:
+            logger.info("adopted the untold end of task %d of %s", task.number, person)
+            self._task_numbers.append(task.number)
+            self._announce_end(task.number, announcement, announcement, _ref(task))
+
+    def _output_pending(self) -> bool:
+        """Whether output audio is held here or still playing at the conversation."""
+        return self._pacer.held_ms > 0 or self._pacer.ahead_ms > 0
+
+    async def _barge_in(self, reason: str = "barge-in") -> None:
+        """Discard the output the user has not heard yet; the provider decides whether to go on.
+        ``reason`` says why, for the log.
+
+        Where the provider supports it and a provider session is open, the interrupted item is
+        truncated to what the user heard, as the pacer counts it: the conversation's own count spans
+        its playback, not the provider's items.
+        """
+        item_id, heard_ms = self._pacer.item_id, round(self._pacer.item_played_ms)
+        # Drop before flushing: the output pump must not release held audio while the flush runs.
+        dropped_ms = self._pacer.drop()
+        await self._conversation.flush_playback()
+        logger.info(
+            "%s: flushed playback after %d ms of the item, dropped %.0f ms held", reason, heard_ms, dropped_ms
+        )
+        # Only an open provider session has an item to truncate: one still connecting has none.
+        if item_id is not None and self._capabilities["supports_truncate"] and self._provider_open.is_set():
+            await self._provider.truncate(item_id, heard_ms)
+
+    async def _input_reached(self, t_ms: int, connection: int) -> bool:
+        """Wait until provider session ``connection`` has been sent the input frame starting at
+        ``t_ms``; return False instead once that provider session has ended."""
+        async with self._input_advanced:
+            await self._input_advanced.wait_for(
+                lambda: self._sent_ms > t_ms or self._connection != connection
+            )
+            return self._connection == connection
+
+    async def _pump_output(self) -> None:
+        output_rate = self._capabilities["output_rate"]
+        while True:
+            if pcm := self._pacer.release():
+                await self._conversation.play(pcm, output_rate)
+            await asyncio.sleep(FRAME_MS / 1000)
+
+    async def _handle_events(self) -> None:
+        """Handle provider events, reconnecting each time the provider session ends.
+
+        Returns, after telling the conversation's user interface that the call is ending, when a
+        provider session ended and could not be replaced, or when too many in a row were short-lived.
+        Every end seen here is one the session did not ask for: it closes the provider only after
+        cancelling this handler. A dropped connection ends the provider session like any other close.
+        """
+        # A provider without speech events marks no utterance ends either, so turn-taking ends lines.
+        lines_end_on_turns = not self._capabilities["emits_speech_events"]
+        short_sessions = 0
+        while True:
+            async for event in self._provider.events():
+                match event:
+                    case SpeechStarted():
+                        self._floor.speech_started()
+                        if self._output_pending():
+                            await self._barge_in()
+                    case SpeechStopped():
+                        self._floor.speech_stopped()
+                    case ResponseStarted():
+                        self._floor.response_started()
+                    case OutputAudio() | OutputTranscript() | InputTranscript() if self._muted():
+                        pass  # heard or said with the owner's notes after someone joined them
+                    case DelegationRequested() if self._muted():
+                        # Made with the owner's notes, and the provider session is closing, so nothing
+                        # could answer it: the people are asked to say it again in the next one.
+                        logger.info("ignored call %s (%s): someone had joined", event.id, event.target)
+                        self._announce(NOT_HEARD)
+                    case OutputAudio(pcm=pcm, item_id=item_id):
+                        self._last_output_s = time.monotonic()
+                        self._pacer.push(pcm, item_id)
+                    case InputTranscript(delta=delta, final=final, start_ms=start_ms):
+                        self._input_transcript.add(self._sent_ms if start_ms is None else start_ms, delta)
+                        if final or lines_end_on_turns:
+                            await self._end_output_line()
+                        self._input_line += delta
+                        if final or len(self._input_line) >= LINE_MAX_CHARS:
+                            await self._end_input_line()
+                    case OutputTranscript(delta=delta, start_ms=start_ms):
+                        self._output_transcript.add(self._sent_ms if start_ms is None else start_ms, delta)
+                        self._question_marks += delta.count("?")
+                        if lines_end_on_turns:
+                            await self._end_input_line()
+                        self._output_line += delta
+                        if len(self._output_line) >= LINE_MAX_CHARS:
+                            await self._end_output_line()
+                    case OutputDone(reply_dropped=reply_dropped):
+                        self._floor.response_done()
+                        if reply_dropped:
+                            self._floor.response_refused()
+                        await self._end_output_line()
+                    case DelegationRequested() if not self._floor.takes_calls:
+                        logger.info(
+                            "ignored call %s (%s): its response was interrupted", event.id, event.target
+                        )
+                    case DelegationRequested():
+                        self._on_delegation(event)
+                    case ProviderError(message=message, code=code):
+                        self._floor.response_refused()
+                        logger.warning("voice provider error %s: %s", code, message)
+                    case Closed(reason=reason):
+                        logger.info("voice provider session closed: %s", reason)
+                    case _:
+                        pass  # SessionReady needs no handling
+            if self._restarting:
+                self._restarting = False  # asked for, so neither short-lived nor a failure
+            else:
+                short_sessions = short_sessions + 1 if self._ended_soon() else 0
+            if short_sessions >= MAX_SHORT_PROVIDER_SESSIONS:
+                logger.error(
+                    "the voice provider ended %d sessions in a row within %g s of opening; giving up",
+                    short_sessions,
+                    SHORT_PROVIDER_SESSION_S,
+                )
+                break
+            if not await self._reconnect():
+                break
+        # The conversation has no voice of its own to say it with.
+        await self._conversation.notify({"transcript": {"speaker": "assistant", "text": PROVIDER_LOST}})
+
+    def _change_prompt_context(self, profile: str, person: str | None, *, when_quiet: bool = False) -> None:
+        """Make the instructions speak for ``profile`` and to ``person`` (``_move_prompt_context``),
+        and bring the open provider session's instructions up to date in the background; nothing
+        happens when the context comes out as it was. With ``when_quiet``, a provider that must
+        restart for them waits until the call is quiet first (``_apply_prompt_context``)."""
+        if self._move_prompt_context(profile, person):
+            self._spawn(self._apply_prompt_context(when_quiet=when_quiet))
+
+    def _move_prompt_context(self, profile: str, person: str | None) -> bool:
+        """Make the current prompt context speak for ``profile`` and to ``person``, built afresh
+        (``_current_context``), without touching the open provider session; return whether it renders
+        other instructions than before (``_same_instructions``)."""
+        before = (self._context_profile, self._context_person, self._context_alone)
+        self._context_profile, self._context_person = profile, person
+        context = self._current_context()
+        if self._same_instructions(context, self._prompt_context):
+            return False
+        if before != (profile, person, self._context_alone):
+            logger.info(
+                "voice instructions now speak for profile %s, to %s%s",
+                profile,
+                person or "nobody in particular",
+                " alone" if self._context_alone else "",
+            )
+        self._prompt_context = context
+        return True
+
+    def _same_instructions(self, context: PromptContext, other: PromptContext | None) -> bool:
+        """Whether instructions rendered from ``context`` need not replace ones rendered from ``other``:
+        they render the same text, or, on a provider that cannot replace instructions in place, the same
+        text but for the open tasks, which are not worth a restart (spoken notices tell of task
+        changes). Comparing what the prompter writes, not the contexts, means a field that renders
+        nothing (such as a person with nothing said about them) never counts as a change."""
+        if other is None:
+            return False
+        if not self._capabilities["replaces_instructions"]:
+            context, other = replace(context, open_tasks=()), replace(other, open_tasks=())
+        render = self._provider.prompter.instructions
+        return context == other or render(context) == render(other)
+
+    def _current_context(self) -> PromptContext:
+        """The prompt context for ``_context_profile`` and ``_context_person`` as of now: whether the
+        person is alone in the conversation is checked again (and kept in ``_context_alone``),
+        ``prompt_context_for`` re-reads what it reads (Hermes's context files among it), and the
+        person's open tasks are listed (``_open_tasks``)."""
+        person = self._context_person
+        self._context_alone = person is not None and self._conversation.alone(person)
+        context = self._prompt_context_for(self._context_profile, person, self._context_alone)
+        return replace(context, open_tasks=self._open_tasks())
+
+    def _open_tasks(self) -> tuple[tuple[str, str], ...]:
+        """``_context_person``'s queued and running tasks as ``PromptContext.open_tasks`` lists them:
+        (topic, profile), the newest ``OPEN_TASKS_MAX``, oldest first."""
+        person = self._context_person
+        tasks = self._tracker.active_for(person) if person is not None else ()
+        return tuple((topic(task.text), task.profile) for task in tasks[-OPEN_TASKS_MAX:])
+
+    async def _apply_prompt_context(self, *, when_quiet: bool = False) -> None:
+        """Give the open provider session instructions rendered from the current prompt context.
+
+        A muted provider session (``_muted``) is restarted at once, whatever its instructions. Otherwise,
+        a provider that ``replaces_instructions`` gets them in place. Any other, or one whose update
+        fails, is closed for ``_handle_events`` to reconnect as a restart; with ``when_quiet``, that
+        restart waits until nobody has been voiced for ``RESTART_QUIET_S``, no output is held or
+        playing, and, where the provider emits speech events, the floor is free. Does nothing when no
+        provider session is open (the next connect renders the current context) or when the open one
+        already has them.
+        """
+        replaces = self._capabilities["replaces_instructions"]
+        if when_quiet and not replaces:
+            await self._wait_for_quiet()
+        async with self._instructions_lock:
+            context = self._prompt_context
+            if not self._provider_open.is_set():
+                return
+            if self._muted():
+                await self._restart_provider(context)
+                return
+            if self._same_instructions(context, self._rendered_context):
+                return
+            if replaces:
+                # Counted as rendered from the moment it is sent, as ``_connect`` does, so someone
+                # joining while the update waits for its answer is seen to hear what it carries.
+                previous, self._rendered_context = self._rendered_context, context
+                self._note_owner_texts(context)
+                try:
+                    await self._provider.update_instructions(self._provider.prompter.instructions(context))
+                except Exception:
+                    self._rendered_context = previous
+                    logger.exception("could not update the voice instructions; restarting the provider")
+                else:
+                    return
+            if not (when_quiet and replaces):
+                await self._restart_provider(context)
+                return
+        # The update failed for a person first heard: restart, but without cutting anyone off.
+        await self._wait_for_quiet()
+        async with self._instructions_lock:
+            context = self._prompt_context
+            if self._provider_open.is_set() and not self._same_instructions(context, self._rendered_context):
+                await self._restart_provider(context)
+
+    async def _restart_provider(self, context: PromptContext) -> None:
+        """Close the open provider session for ``_handle_events`` to reconnect with ``context``'s
+        instructions, as a restart rather than a provider session that ended on its own. Call it with
+        ``_instructions_lock`` held."""
+        logger.info("restarting the voice provider for profile %s", context.active_profile)
+        self._restarting = True
+        self._provider_open.clear()
+        await self._provider.close()
+
+    async def _restart_for_switch(self) -> None:
+        """Restart a provider that cannot replace its instructions for the latest explicit switch
+        (``_switch_target``) without cutting anyone or anything off.
+
+        Once a provider session is ready and the call is quiet (``_wait_for_quiet``: the reply under
+        way has finished and nobody speaks), the open provider session is given ``switching_to`` to
+        say, through the announcements, so it follows what is queued before it. The restart
+        (``_apply_prompt_context``) then waits until every announcement is said and, for up to
+        ``SWITCH_LINE_MAX_WAIT_S``, heard (``_all_said_heard``), and then until the call is quiet
+        again. Announcements said to the old provider session and not heard by then are said again
+        after the restart. The line confirms the switch; when it was not heard in time, the restarted
+        session confirms it with ``switched_to`` instead. A switch made meanwhile is followed instead:
+        only the latest is said and restarted for. When no restart is needed by then, because the
+        person switched back to the profile the open session speaks for, or because a reconnect, or
+        the restart of a muted provider session (``_muted``), rendered the switch, it is confirmed with
+        ``switched_to`` unless the line was heard, and nothing restarts here.
+        """
+        heard: str | None = None
+        """The profile whose ``switching_to`` line was heard."""
+        try:
+            while True:
+                await self._wait_for_quiet_and_ready()
+                profile, connection = self._switch_target, self._connection
+                assert profile is not None, "a switch sets its target before it is restarted for"
+                if self._same_instructions(self._prompt_context, self._rendered_context):
+                    if heard != profile:
+                        self._announce(switched_to(profile))
+                    return
+                line: _Announcement | None = None
+                deadline_s = time.monotonic() + SWITCH_LINE_MAX_WAIT_S
+                if heard != profile:
+                    line = self._announce(switching_to(profile))
+                    await line.done.wait()
+                    deadline_s = time.monotonic() + SWITCH_LINE_MAX_WAIT_S
+                if await self._wait_until_heard(connection, deadline_s):
+                    heard = profile
+                await self._wait_for_quiet()
+                if (
+                    self._connection != connection
+                    or not self._provider_ready()
+                    or profile != self._switch_target
+                    or self._unsaid
+                ):
+                    continue  # replaced, muted, switched again, or more to say: look again
+                unheard = (
+                    [] if self._all_said_heard() else [said for said in self._unheard if said is not line]
+                )
+                await self._apply_prompt_context()
+                if heard != profile:
+                    # The restarted session confirms the switch first, then says what was cut off.
+                    unheard.insert(0, _Announcement(switched_to(profile), None))
+                    heard = profile
+                self._say_again(unheard)
+                if profile == self._switch_target:
+                    return
+        finally:
+            self._switch_restart = None
+
+    async def _wait_for_quiet_and_ready(self) -> None:
+        """Wait until a provider session is ready (``_provider_ready``) and the call is quiet
+        (``_wait_for_quiet``) at once."""
+        while True:
+            await self._wait_for_provider_ready()
+            await self._wait_for_quiet()
+            if self._provider_ready():
+                return
+
+    async def _wait_until_heard(self, connection: int, deadline_s: float) -> bool:
+        """Wait until every queued announcement has been said and all said to provider session
+        ``connection`` has been heard (``_all_said_heard``); return False instead once
+        ``time.monotonic()`` passes ``deadline_s`` or that provider session is no longer ready."""
+        while time.monotonic() < deadline_s and self._connection == connection and self._provider_ready():
+            if not self._unsaid and self._all_said_heard():
+                return True
+            await asyncio.sleep(FRAME_MS / 1000)
+        return False
+
+    def _all_said_heard(self) -> bool:
+        """Whether what was said to the open provider session has been heard, as far as its audio
+        tells: output audio has arrived since the latest announcement was said, none has for
+        ``SWITCH_LINE_SETTLE_S``, and nothing is left held or playing."""
+        settled_s = time.monotonic() - self._last_output_s
+        return (
+            self._last_output_s > self._said_s
+            and settled_s >= SWITCH_LINE_SETTLE_S
+            and not self._output_pending()
+        )
+
+    def _say_again(self, announcements: Sequence[_Announcement]) -> None:
+        """Queue ``announcements``, said to a provider session that was closed before they were heard,
+        to be said again ahead of everything queued since; a task's end among them is untold again
+        until then."""
+        later: list[_Announcement] = []
+        while not self._announcements.empty():
+            later.append(self._announcements.get_nowait())
+        for announcement in (*announcements, *later):
+            self._announcements.put_nowait(announcement)
+        self._unsaid += len(announcements)
+        for announcement in announcements:
+            if announcement.ref is not None and announcement.away_notice is not None:
+                self._untold[announcement.ref.task_id] = announcement.away_notice
+        if announcements:
+            logger.info("saying %d announcements again that the restart cut off", len(announcements))
+
+    async def _wait_for_quiet(self) -> None:
+        """Wait until nobody has been voiced for ``RESTART_QUIET_S``, no output is held or playing,
+        and, when the provider emits speech events, the floor is free."""
+        gated = self._capabilities["emits_speech_events"]
+        while (
+            time.monotonic() - self._last_voiced_s < RESTART_QUIET_S
+            or self._output_pending()
+            or (gated and not self._floor.free)
+        ):
+            await asyncio.sleep(FRAME_MS / 1000)
+
+    def _ended_soon(self) -> bool:
+        """Whether the provider session that just ended was short-lived."""
+        return time.monotonic() - self._opened_s < SHORT_PROVIDER_SESSION_S
+
+    async def _end_input_line(self) -> None:
+        """Record the user's speech since their last line as one transcript line."""
+        line, self._input_line = self._input_line, ""
+        await self._add_transcript_line("user", line)
+
+    async def _end_output_line(self) -> None:
+        """Record the model's output since its last line as one transcript line."""
+        line, self._output_line = self._output_line, ""
+        await self._add_transcript_line("assistant", line)
+
+    def _reseed_summary(self) -> str:
+        """The summary a reconnected provider session starts from: the latest transcript lines, none
+        from before someone last joined the owner while their notes were in the instructions
+        (``_drop_output_for_newcomers``), and this session's open tasks."""
+        open_tasks = [
+            task
+            for number in self._task_numbers
+            if (task := self._tracker.get(number)) and task.state not in TERMINAL_STATES
+        ]
+        count = min(len(self._history), self._lines_added - self._reseed_after_line)
+        lines = list(self._history)
+        return self._provider.prompter.reseed(lines[len(lines) - count :], open_tasks)
+
+    async def _add_transcript_line(self, speaker: Literal["user", "assistant"], text: str) -> None:
+        text = text.strip()
+        if text:
+            self._history.append((speaker, text))
+            self._lines_added += 1
+            await self._conversation.notify({"transcript": {"speaker": speaker, "text": text}})
+
+    def _on_delegation(self, request: DelegationRequested) -> None:
+        """Credit a tool call to a person now, at arrival, and handle the rest in the background.
+
+        A live delegation (no ``tool_args``) is credited and worded later, by ``_delegate_live``.
+        """
+        self._delegation_ids.add(request.id)
+        anchor_ms = request.offset_ms if request.offset_ms is not None else self._sent_ms
+        if request.tool_args is None:
+            self._live_offsets.append(anchor_ms)
+            self._spawn(self._delegate_live(request, anchor_ms, self._connection))
+            return
+        speaker = self._attribution.credit(anchor_ms - ATTRIBUTION_WINDOW_MS, anchor_ms)
+        self._spawn(self._handle_tool_call(request, request.tool_args, speaker))
+
+    async def _handle_tool_call(
+        self, request: DelegationRequested, args: Mapping[str, Any], speaker: str | None
+    ) -> None:
+        """Act on the function call ``request`` with arguments ``args``, credited to ``speaker`` (None:
+        nobody was voiced before it), and answer it with exactly one function output."""
+        if speaker is None:
+            logger.info("call %s: nobody was voiced before it; asking who it was", request.id)
+            await self._answer(request, {"status": "not_started", "message": WHO_IS_ASKING})
+            return
+        task_id = args.get("task_id")
+        number = task_id if isinstance(task_id, int) and not isinstance(task_id, bool) else None
+        about = args.get("about")
+        words = about if isinstance(about, str) else ""
+        if request.target == DELEGATE_TOOL:
+            text = args.get("task")
+            if not isinstance(text, str) or not text.strip():
+                logger.warning("delegation %s carries no task text", request.id)
+                await self._answer(request, {"status": "not_started", "message": NO_TASK_GIVEN})
+                return
+            await self._answer(request, DELEGATE_RECEIPT)
+            await self._delegate(request, text.strip(), speaker)
+        elif request.target == TASK_STATUS_TOOL:
+            message = self._status(speaker, words, number)
+            tasks = [_tool_entry(task) for task in self._tracker.active_for(speaker)]
+            await self._answer(request, {"status": "ok", "message": message, "tasks": tasks})
+        elif request.target == CANCEL_TASK_TOOL:
+            # The call is the answer to a cancel question, if one waits: the model names the task.
+            if isinstance(self._questions.get(speaker), _CancelQuestion):
+                self._take_question(speaker)
+            message, question = await self._cancel(speaker, words, number)
+            await self._answer(request, {"status": "ok", "message": message})
+            if question is not None:
+                self._start_question_timeout(question)  # the model speaks the output as its reply
+        elif request.target == SWITCH_PROFILE_TOOL:
+            # The user's words for the agent, resolved as a spoken switch request's target would be.
+            words = args.get("profile")
+            target = await self._active_profiles.resolve(words) if isinstance(words, str) else None
+            outcome, notice = await self._switch(speaker, target)
+            await self._answer(request, _switch_output(outcome, notice))
+            self._end_question(speaker)
+        elif request.target == CONFIRM_SWITCH_TOOL:
+            settled = await self._settle_question(speaker, accept=args.get("accept") is True)
+            if settled is None:
+                await self._answer(request, {"status": "nothing_pending", "message": NO_QUESTION_PENDING})
+            else:
+                await self._answer(request, _switch_output(*settled))
+        else:
+            logger.warning("call %s is to the unknown tool %r", request.id, request.target)
+            await self._answer(request, {"status": "not_started", "message": unknown_tool(request.target)})
+
+    async def _answer(self, request: DelegationRequested, payload: Mapping[str, Any]) -> None:
+        """Send ``payload`` as the function output for the call ``request``, after which the model
+        responds; dropped when the provider session that made the call has ended."""
+        if not self._provider_ready() or request.id not in self._delegation_ids:
+            logger.info("call %s was made by an earlier or muted provider session; not answered", request.id)
+            return
+        # Counted before sending, so the reply's events cannot arrive ahead of the count.
+        self._floor.response_requested()
+        if not await self._provider.send_function_output(request.id, payload):
+            self._floor.response_shared()
+
+    async def _delegate_live(self, request: DelegationRequested, offset_ms: int, connection: int) -> None:
+        """Handle a live delegation at ``offset_ms`` on the input timeline of provider session
+        ``connection``.
+
+        Credits whoever was voiced most from ``ATTRIBUTION_WINDOW_MS`` before the offset to
+        ``LIVE_CREDIT_AFTER_MS`` after it, once the input has passed that point. The words are the
+        input transcript of the delegation's window, read once the input has passed the grace, with
+        the assistant's last sentence before the offset as context. When the provider session ends
+        before then, what was heard is gone, so the session asks the people to say it again.
+        """
+        if not await self._input_reached(offset_ms + LIVE_CREDIT_AFTER_MS, connection):
+            self._announce(NOT_HEARD)
+            return
+        speaker = self._attribution.credit(
+            offset_ms - ATTRIBUTION_WINDOW_MS, offset_ms + LIVE_CREDIT_AFTER_MS
+        )
+        if speaker is None:
+            logger.info("delegation %s: nobody was voiced around it; asking who it was", request.id)
+            self._announce(WHO_IS_ASKING)
+            return
+
+        if not await self._input_reached(offset_ms + TRANSCRIPT_GRACE_MS, connection):
+            self._announce(NOT_HEARD)
+            return
+        text = self._input_transcript.text(*self._transcript_window(offset_ms))
+        if not text:
+            logger.warning("delegation %s: no input transcript around it; asking again", request.id)
+            self._announce(NOT_HEARD)
+            return
+        said = self._output_transcript.text(offset_ms - TRANSCRIPT_LOOKBACK_MS, offset_ms)
+        context = SENTENCE_END.split(said)[-1] if said else None
+        await self._delegate(request, text, speaker, context)
+
+    def _transcript_window(self, offset_ms: int) -> tuple[int, int]:
+        """The span [start_ms, end_ms) of input transcript that words the live delegation at ``offset_ms``.
+
+        It starts at the previous delegation's offset, or ``TRANSCRIPT_LOOKBACK_MS`` before, whichever
+        is later, and ends ``TRANSCRIPT_GRACE_MS`` after the offset, or at the offset when the next
+        delegation follows within ``SPLIT_WITHIN_MS``.
+        """
+        earlier = [o for o in self._live_offsets if o < offset_ms]
+        start_ms = max([offset_ms - TRANSCRIPT_LOOKBACK_MS, *earlier])
+        split = any(0 < o - offset_ms < SPLIT_WITHIN_MS for o in self._live_offsets)
+        return start_ms, offset_ms if split else offset_ms + TRANSCRIPT_GRACE_MS
+
+    def _spawn(self, coroutine: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        """Run ``coroutine`` in the background until it ends or the session does."""
+        task = asyncio.create_task(coroutine)
+        self._delegations.add(task)
+        task.add_done_callback(self._delegation_done)
+        return task
+
+    def _delegation_done(self, task: asyncio.Task[None]) -> None:
+        self._delegations.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error("handling a delegation failed", exc_info=error)
+
+    async def _delegate(
+        self,
+        call: DelegationRequested,
+        text: str,
+        speaker: str,
+        context: str | None = None,
+    ) -> None:
+        """Handle ``speaker``'s hand-off ``text``: a bare yes or no settles their pending question, or,
+        when it answers one of theirs that just ended or someone else's (``_whose_question``), is told
+        that the question is not waiting on it; a switch request (``ActiveProfiles.read_switch_request``,
+        its words resolved by meaning when they fit no name or alias) is carried out before any routing,
+        with its notice spoken, and any further request in it continues on the new profile; anything
+        else ends their question and is routed for its effort.
+
+        A routed status or cancel request is answered from the tracker. A request the router suggests
+        another profile for is held while the speaker is asked whether to switch (``_hold``); any
+        other runs at once on the speaker's active profile, when they may use it.
+
+        ``context`` is what the assistant said just before the request, or None; the router sees it
+        as the latest history line and Hermes gets it after the request.
+        """
+        if is_affirmative(text) or is_negative(text):
+            settled = await self._settle_question(speaker, accept=is_affirmative(text))
+            if settled is not None:
+                if settled[1] is not None:
+                    self._announce(settled[1])
+                return
+            if (owner := self._whose_question(speaker, context)) is not None:
+                logger.info("%s's %r is taken as an answer to %s's question; not run", speaker, text, owner)
+                self._announce(NO_QUESTION_PENDING if owner == speaker else question_was_for(owner))
+                return
+
+        switch = await self._active_profiles.read_switch_request(text)
+        if switch is not None:
+            outcome, notice = await self._switch(speaker, switch.target)
+            if notice is not None:
+                self._announce(notice)
+            self._end_question(speaker)
+            if switch.rest is None or outcome not in ("switched", "already_active"):
+                return
+            text = switch.rest
+        else:
+            self._end_question(speaker)
+
+        lines = [text for _, text in self._history]
+        history = (*lines, context) if context else tuple(lines)
+        permitted = functools.partial(self._may_use, speaker)
+        profile = self._active_profiles.get(speaker)
+        decision = await self._router.route(
+            text, speaker, active_profile=profile, permitted=permitted, history=history
+        )
+        if decision.control_intent == "cancel":
+            notice, question = await self._cancel(speaker, text)
+            self._announce(notice, question=question)
+            return
+        if decision.control_intent == "status":
+            self._announce(self._status(speaker, text))
+            return
+
+        request = _Request(call, speaker, text, context, decision.effort)
+        suggestion = decision.suggestion
+        # A request said with an explicit switch has its profile chosen already.
+        if switch is None and suggestion is not None and suggestion != profile and permitted(suggestion):
+            self._hold(request, suggestion)
+            return
+        if (task := await self._create_task(request, profile, decision.model)) is not None:
+            await self._run_task(task, _ref(task), _with_context(text, context))
+
+    def _hold(self, request: _Request, suggestion: str) -> None:
+        """Hold ``request`` while its speaker is asked whether to switch to ``suggestion``, until they
+        answer, they hand off something else, or ``QUESTION_TIMEOUT_S`` passes."""
+        question = _SwitchQuestion(request, suggestion)
+        self._pose(question)  # one held while this one was routed is older: it runs as is
+        logger.info("holding a request of %s while asking to switch to %s", request.speaker, suggestion)
+        self._announce(suggest_switch(suggestion), question=question)
+
+    def _pose(self, question: _Question) -> None:
+        """Make ``question`` its speaker's pending one, ending any earlier one unanswered
+        (``_end_question``); its timeout starts once it is spoken (``_start_question_timeout``)."""
+        self._end_question(question.speaker)
+        self._questions[question.speaker] = question
+
+    def _start_question_timeout(self, question: _Question) -> None:
+        """End ``question`` unanswered ``QUESTION_TIMEOUT_S`` from now, unless it is answered or ended
+        first; does nothing when it already was, or its timeout already runs."""
+        if self._questions.get(question.speaker) is not question or question.expiry is not None:
+            return
+
+        async def expire() -> None:
+            await self._sleep(QUESTION_TIMEOUT_S)
+            if self._questions.get(question.speaker) is question:
+                logger.info("%s did not answer their question; ending it", question.speaker)
+                self._end_question(question.speaker)
+
+        question.expiry = self._spawn(expire())
+
+    def _take_question(self, speaker: str) -> _Question | None:
+        """Remove and return ``speaker``'s pending question, stopping its timeout, and note when it
+        ended (``LATE_ANSWER_S``); None when they have none."""
+        question = self._questions.pop(speaker, None)
+        if question is not None:
+            self._ended_questions[speaker] = _EndedQuestion(
+                question.text, self._clock(), self._question_marks
+            )
+            if question.expiry is not None and question.expiry is not asyncio.current_task():
+                question.expiry.cancel()
+        return question
+
+    def _whose_question(self, speaker: str, context: str | None) -> str | None:
+        """The person whose question a bare yes or no from ``speaker``, with no question of their own
+        pending, is taken to answer, so that it is not run as a request; None when it answers none.
+
+        That is ``speaker`` themselves for their latest question when it ended lately, else another
+        person whose question is pending or ended lately (on Discord, one person may answer what was
+        asked of another). A question ended lately when it was answered or ended within
+        ``LATE_ANSWER_S`` and the assistant has asked nothing since: no question mark in its output
+        transcript after the question ended, as a result's or the model's own offer would put there
+        ("Want me to set an alert?"). Either way, ``context``, what the assistant said just before
+        the yes or no, must not be another question: it is None, asks nothing, or is part of the
+        question.
+        """
+
+        def may_answer(question: str) -> bool:
+            if context is None or not context.rstrip().endswith("?"):
+                return True
+            said, asked = " ".join(spoken_form(context)), " ".join(spoken_form(question))
+            return f" {said} " in f" {asked} " or f" {asked} " in f" {said} "
+
+        def ended_lately(ended: _EndedQuestion) -> bool:
+            return (
+                self._clock() - ended.ended_s < LATE_ANSWER_S
+                and ended.asked_before == self._question_marks
+                and may_answer(ended.text)
+            )
+
+        if (own := self._ended_questions.get(speaker)) is not None and ended_lately(own):
+            return speaker
+        pending = (person for person, question in self._questions.items() if may_answer(question.text))
+        ended = (person for person, question in self._ended_questions.items() if ended_lately(question))
+        return next((person for person in (*pending, *ended) if person != speaker), None)
+
+    async def _settle_question(self, speaker: str, *, accept: bool) -> tuple[str, str | None] | None:
+        """Settle ``speaker``'s pending question with their answer, and return a status and the notice
+        that answers it (None when there is nothing to say); None when no question of theirs waits.
+
+        A switch question: on ``accept``, switch to the suggestion (the outcome and notice as
+        ``_switch`` returns them), else ``"declined"``; either way the held request then runs on their
+        active profile in the background. A cancel question: on ``accept``, cancel the task (``"ok"``
+        and the cancel's notice), else ``"declined"`` and the task keeps running.
+        """
+        match self._take_question(speaker):
+            case None:
+                return None
+            case _SwitchQuestion() as question:
+                settled = await self._switch(speaker, question.suggestion) if accept else ("declined", None)
+                self._spawn(self._run_held(question))
+                return settled
+            case _CancelQuestion() as question:
+                if not accept:
+                    return "declined", None
+                notice, _ = await self._cancel(speaker, "", question.task_number)
+                return "ok", notice
+
+    def _end_question(self, speaker: str) -> None:
+        """End ``speaker``'s pending question, if any, unanswered: a held request runs on their active
+        profile in the background, unasked; a task they were asked about keeps running."""
+        if isinstance(question := self._take_question(speaker), _SwitchQuestion):
+            logger.info("%s's switch question ended unanswered; running the held request as is", speaker)
+            self._spawn(self._run_held(question))
+
+    async def _run_held(self, question: _SwitchQuestion) -> None:
+        """Run ``question``'s held request as a task (``_create_held_task``) and follow it to its end."""
+        request = question.request
+        if (task := await self._create_held_task(question)) is not None:
+            await self._run_task(task, _ref(task), _with_context(request.text, request.context))
+
+    async def _start_held(self) -> None:
+        """Start every held request as a task (``_create_held_task``) without following it, for a
+        session that is ending: the tasks are left unattended with the session's others. Other
+        questions are dropped."""
+        questions = [
+            question for speaker in list(self._questions) if (question := self._take_question(speaker))
+        ]
+        for question in questions:
+            if not isinstance(question, _SwitchQuestion):
+                continue
+            if (task := await self._create_held_task(question)) is not None:
+                logger.info("the session is ending; starting held task %d unattended", task.number)
+                request = question.request
+                await self._start_run(task, _ref(task), _with_context(request.text, request.context))
+
+    async def _create_held_task(self, question: _SwitchQuestion) -> Task | None:
+        """Track ``question``'s held request as a task on its speaker's active profile as it is now, at
+        the routed effort with that profile's model (``_create_task``)."""
+        request = question.request
+        profile = self._active_profiles.get(request.speaker)
+        return await self._create_task(request, profile, self._router.model_for(profile, request.effort))
+
+    async def _create_task(self, request: _Request, profile: str, model: ModelChoice | None) -> Task | None:
+        """Track ``request`` as a new task of this session's on ``profile`` with ``model``; None, with
+        a refusal spoken, when its speaker may not use ``profile``."""
+        if not self._may_use(request.speaker, profile):
+            logger.warning("refused a task for %s: not allowed to use profile %s", request.speaker, profile)
+            self._announce(refusal(profile))
+            return None
+        live = self._capabilities["delegation_style"] == "live"
+        task = await self._tracker.create(
+            person=request.speaker,
+            profile=profile,
+            effort=request.effort,
+            model=model,
+            text=request.text,
+            delegation_id=request.call.id if live else None,
+            call_id=None if live else request.call.id,
+        )
+        self._task_numbers.append(task.number)
+        return task
+
+    async def _run_task(self, task: Task, ref: DelegationRef, hermes_input: str) -> None:
+        """Start ``task`` on Hermes with ``hermes_input``, announce it, and follow it to its end."""
+        start = await self._start_run(task, ref, hermes_input)
+        if start is None:
+            return
+        ahead = self._tracker.ahead_of(task.number)
+        announcement = queued_behind(task, ahead) if ahead else task_started(task)
+        if self._capabilities["delegation_style"] == "tool":
+            self._announce(announcement)  # the call's receipt said only that it was received; this says what
+        else:
+            await self._report_progress(ref, announcement)
+        if start.run_id is None:
+            # Hermes queued it without an id: it cannot be followed, and the tracker expires it.
+            return
+        await self._follow(task, ref, start.run_id)
+
+    async def _start_run(self, task: Task, ref: DelegationRef, hermes_input: str) -> RunStart | None:
+        """Start ``task`` on Hermes with ``hermes_input`` and record that it is queued or running;
+        None when Hermes refused it, which ends the task as failed (announced for ``ref``)."""
+        try:
+            start = await self._hermes.start_run(
+                task.profile,
+                hermes_input,
+                f"duplex-{task.person}-{task.profile}",
+                task.model,
+                task.effort,
+                task.uuid,
+            )
+        except HermesApiError as error:
+            await self._end(task.number, _failure(task, error.reason), ref, away=False)
+            return None
+        await self._transition(task.number, "queued" if start.queued else "running", run_id=start.run_id)
+        return start
+
+    async def _follow_adopted(self, task: Task) -> None:
+        """Follow ``task``, adopted from an earlier conversation, to its end.
+
+        Reads the run's status first: a run that ended while its person was away is announced as news
+        (``finished_while_away`` and the like); one still going is followed as ``_follow`` does. When
+        the status cannot be read, the run may have ended meanwhile, so it is followed with its end
+        worded as news.
+        """
+        assert task.run_id is not None, "only tasks with a Hermes run are left unattended"
+        await self._notify_tasks()
+        ref = _ref(task)
+        try:
+            ended = await self._hermes.run_status(task.profile, task.run_id)
+        except HermesApiError:
+            await self._follow(task, ref, task.run_id, away=True)
+            return
+        if ended is None:
+            await self._follow(task, ref, task.run_id)
+        else:
+            await self._end(task.number, self._ending(task, ended), ref, away=True)
+
+    async def _follow(self, task: Task, ref: DelegationRef, run_id: str, *, away: bool = False) -> None:
+        """Follow ``task``'s Hermes run ``run_id`` to its end: its start, throttled progress, and how it
+        ended, each reported for ``ref``; ``away`` words the end as news (``_end``)."""
+        last_progress_s: float | None = None
+        try:
+            async for event in self._hermes.events(task.profile, run_id):
+                match event.kind:
+                    case "started":
+                        if self._state(task.number) == "queued":
+                            await self._transition(task.number, "running")
+                    case "progress" | "message" if event.text:
+                        now = self._clock()
+                        if last_progress_s is None or now - last_progress_s >= PROGRESS_INTERVAL_S:
+                            last_progress_s = now
+                            await self._report_progress(ref, event.text)
+                    case "completed" | "failed" | "cancelled" | "unknown":
+                        await self._end(task.number, self._ending(task, event), ref, away=away)
+                    case _:
+                        pass  # "queued" and empty progress add nothing to what was announced
+        except HermesApiError as error:
+            await self._end(task.number, _failure(task, error.reason), ref, away=away)
+
+    def _ending(self, task: Task, event: RunEvent) -> _Ending:
+        """How ``task`` ended, as the terminal ``event`` reports it: the prompter's result, or a
+        failure or cancel notice."""
+        match event.kind:
+            case "completed":
+                report = TaskReport(
+                    task.number, topic(task.text), task.profile, "completed", event.text or ""
+                )
+                result = self._provider.prompter.result(report, self._result_cap_tokens)
+                return _Ending("completed", result, finished_while_away(task, result))
+            case "cancelled":
+                return _Ending("cancelled", task_cancelled(task), cancelled_while_away(task))
+            case "failed":
+                return _failure(task, event.text or "Hermes reported an error")
+            case _:
+                return _Ending("unknown", task_failed(task, LOST_TRACK), failed_while_away(task, LOST_TRACK))
+
+    async def _end(self, number: int, ending: _Ending, ref: DelegationRef, *, away: bool) -> None:
+        """Move task ``number`` to ``ending``'s terminal state and announce it for ``ref``: its
+        ``away_notice`` when ``away`` (its person may have missed the end), else its ``notice``.
+
+        Does nothing when the task has ended already: a speaker's cancel ends it first and is
+        confirmed on its own, and the run's later events must not announce it again. A cancelled end
+        that arrives while a speaker's cancel waits for Hermes is recorded without a notice, since
+        that cancel confirms it.
+        """
+        if self._state(number) in TERMINAL_STATES:
+            return
+        if ending.state == "completed" and self._state(number) == "queued":
+            # Hermes may report the end of a queued run without a start; the tracker needs one.
+            await self._transition(number, "running")
+            if self._state(number) in TERMINAL_STATES:
+                return
+        await self._transition(number, ending.state)
+        if not (ending.state == "cancelled" and self._tracker.stopping(number)):
+            self._announce_end(number, ending.away_notice if away else ending.notice, ending.away_notice, ref)
+
+    def _status(self, speaker: str, words: str, task_id: int | None = None) -> str:
+        """The spoken status of the task of ``speaker``'s that ``task_id`` or ``words`` names
+        (``_resolve_task``), or of all their open tasks when they name none."""
+        active = self._tracker.active_for(speaker)
+        number = _resolve_task(active, words, task_id)
+        if number is None:
+            return task_summary(active)
+        task = self._tracker.get(number)
+        if task is None or task.person != speaker:
+            return NO_SUCH_TASK
+        return task_summary([task])
+
+    async def _cancel(
+        self, speaker: str, words: str, task_id: int | None = None
+    ) -> tuple[str, _CancelQuestion | None]:
+        """Cancel the open task of ``speaker``'s that ``task_id`` or ``words`` names (``_resolve_task``),
+        and return the notice that says how it went, with the question it puts to them, if any.
+
+        When they have no open task, nothing is cancelled. When they name no open task, nothing is
+        cancelled and they are asked: which of several, or whether to cancel the only one (their words
+        were about another topic), which becomes their pending question (``_pose``); its timeout
+        starts once the caller has it spoken. A named task that is not open is not found.
+        """
+        active = self._tracker.active_for(speaker)
+        if not active:
+            return NOTHING_TO_CANCEL, None
+        number = _resolve_task(active, words, task_id)
+        if number is None and len(active) == 1:
+            question = _CancelQuestion(speaker, active[0].number, only_one_running(active[0]))
+            self._pose(question)
+            return question.text, question
+        if number is None:
+            return which_to_cancel(active), None
+        try:
+            task = await self._tracker.cancel(speaker, self._hermes.stop, number)
+        except HermesApiError as error:
+            return cancel_failed(error.reason), None
+        if task is None:
+            return NO_SUCH_TASK, None
+        await self._notify_tasks()
+        return (task_cancelled(task) if task.state == "cancelled" else task_already_ended(task)), None
+
+    async def _switch(self, speaker: str, target: str | None) -> tuple[SwitchOutcome, str | None]:
+        """Switch ``speaker``'s active profile to ``target``, a profile name, or ``"ambiguous"`` or None
+        when their words named no single profile; return the outcome and the notice that answers it
+        (``notices.switch_reply``).
+
+        The notice is None for ``"switched"``: the store's notification confirms it (``switched_to``),
+        in this conversation and in every other one listening for the speaker. A target that names no
+        single profile is ``"unknown"``, answered by ``which_profile`` listing what they may use.
+        """
+        profile = None if target == "ambiguous" else target
+        outcome: SwitchOutcome = "unknown"
+        if profile is not None:
+            outcome = (await self._active_profiles.switch(speaker, profile)).outcome
+            logger.info("switch of %s to profile %s: %s", speaker, profile, outcome)
+        else:
+            logger.info("switch of %s named no single profile", speaker)
+        if outcome == "switched":
+            return outcome, None
+        return outcome, switch_reply(outcome, profile, self._active_profiles.permitted(speaker))
+
+    def _may_use(self, person: str, profile: str) -> bool:
+        """Whether ``person`` may run tasks on ``profile``."""
+        entry = self._permissions.by_name(person)
+        return entry is not None and self._permissions.allowed(entry, profile)
+
+    def _announce(
+        self,
+        text: str,
+        ref: DelegationRef | None = None,
+        *,
+        question: _Question | None = None,
+        away_notice: str | None = None,
+    ) -> _Announcement:
+        """Queue ``text`` for the model to speak: ``ref``'s result, or a notice when ``ref`` is None,
+        which puts ``question`` to its speaker when given; ``away_notice`` is what a later conversation
+        tells instead, for a task's end. Return what was queued.
+
+        Announcements are spoken in order by ``_pump_announcements``.
+        """
+        announcement = _Announcement(text, ref, question, away_notice)
+        self._announcements.put_nowait(announcement)
+        self._unsaid += 1
+        return announcement
+
+    def _announce_end(self, number: int, text: str, away_notice: str, ref: DelegationRef) -> None:
+        """Queue ``text``, how task ``number`` ended, for ``ref``; until it is spoken, the task is
+        untold, and ``away_notice`` is what a later conversation tells its person instead."""
+        self._untold[number] = away_notice
+        self._announce(text, ref, away_notice=away_notice)
+
+    async def _pump_announcements(self) -> None:
+        """Speak each queued announcement once the floor allows, one at a time, to the open provider
+        session.
+
+        A result goes to the delegation it answers when the open provider session requested it, and
+        is spoken as a notice otherwise. A notice that asks a question is said so that the model keeps
+        it for the answer, and the question's timeout starts once it was said. A failure to speak one
+        is logged, and the next one goes on.
+        """
+        while True:
+            announcement = await self._announcements.get()
+            try:
+                await self._wait_for_floor()
+                self._floor.response_requested()
+                question = announcement.question
+                try:
+                    if announcement.ref is not None and self._requested_here(announcement.ref):
+                        await self._provider.deliver_result(announcement.ref, announcement.text)
+                    else:
+                        await self._provider.say(announcement.text, expects_answer=question is not None)
+                    if announcement.ref is not None:
+                        self._untold.pop(announcement.ref.task_id, None)
+                    if self._all_said_heard():
+                        self._unheard.clear()
+                    self._unheard.append(announcement)
+                    self._said_s = time.monotonic()
+                except Exception:
+                    logger.exception("could not announce %r", announcement.text)
+                if question is not None:
+                    self._start_question_timeout(question)
+            finally:
+                self._unsaid -= 1
+                announcement.done.set()
+
+    async def _wait_for_floor(self) -> None:
+        """Wait until a provider session is open, its output not ignored (``_muted``), and, when the
+        provider emits speech events, the floor is free: the model idle, playback drained, and nobody
+        speaking.
+
+        Stops waiting for the floor after ``ANNOUNCEMENT_MAX_WAIT_S`` on ``clock``, which it reads only
+        while the floor is taken.
+        """
+        gated = self._capabilities["emits_speech_events"]
+        waiting_since_s: float | None = None
+        while True:
+            await self._wait_for_provider_ready()
+            if not gated or (self._floor.free and not self._output_pending()):
+                return
+            now_s = self._clock()
+            if waiting_since_s is None:
+                waiting_since_s = now_s
+            elif now_s - waiting_since_s >= ANNOUNCEMENT_MAX_WAIT_S:
+                logger.warning("the floor stayed taken for %g s; announcing anyway", ANNOUNCEMENT_MAX_WAIT_S)
+                return
+            await asyncio.sleep(FRAME_MS / 1000)
+
+    async def _report_progress(self, ref: DelegationRef, text: str) -> None:
+        """Report progress on ``ref``'s task to the open provider session, once it is not muted, tied
+        to the delegation only when that session requested it."""
+        await self._wait_for_provider_ready()
+        if not self._requested_here(ref):
+            ref = DelegationRef(delegation_id=None, call_id=None, task_id=ref.task_id)
+        await self._provider.report_progress(ref, text)
+
+    def _requested_here(self, ref: DelegationRef) -> bool:
+        """Whether the open provider session requested ``ref``'s delegation."""
+        return (ref.delegation_id or ref.call_id) in self._delegation_ids
+
+    async def _transition(self, number: int, state: TaskState, *, run_id: str | None = None) -> None:
+        await self._tracker.transition(number, state, run_id=run_id)
+        await self._notify_tasks()
+
+    def _state(self, number: int) -> TaskState:
+        task = self._tracker.get(number)
+        assert task is not None, f"task {number} is not tracked"
+        return task.state
+
+    async def _notify_tasks(self) -> None:
+        """Send this session's task list to the conversation's user interface, and bring the open tasks
+        in the instructions up to date where that needs no restart (``_same_instructions``). Only the
+        open tasks change: nothing else is read again, so a context file that changed meanwhile waits
+        for the next connect, switch, or change of who the instructions speak to."""
+        context = replace(self._prompt_context, open_tasks=self._open_tasks())
+        if context != self._prompt_context:
+            self._prompt_context = context
+            if self._capabilities["replaces_instructions"]:
+                # Quiet, should the update fail: a task change is never worth cutting anyone off.
+                self._spawn(self._apply_prompt_context(when_quiet=True))
+        tasks = [task for number in self._task_numbers if (task := self._tracker.get(number))]
+        await self._conversation.notify(
+            {
+                "tasks": [
+                    {"number": t.number, "profile": t.profile, "state": t.state, "text": t.text}
+                    for t in tasks
+                ]
+            }
+        )
+
+
+def _carries_owner_texts(context: PromptContext | None) -> bool:
+    """Whether instructions rendered from ``context`` carried what is only for the owner alone: their
+    ``USER.md`` or briefing."""
+    return context is not None and bool(context.hermes_user or context.hermes_briefing)
+
+
+def _with_context(text: str, context: str | None) -> str:
+    """The Hermes input for the request ``text``, followed by what the assistant said before it."""
+    if not context:
+        return text
+    return f'{text}\n\n(Context: just before this request, the voice assistant said: "{context}")'
+
+
+def _switch_output(outcome: str, notice: str | None) -> Mapping[str, Any]:
+    """The function output for a switch call: its ``outcome`` as ``status``, and ``notice`` to speak
+    as ``message`` when there is one."""
+    return {"status": outcome} if notice is None else {"status": outcome, "message": notice}
+
+
+def _ref(task: Task) -> DelegationRef:
+    """The reference to ``task``'s own delegation."""
+    return DelegationRef(delegation_id=task.delegation_id, call_id=task.call_id, task_id=task.number)
+
+
+def _failure(task: Task, reason: str) -> _Ending:
+    """``task`` failed; ``reason`` is a short spoken explanation."""
+    return _Ending("failed", task_failed(task, reason), failed_while_away(task, reason))
+
+
+def _tool_entry(task: Task) -> dict[str, Any]:
+    """``task`` as a ``task_status`` function output lists it: its internal ``id`` for later calls,
+    and the ``topic``, ``agent``, and ``state`` the model speaks from."""
+    return {"id": task.number, "topic": topic(task.text), "agent": task.profile, "state": task.state}
+
+
+def _resolve_task(active: Sequence[Task], words: str, task_id: int | None = None) -> int | None:
+    """The number of the task a status or cancel request means, or None when it cannot tell.
+
+    ``active`` are the speaker's queued and running tasks; ``words`` are what the request says about
+    the task (the user's request, or a tool call's ``about``), and ``task_id`` a tool call's id. In
+    order: ``task_id``; a "task N" in ``words`` (other numbers, as in "top 5 stocks", are not task
+    numbers); when ``words`` carry no topic words (``_topic_words``, as in "cancel that"), the only
+    task in ``active``; otherwise the one task in ``active`` whose request shares more topic words with
+    ``words`` than any other does, so words about another topic name none, even of one open task. The
+    first two may name a task that is not active.
+    """
+    if task_id is not None:
+        return task_id
+    if named := _NAMED_TASK.search(words):
+        return int(named.group(1))
+    wanted = _topic_words(words)
+    if not wanted:
+        return active[0].number if len(active) == 1 else None
+    scores = sorted(((len(wanted & _topic_words(task.text)), task.number) for task in active), reverse=True)
+    runner_up = scores[1][0] if len(scores) > 1 else 0
+    if scores and scores[0][0] > runner_up:
+        return scores[0][1]  # a clear winner: more shared words than any other task
+    return None
+
+
+def _topic_words(text: str) -> set[str]:
+    """The words of ``text`` that can tell one task's topic from another's: lowercased, without
+    ``_FILLER_WORDS``, and with a plural "s" dropped ("stocks", but not "news"); "Tesla's" is "tesla"
+    and a filler "s"."""
+    words = (word for word in _WORD.findall(text.lower()) if word not in _FILLER_WORDS)
+    return {
+        word.removesuffix("s") if len(word) > 3 and word not in _NOT_PLURALS else word for word in words
+    } - _FILLER_WORDS

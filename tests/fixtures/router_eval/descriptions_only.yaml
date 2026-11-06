@@ -1,0 +1,69 @@
+# Labelled router phrases for profiles configured with only a description, no examples.
+#
+# The same format as phrases.yaml (see its header and hermes_duplex/router/eval.py). Here the router
+# has little to go on for each profile, while `_control` keeps its built-in phrases, so a task can
+# look closer to a status or cancel phrase than to any profile. The router must still run tasks and
+# keep `_control` for clear status and cancel requests. Tasks come first, some in the words a voice
+# model uses when it hands a request off; then status and cancel requests.
+
+profiles:
+  general:
+    description: General questions, weather, reminders, and anything else
+  stock-picker:
+    description: Portfolio, holdings, stock research, and trades
+
+phrases:
+  # general: what people say, and what a voice model hands off.
+  - {text: what's the weather tomorrow, profile: general, active: general, effort: low}
+  - {text: remind me to call mom, profile: general, active: general, effort: low}
+  - {text: set a timer for ten minutes, profile: general, active: general, effort: low}
+  - {text: explain how vaccines work, profile: general, active: general, effort: medium}
+  - {text: how do I fix a leaky faucet, profile: general, active: general, effort: medium}
+  - {text: help me write an email to my landlord, profile: general, active: general, effort: medium}
+  - {text: what's on my calendar today, profile: general, active: stock-picker, effort: low}
+  - {text: tell me a joke, profile: general, active: general, effort: low}
+  - {text: who won the game last night, profile: general, active: general, effort: low}
+  - {text: plan a weekend trip to Lisbon, profile: general, active: general, effort: high}
+  - {text: what time is it in Tokyo, profile: general, active: general, effort: low}
+  - {text: summarize today's news, profile: general, active: general, effort: medium}
+  - {text: Check tomorrow's weather forecast for the user, profile: general, active: general, effort: low}
+  - {text: Set a reminder to call mom at six pm, profile: general, active: general, effort: low}
+  - {text: Find out how long to boil an egg, profile: general, active: general, effort: low}
+  - {text: Look up what's playing at the cinema tonight, profile: general, active: general, effort: low}
+  - {text: Draft a short birthday message for my sister, profile: general, active: general, effort: medium}
+  - {text: and on Saturday, profile: general, active: general, effort: low, follows: what's the weather tomorrow}
+  # stock-picker
+  - {text: how is my portfolio doing, profile: stock-picker, active: stock-picker, effort: medium}
+  - {text: how is tessla doing today, profile: stock-picker, active: stock-picker, effort: low}
+  - {text: what's Nvidia trading at, profile: stock-picker, active: stock-picker, effort: low}
+  - {text: should I sell my Apple shares, profile: stock-picker, active: stock-picker, effort: high}
+  - {text: which of my holdings is down the most, profile: stock-picker, active: general, effort: medium}
+  - {text: Check how the user's stocks did today, profile: stock-picker, active: stock-picker, effort: low}
+  - {text: Research Amazon's last quarterly results, profile: stock-picker, active: stock-picker, effort: high}
+  - {text: why is that, profile: stock-picker, active: stock-picker, effort: medium, follows: how is my portfolio doing}
+
+  # _control: status.
+  - {text: what are you working on, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: what are you working on right now, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: any updates, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: hows that task going, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: what's the status of my task, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: are you still working on that, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  - {text: is it done yet, profile: _control, active: general, effort: medium, control_intent: status}
+  - {text: give me an update, profile: _control, active: stock-picker, effort: medium, control_intent: status}
+  # _control: cancel.
+  - {text: cancel that, profile: _control, active: general, effort: medium, control_intent: cancel}
+  - {text: cancel it, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  - {text: stop the task, profile: _control, active: general, effort: medium, control_intent: cancel}
+  - {text: never mind cancel the task, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  - {text: stop working on that, profile: _control, active: general, effort: medium, control_intent: cancel}
+  - {text: forget about it, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
+  # _switch: requests to switch profiles in words beyond a profile's name, and tasks that say "go to"
+  # or "use" and must stay tasks.
+  - {text: go to the stock trader profile, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: use my portfolio agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: take me to the general assistant, profile: _switch, active: stock-picker, effort: medium, target: general}
+  - {text: switch agents, profile: _switch, active: general, effort: medium}
+  - {text: remind me to go to the gym tomorrow, profile: general, active: general, effort: low}
+  - {text: should I use a stop loss on my Tesla shares, profile: stock-picker, active: stock-picker, effort: medium}
+  - {text: can I talk to you about dinner plans, profile: general, active: general, effort: medium}

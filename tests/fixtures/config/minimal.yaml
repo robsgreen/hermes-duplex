@@ -1,0 +1,10 @@
+# Only the required keys; everything else takes its default.
+hermes:
+  api_base: http://127.0.0.1:8642
+provider:
+  name: fake
+  script: scripts/demo.jsonl
+router:
+  backend: knn
+profiles:
+  general: {}

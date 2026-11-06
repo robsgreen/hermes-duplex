@@ -1,0 +1,2875 @@
+"""VoiceSession: delegation → credit → route → permission → dispatch → announce, with the fake provider."""
+
+import asyncio
+import json
+import logging
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+from hermes_duplex import service
+from hermes_duplex import session as session_module
+from hermes_duplex.audio.frames import silent_frame
+from hermes_duplex.config import Config, load_config
+from hermes_duplex.dispatch.hermes_api import HermesApiClient, RunEvent
+from hermes_duplex.hermes_context import HermesContextFiles
+from hermes_duplex.people import PermissionChecker
+from hermes_duplex.profiles import ActiveProfiles
+from hermes_duplex.prompts.base import PromptContext, TaskReport, VoicePrompter
+from hermes_duplex.prompts.notices import (
+    NO_QUESTION_PENDING,
+    NO_SUCH_TASK,
+    NOT_HEARD,
+    NOTHING_TO_CANCEL,
+    WHO_IS_ASKING,
+    only_one_running,
+    switched_to,
+    switching_to,
+    task_summary,
+    which_to_cancel,
+)
+from hermes_duplex.providers.base import (
+    DELEGATE_TOOL,
+    Closed,
+    DelegationRequested,
+    InputTranscript,
+    ModelChoice,
+    OutputAudio,
+    OutputDone,
+    OutputTranscript,
+    ProviderEvent,
+)
+from hermes_duplex.providers.fake.adapter import DEFAULT_CAPABILITIES, FakeProvider, SentCall
+from hermes_duplex.providers.gpt_live.adapter import CAPABILITIES as GPT_LIVE_CAPABILITIES
+from hermes_duplex.providers.gpt_live.prompt import frame_result
+from hermes_duplex.router.base import ControlIntent, Effort, RouteDecision
+from hermes_duplex.router.composite import CompositeRouter
+from hermes_duplex.router.knn import KnnBackend
+from hermes_duplex.session import Router, VoiceSession, _resolve_task, _topic_words
+from hermes_duplex.tasks import Task, TaskTracker
+from hermes_duplex.transports.base import InputFrame
+from tests.fakes.fake_embedder import fake_embed
+from tests.fakes.fake_hermes_api import FakeHermesApi, RunScript, admission_queued
+
+RATE = 24000
+KEYS = {"general": "general-key-0123456789", "stock-picker": "stocks-key-0123456789"}
+STOCKS_MODEL = ModelChoice(provider="openai", model="gpt-x")
+
+STARTED_1 = 'Started "how is my portfolio doing" on the stock-picker agent.'
+
+QUEUED_TESLA = 'Queued "and what about Tesla" behind "how is my portfolio doing".'
+STARTED_WEATHER = 'Started "what\'s the weather" on the general agent.'
+CANCELLED_1 = 'Cancelled "how is my portfolio doing".'
+AWAY_1 = 'While you were away, "how is my portfolio doing" finished: '
+
+# A run that starts and never ends on its own, so it stays open for status, cancel, and queueing.
+OPEN_RUN = RunScript(events=[{"event": "run.started"}])
+
+
+class _MemoryConversation:
+    """A ``Conversation`` that yields scripted frames, then waits until it is closed."""
+
+    id = "memory-1"
+    person: str | None = None
+
+    def __init__(self, frames: Sequence[InputFrame]) -> None:
+        self._frames = frames
+        self._closed = asyncio.Event()
+        self._fed: asyncio.Queue[InputFrame | None] = asyncio.Queue()
+        self.played: list[bytes] = []
+        self.notified: list[dict[str, Any]] = []
+        self.closed_reason: str | None = None
+        self.departed: set[str] = set()
+        """People who have left; everyone else counts as present."""
+        self.company: set[str] = set()
+        """People present besides whoever ``alone`` asks about; empty means each present person is alone."""
+
+    async def frames(self) -> AsyncIterator[InputFrame]:
+        for frame in self._frames:
+            yield frame
+        while (frame := await self._fed.get()) is not None:
+            yield frame
+
+    def feed(self, frames: Iterable[InputFrame]) -> None:
+        """Have ``frames`` follow the scripted ones and any fed before, as a person speaking again."""
+        for frame in frames:
+            self._fed.put_nowait(frame)
+
+    async def play(self, pcm16_mono: bytes, rate: int) -> None:
+        assert rate == RATE
+        self.played.append(pcm16_mono)
+
+    def present(self, person: str) -> bool:
+        return person not in self.departed
+
+    def alone(self, person: str) -> bool:
+        return self.present(person) and not self.company - {person}
+
+    async def flush_playback(self) -> None:
+        pass
+
+    async def notify(self, event: dict[str, Any]) -> None:
+        self.notified.append(event)
+
+    async def close(self, reason: str) -> None:
+        self.closed_reason = reason
+        self._closed.set()
+        self._fed.put_nowait(None)
+
+
+def _frames(duration_ms: int, voiced: Callable[[int], Iterable[str]] = lambda t_ms: ()) -> list[InputFrame]:
+    """20 ms silent frames covering ``duration_ms``; ``voiced(t_ms)`` names who spoke in each."""
+    return [
+        InputFrame(silent_frame(RATE), RATE, frozenset(voiced(t_ms)), t_ms)
+        for t_ms in range(0, duration_ms, 20)
+    ]
+
+
+def _voiced(person: str) -> Callable[[int], Iterable[str]]:
+    return lambda t_ms: (person,)
+
+
+def _delegation(at_input_ms: int, call_id: str, task: str) -> dict[str, Any]:
+    return {
+        "at_input_ms": at_input_ms,
+        "event": {"type": "delegation", "id": call_id, "tool_args": {"task": task}},
+    }
+
+
+def _decision(*, deep: bool = False, control_intent: ControlIntent | None = None) -> RouteDecision:
+    """A knn decision: high effort on ``STOCKS_MODEL`` when ``deep``, else medium effort on the profile's
+    default model."""
+    return RouteDecision(
+        effort="high" if deep else "medium",
+        model=STOCKS_MODEL if deep else None,
+        suggestion=None,
+        control_intent=control_intent,
+        probabilities={},
+        source="knn",
+        latency_ms=1,
+    )
+
+
+class _StubRouter:
+    """Routes each task text to a fixed decision and records what it was asked.
+
+    ``after_route`` maps a task text to what to do once it is routed, such as switching a person to
+    another profile before their next request.
+    """
+
+    def __init__(self, decisions: Mapping[str, RouteDecision]) -> None:
+        self._decisions = decisions
+        self.requests: list[tuple[str, str, tuple[str, ...], str]] = []
+        """Per request: text, speaker, history, and the speaker's active profile."""
+        self.permitted: list[dict[str, bool]] = []
+        """Per request, whether the speaker may use each profile, as the session told the router."""
+        self.after_route: dict[str, Callable[[], Awaitable[object]]] = {}
+
+    def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
+        return None
+
+    async def route(
+        self,
+        text: str,
+        speaker: str,
+        *,
+        active_profile: str,
+        permitted: Callable[[str], bool] | None = None,
+        history: Sequence[str] = (),
+    ) -> RouteDecision:
+        self.requests.append((text, speaker, tuple(history), active_profile))
+        if permitted is not None:
+            self.permitted.append({profile: permitted(profile) for profile in ("general", "stock-picker")})
+        if (after := self.after_route.get(text)) is not None:
+            await after()
+        return self._decisions[text]
+
+
+ROUTES = {
+    "how is my portfolio doing": _decision(deep=True),
+    "and what about Tesla": _decision(deep=True),
+    "what's the weather": _decision(),
+    "what are you working on": _decision(control_intent="status"),
+    "cancel that": _decision(control_intent="cancel"),
+    "cancel task 1": _decision(control_intent="cancel"),
+    "cancel the portfolio one": _decision(control_intent="cancel"),
+    "cancel the latest one": _decision(control_intent="cancel"),
+    "cancel the Tesla question": _decision(control_intent="cancel"),
+    "how's the Tesla thing": _decision(control_intent="status"),
+}
+
+
+class _Harness:
+    """A session wired to the fake provider, a stub router, and the fake Hermes API.
+
+    Rob starts on stock-picker (his ``default_profile``), Alex on general, the only profile he may use.
+    """
+
+    def __init__(
+        self, tmp_path: Path, api: FakeHermesApi, *, api_base: str | None = None, router: Router | None = None
+    ) -> None:
+        self.tmp_path = tmp_path
+        self.api = api
+        self.api_base = api_base or api.api_base
+        self.stub = _StubRouter(ROUTES)
+        self.router = router or self.stub
+        self.tracker = TaskTracker(tmp_path / "home")
+        config = _config(tmp_path)
+        self.config = config
+        self.permissions = PermissionChecker(config)
+        self.active_profiles = _active_profiles(tmp_path, config)
+        self.provider: FakeProvider | None = None
+        self.conversation: _MemoryConversation | None = None
+        self._hermes: HermesApiClient | None = None
+        self.session: VoiceSession | None = None
+        self._run: asyncio.Task[None] | None = None
+
+    def start(
+        self,
+        script: Iterable[Mapping[str, Any]],
+        frames: Sequence[InputFrame],
+        *,
+        capabilities: Mapping[str, object] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        prompter: VoicePrompter | None = None,
+        provider: FakeProvider | None = None,
+        person: str | None = None,
+        conversation: _MemoryConversation | None = None,
+        prompt_context_for: Callable[[str, str | None, bool], PromptContext] | None = None,
+    ) -> None:
+        """Run a session on ``provider``, or else a fake provider playing ``script`` with
+        ``capabilities`` and ``prompter``, in ``conversation``, or else one yielding ``frames``;
+        ``person`` is who is signed in to the conversation. ``prompt_context_for`` defaults to the
+        service's, for the profile alone."""
+        self.provider = provider or FakeProvider(script, capabilities=capabilities, prompter=prompter)
+        self.conversation = conversation or _MemoryConversation(frames)
+        self.conversation.person = person
+        self._hermes = HermesApiClient(self.api_base, KEYS.get, sleep=lambda _s: asyncio.sleep(0.01))
+        session = VoiceSession(
+            self.conversation,
+            self.provider,
+            router=self.router,
+            hermes=self._hermes,
+            tracker=self.tracker,
+            permissions=self.permissions,
+            active_profiles=self.active_profiles,
+            prompt_context_for=prompt_context_for
+            or (lambda profile, *_: service.prompt_context(self.config, profile)),
+            default_profile=self.config.router.default_profile,
+            clock=clock,
+        )
+        self.session = session
+        self._run = asyncio.create_task(session.run())
+
+    async def stop(self) -> None:
+        if self.conversation is not None and self._run is not None:
+            await self.conversation.close("test over")
+            await asyncio.wait_for(self._run, timeout=5)
+        if self._hermes is not None:
+            await self._hermes.close()
+        await self.tracker.close()
+
+    def sent(self, method: str) -> list[SentCall]:
+        assert self.provider is not None
+        return [call for call in self.provider.calls if call.method == method]
+
+    def texts(self, method: str) -> list[str]:
+        return [call.args["text"] for call in self.sent(method)]
+
+    async def wait_for(self, condition: Callable[[], bool], timeout_s: float = 5.0) -> None:
+        async with asyncio.timeout(timeout_s):
+            while not condition():
+                if self._run is not None and self._run.done():
+                    self._run.result()
+                    raise AssertionError("the session ended before the condition held")
+                await asyncio.sleep(0.01)
+
+
+def _active_profiles(tmp_path: Path, config: Config) -> ActiveProfiles:
+    return ActiveProfiles(
+        tmp_path / "home" / "duplex" / "active_profiles.json", PermissionChecker(config), config
+    )
+
+
+def _config(
+    tmp_path: Path, alex_profiles: Sequence[str] = ("general",), more_profiles: Sequence[str] = ()
+) -> Config:
+    """Rob may use every profile and starts on stock-picker; Alex may use ``alex_profiles``.
+    ``more_profiles`` are further profiles, each described only by its name."""
+    raw: dict[str, Any] = {
+        "hermes": {"api_base": "http://127.0.0.1:8642"},
+        "provider": {"name": "fake"},
+        "router": {"backend": "knn"},
+        "profiles": {
+            "general": {"description": "Anything else", "examples": ["what's the weather", "set a reminder"]},
+            "stock-picker": {
+                "description": "Portfolio, holdings, stock research, trades",
+                "examples": ["how's my portfolio", "should I buy NVDA"],
+                "voice_context": "Say tickers letter by letter.",
+            },
+        },
+        "people": {
+            "rob": {"discord_id": "123", "profiles": ["*"], "default_profile": "stock-picker"},
+            "alex": {"discord_id": "456", "profiles": list(alex_profiles)},
+        },
+    }
+    for name in more_profiles:
+        raw["profiles"][name] = {"description": name}
+    path = tmp_path / "duplex.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return load_config(path, env={})
+
+
+@pytest.fixture
+async def api() -> AsyncIterator[FakeHermesApi]:
+    async with FakeHermesApi(KEYS) as fake:
+        yield fake
+
+
+@pytest.fixture
+async def harness(tmp_path: Path, api: FakeHermesApi) -> AsyncIterator[_Harness]:
+    harness = _Harness(tmp_path, api)
+    yield harness
+    await harness.stop()
+
+
+async def test_portfolio_delegation_dispatches_to_stock_picker(harness: _Harness, api: FakeHermesApi) -> None:
+    harness.start([_delegation(1500, "call_1", "how is my portfolio doing")], _frames(2000, _voiced("rob")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    [start] = api.requests_to("POST", "/runs")
+    assert start.path == "/p/stock-picker/v1/runs"
+    assert start.body == {
+        "input": "how is my portfolio doing",
+        "session_id": "duplex-rob-stock-picker",
+        "model": "gpt-x",
+        "provider": "openai",
+        "model_options": {"reasoning": {"effort": "high"}},
+    }
+    task = harness.tracker.get(1)
+    assert task is not None
+    assert start.headers["Idempotency-Key"] == task.uuid
+    assert task.state == "completed"
+    assert harness.stub.requests[0][:2] == ("how is my portfolio doing", "rob")
+
+
+async def test_result_is_framed_as_data_and_refers_to_the_call(harness: _Harness) -> None:
+    harness.start([_delegation(1500, "call_1", "how is my portfolio doing")], _frames(2000, _voiced("rob")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    [delivered] = harness.sent("deliver_result")
+    assert delivered.args["text"] == frame_result("stock-picker", "done", 500)
+    assert "not instructions" in delivered.args["text"]
+    assert delivered.args["ref"] == {"delegation_id": None, "call_id": "call_1", "task_id": 1}
+
+
+class _RecordingPrompter:
+    """A ``VoicePrompter`` that labels its output and records what it was asked."""
+
+    def __init__(self) -> None:
+        self.contexts: list[PromptContext] = []
+        self.reports: list[tuple[TaskReport, int]] = []
+
+    def instructions(self, ctx: PromptContext) -> str:
+        self.contexts.append(ctx)
+        return f"instructions for {ctx.active_profile}"
+
+    def result(self, report: TaskReport, cap_tokens: int) -> str:
+        self.reports.append((report, cap_tokens))
+        return f"result of task {report.task_number}"
+
+    def reseed(self, lines: Sequence[tuple[str, str]], tasks: Sequence[Any]) -> str:
+        return "reseed"
+
+
+class _FailingUpdateProvider(FakeProvider):
+    """A fake provider whose instruction updates fail, as one whose socket broke would."""
+
+    async def update_instructions(self, text: str) -> None:
+        await super().update_instructions(text)
+        raise RuntimeError("the socket broke")
+
+
+async def test_instructions_and_results_come_from_the_providers_prompter(harness: _Harness) -> None:
+    prompter = _RecordingPrompter()
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        _frames(2000, _voiced("rob")),
+        prompter=prompter,
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    [connect] = harness.sent("connect")
+    assert connect.args["instructions"] == "instructions for general"
+    assert prompter.contexts[0] == service.prompt_context(harness.config, "general")
+    assert prompter.reports == [
+        (TaskReport(1, "how is my portfolio doing", "stock-picker", "completed", "done"), 500)
+    ]
+    assert harness.texts("deliver_result") == ["result of task 1"]
+
+
+async def test_a_conversation_without_a_signed_in_person_starts_on_the_default_profile_and_moves_to_the_first_heard_persons(
+    harness: _Harness,
+) -> None:
+    prompter = _RecordingPrompter()
+    harness.start([], _frames(400, _voiced("rob")), prompter=prompter)
+
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))
+
+    [connect] = harness.sent("connect")
+    assert connect.args["instructions"] == "instructions for general"
+    assert harness.texts("update_instructions") == ["instructions for stock-picker"]
+    stock_picker = service.prompt_context(harness.config, "stock-picker")
+    # Comparing contexts renders them too, so each distinct context is counted once.
+    assert list(dict.fromkeys(prompter.contexts)) == [
+        service.prompt_context(harness.config, "general"),
+        stock_picker,
+    ]
+    assert (stock_picker.active_profile_description, stock_picker.voice_context) == (
+        "Portfolio, holdings, stock research, trades",
+        "Say tickers letter by letter.",
+    )
+    assert len(harness.sent("connect")) == 1
+
+
+async def test_a_signed_in_conversation_starts_on_that_persons_active_profile(harness: _Harness) -> None:
+    await harness.active_profiles.switch("rob", "general")
+    prompter = _RecordingPrompter()
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        _frames(2000, _voiced("rob")),
+        prompter=prompter,
+        person="rob",
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    [connect] = harness.sent("connect")
+    assert connect.args["instructions"] == "instructions for general"
+    assert harness.sent("update_instructions") == []  # hearing rob changes nothing
+
+
+async def test_hearing_someone_on_the_profile_already_spoken_for_changes_nothing(harness: _Harness) -> None:
+    harness.start([_delegation(1500, "call_1", "what's the weather")], _frames(2000, _voiced("alex")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    assert harness.sent("update_instructions") == []
+    assert len(harness.sent("connect")) == 1
+
+
+async def test_without_instruction_replacement_a_context_change_restarts_the_provider_with_the_summary(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)
+    harness.start(
+        [],
+        _frames(400, _voiced("rob")),
+        capabilities={"replaces_instructions": False},
+        prompter=_RecordingPrompter(),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    assert harness.provider is not None
+    assert [call.method for call in harness.provider.calls] == ["connect", "close", "connect"]
+    first, second = harness.sent("connect")
+    assert (first.args["instructions"], first.args["history_summary"]) == ("instructions for general", None)
+    assert (second.args["instructions"], second.args["history_summary"]) == (
+        "instructions for stock-picker",
+        "reseed",
+    )
+    assert harness.conversation is not None and harness.conversation.closed_reason is None
+
+
+class _PacedConversation(_MemoryConversation):
+    """A ``_MemoryConversation`` that yields one frame every 20 ms, as a transport does."""
+
+    async def frames(self) -> AsyncIterator[InputFrame]:
+        for frame in self._frames:
+            yield frame
+            await asyncio.sleep(0.02)
+        await self._closed.wait()
+
+
+class _AudioCountingProvider(FakeProvider):
+    """A fake provider that counts the input frames each of its provider sessions received."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__([], **kwargs)
+        self.frames_per_session: list[int] = []
+
+    async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
+        await super().connect(instructions, voice, history_summary)
+        self.frames_per_session.append(0)
+
+    async def send_audio(self, pcm16: bytes) -> None:
+        await super().send_audio(pcm16)
+        self.frames_per_session[-1] += 1
+
+
+async def test_a_restart_for_a_person_first_heard_waits_until_they_stop_speaking(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.3)
+    provider = _AudioCountingProvider(
+        capabilities={
+            "replaces_instructions": False,
+            "emits_speech_events": False,
+            "delegation_style": "live",
+        },
+        prompter=_RecordingPrompter(),
+    )
+    voiced = 50  # one second of Rob speaking, whose profile differs from the one the call started on
+    harness.start(
+        [], [], provider=provider, conversation=_PacedConversation(_frames(voiced * 20, _voiced("rob")))
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=10)
+
+    assert provider.frames_per_session[0] == voiced, "the whole utterance reached one provider session"
+    first, second = harness.sent("connect")
+    assert (first.args["instructions"], second.args["instructions"]) == (
+        "instructions for general",
+        "instructions for stock-picker",
+    )
+
+
+async def test_a_failed_instruction_update_falls_back_to_a_restart(
+    harness: _Harness, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)
+    provider = _FailingUpdateProvider(prompter=_RecordingPrompter())
+    harness.start([], _frames(400, _voiced("rob")), provider=provider)
+
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    assert [call.method for call in provider.calls] == ["connect", "update_instructions", "close", "connect"]
+    assert harness.sent("connect")[1].args["instructions"] == "instructions for stock-picker"
+    assert "could not update the voice instructions" in caplog.text
+
+
+# --- Explicit switches on a provider that cannot replace its instructions ---------------------------
+
+
+class _ClosingProvider(FakeProvider):
+    """A fake provider that notes, at each ``close``, how much audio ``conversation`` had played."""
+
+    def __init__(self, conversation: _MemoryConversation, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._conversation = conversation
+        self.played_ms_at_close: list[float] = []
+
+    async def close(self) -> None:
+        self.played_ms_at_close.append(_played_ms(self._conversation))
+        await super().close()
+
+
+def _replying(ms: int) -> dict[str, Any]:
+    """A script step: the model's reply, ``ms`` of output audio, as soon as the session connects."""
+    return {"after_ms": 0, "event": {"type": "output_audio", "ms": ms}}
+
+
+def _says_the_line(ms: int = 200) -> dict[str, Any]:
+    """A script step: the model speaks what it was asked to ``say``, ``ms`` of output audio."""
+    return {"on_sent": "say", "event": {"type": "output_audio", "ms": ms}}
+
+
+async def test_an_explicit_switch_on_gpt_live_waits_for_the_reply_then_says_so_and_restarts_once(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
+    conversation = _PacedConversation(_frames(200, _voiced("rob")) + _frames(1000))
+    provider = _ClosingProvider(
+        conversation,
+        [_replying(600), _says_the_line()],
+        capabilities=GPT_LIVE_CAPABILITIES,
+        prompter=_RecordingPrompter(),
+    )
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    await harness.active_profiles.switch("rob", "general")
+
+    assert harness.active_profiles.get("rob") == "general", "requests use the new profile at once"
+    assert harness.sent("close") == [], "the reply under way is not cut off"
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await asyncio.sleep(0.3)
+
+    assert [call.method for call in provider.calls] == ["connect", "say", "close", "connect"]
+    assert harness.texts("say") == [switching_to("general")], "the line is the only confirmation"
+    assert provider.played_ms_at_close[0] >= 800, "the reply and the line were heard before the close"
+    assert harness.sent("connect")[1].args["instructions"] == "instructions for general"
+
+
+async def test_switches_made_while_a_gpt_live_restart_waits_restart_once_for_the_latest(
+    tmp_path: Path, harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
+    harness.config = _config(tmp_path, more_profiles=("news",))
+    harness.permissions = PermissionChecker(harness.config)
+    harness.active_profiles = _active_profiles(tmp_path, harness.config)
+    conversation = _PacedConversation(_frames(1500))
+    harness.start(
+        [_replying(600), _says_the_line()],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities=GPT_LIVE_CAPABILITIES,
+        prompter=_RecordingPrompter(),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    await harness.active_profiles.switch("rob", "general")
+    await harness.active_profiles.switch("rob", "news")
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await asyncio.sleep(0.3)
+
+    assert harness.texts("say") == [switching_to("news")]
+    assert len(harness.sent("close")) == 1
+    assert harness.sent("connect")[1].args["instructions"] == "instructions for news"
+
+
+async def test_switching_back_while_a_gpt_live_restart_waits_cancels_it(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    conversation = _PacedConversation(_frames(1500))
+    harness.start(
+        [_replying(600)],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities=GPT_LIVE_CAPABILITIES,
+        prompter=_RecordingPrompter(),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    await harness.active_profiles.switch("rob", "general")
+    await harness.active_profiles.switch("rob", "stock-picker")
+    await harness.wait_for(lambda: bool(harness.texts("say")))
+    await asyncio.sleep(0.3)
+
+    assert harness.texts("say") == [switched_to("stock-picker")], "confirmed without a restart"
+    assert len(harness.sent("connect")) == 1 and harness.sent("close") == []
+
+
+async def test_a_request_made_before_a_gpt_live_switch_restart_runs_on_the_new_profile(
+    harness: _Harness, api: FakeHermesApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)  # the restart waits throughout
+    conversation = _MemoryConversation(_frames(100, _voiced("rob")))
+    delegation = _delegation(300, "call_1", "what's the weather")
+    delegation["event"]["target"] = "delegate"  # worded by the call, so no transcript is needed
+    harness.start(
+        [delegation],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities=GPT_LIVE_CAPABILITIES,
+        prompter=_RecordingPrompter(),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+
+    await harness.active_profiles.switch("rob", "general")
+    conversation.feed(_frames(400, _voiced("rob")))
+    await harness.wait_for(lambda: bool(api.requests_to("POST", "/runs")))
+
+    [start] = api.requests_to("POST", "/runs")
+    assert start.path == "/p/general/v1/runs"
+    assert len(harness.sent("connect")) == 1, "the old instructions stay until the restart"
+    assert harness.texts("say") == []
+
+
+async def test_someone_joining_while_a_gpt_live_switch_restart_waits_restarts_at_once(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)  # a quiet restart would never come
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities=GPT_LIVE_CAPABILITIES,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    await harness.active_profiles.switch("rob", "general")
+    rob_owner_on_stocks = harness.sent("connect")[0].args["instructions"]
+    assert OWNER_FACTS in rob_owner_on_stocks
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100, _voiced("rob")))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=2)
+
+    assert OWNER_FACTS not in harness.sent("connect")[1].args["instructions"]
+    assert switching_to("general") not in harness.texts("say"), "nothing is said to the muted session"
+
+
+class _TalkingConversation(_PacedConversation):
+    """Paced frames until closed; rob is voiced for the first 200 ms and whenever ``speak_for`` says.
+    ``voiced_now`` is whether the latest frame had him voiced."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.voiced_until_s = time.monotonic() + 0.2
+        self.voiced_now = False
+
+    def speak_for(self, seconds: float, after_s: float = 0.0) -> None:
+        asyncio.get_running_loop().call_later(
+            after_s, lambda: setattr(self, "voiced_until_s", time.monotonic() + seconds)
+        )
+
+    async def frames(self) -> AsyncIterator[InputFrame]:
+        t_ms = 0
+        while self.closed_reason is None:
+            self.voiced_now = time.monotonic() < self.voiced_until_s
+            yield InputFrame(silent_frame(RATE), RATE, frozenset({"rob"} if self.voiced_now else ()), t_ms)
+            t_ms += 20
+            await asyncio.sleep(0.02)
+
+
+class _InterruptedProvider(_ClosingProvider):
+    """A ``_ClosingProvider`` whose ``say`` makes rob start speaking ``speak_after_s`` later (None: never),
+    noting at each ``close`` whether rob was speaking."""
+
+    def __init__(
+        self, conversation: _TalkingConversation, script: list[dict[str, Any]], speak_after_s: float | None
+    ):
+        super().__init__(
+            conversation, script, capabilities=GPT_LIVE_CAPABILITIES, prompter=_RecordingPrompter()
+        )
+        self._talking = conversation
+        self._speak_after_s = speak_after_s
+        self.voiced_at_close: list[bool] = []
+
+    async def say(self, text: str, *, expects_answer: bool = False) -> None:
+        if self._speak_after_s is not None:
+            self._talking.speak_for(1.5, after_s=self._speak_after_s)
+        await super().say(text, expects_answer=expects_answer)
+
+    async def close(self) -> None:
+        self.voiced_at_close.append(self._talking.voiced_now)
+        await super().close()
+
+
+@pytest.mark.parametrize("speak_after_s", [0.0, 0.15, 0.25])
+async def test_a_gpt_live_switch_restart_waits_for_quiet_again_after_its_line(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, speak_after_s: float
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
+    conversation = _TalkingConversation()
+    provider = _InterruptedProvider(conversation, [_replying(600), _says_the_line(200)], speak_after_s)
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    await harness.active_profiles.switch("rob", "general")  # rob speaks as, or just after, the line plays
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=8)
+
+    assert harness.texts("say") == [switching_to("general")]
+    assert provider.voiced_at_close == [False], "closed while rob was speaking"
+
+
+async def test_a_gpt_live_switch_line_never_heard_waits_for_quiet_and_the_restarted_session_confirms(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_MAX_WAIT_S", 0.5)
+    conversation = _TalkingConversation()
+    provider = _InterruptedProvider(conversation, [_replying(600)], 0.3)  # the line brings no audio
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    await harness.active_profiles.switch("rob", "general")
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=8)
+    await harness.wait_for(lambda: len(harness.texts("say")) == 2)
+
+    assert provider.voiced_at_close == [False], "closed while rob was speaking"
+    assert harness.texts("say") == [switching_to("general"), switched_to("general")]
+    assert [call.method for call in provider.calls][-2:] == ["connect", "say"], "said by the new session"
+
+
+RESULT = "Task 1 finished: NVDA is at 900 dollars, up two percent today."
+
+
+async def test_an_announcement_the_gpt_live_switch_restart_cuts_off_is_said_again(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_MAX_WAIT_S", 0.6)
+    conversation = _PacedConversation(_frames(6000))
+    script: list[dict[str, Any]] = [
+        {"on_sent": "say", "event": {"type": "output_audio", "ms": 200}},  # the line
+        {"after_ms": 2000, "event": {"type": "output_audio", "ms": 300}},  # long after the result was given
+    ]
+    provider = _ClosingProvider(
+        conversation, script, capabilities=GPT_LIVE_CAPABILITIES, prompter=_RecordingPrompter()
+    )
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    assert harness.session is not None
+
+    await harness.active_profiles.switch("rob", "general")
+    await harness.wait_for(lambda: switching_to("general") in harness.texts("say"))
+    harness.session._announce(RESULT)  # pyright: ignore[reportPrivateUsage]  # a result while the line plays
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=4)
+    await harness.wait_for(lambda: harness.texts("say").count(RESULT) == 2)
+
+    methods = [call.method for call in provider.calls]
+    assert methods.index("close") < len(methods) - 1 - methods[::-1].index("say"), "said again after"
+    # Nothing told whether the line was heard before the result was given, so the restarted session
+    # confirms the switch too.
+    assert harness.texts("say") == [switching_to("general"), RESULT, switched_to("general"), RESULT]
+
+
+class _HeldConnectProvider(_ClosingProvider):
+    """A ``_ClosingProvider`` whose second ``connect`` waits for ``release``; ``connecting`` is set once it
+    started."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.connects = 0
+        self.connecting = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
+        self.connects += 1
+        if self.connects == 2:
+            self.connecting.set()
+            await self.release.wait()
+        await super().connect(instructions, voice, history_summary)
+
+
+async def test_a_switch_while_a_gpt_live_restart_connects_is_rendered_once_it_is_ready(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
+    conversation = _TalkingConversation()
+    provider = _HeldConnectProvider(
+        conversation,
+        [_replying(300), _says_the_line(200)],
+        capabilities=GPT_LIVE_CAPABILITIES,
+        prompter=_RecordingPrompter(),
+    )
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(conversation.played))
+    await harness.active_profiles.switch("rob", "general")
+    await asyncio.wait_for(provider.connecting.wait(), 6)  # reconnecting with general's instructions
+
+    await harness.active_profiles.switch("rob", "stock-picker")  # switched back meanwhile
+    await asyncio.sleep(0.3)
+    assert switched_to("stock-picker") not in harness.texts("say"), "not while general's instructions open"
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 3, timeout_s=6)
+
+    assert [call.args["instructions"] for call in harness.sent("connect")] == [
+        "instructions for stock-picker",
+        "instructions for general",
+        "instructions for stock-picker",
+    ]
+    assert switching_to("stock-picker") in harness.texts("say"), "said by the session that opened on general"
+
+
+async def test_a_join_while_the_gpt_live_switch_line_plays_restarts_at_once_without_the_notes(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
+    conversation = _TalkingConversation()
+
+    class JoinedDuringTheLine(_ClosingProvider):
+        async def say(self, text: str, *, expects_answer: bool = False) -> None:
+            await super().say(text, expects_answer=expects_answer)
+            if text == switching_to("general"):
+                asyncio.get_running_loop().call_later(0.05, lambda: conversation.company.add("alex"))
+
+    provider = JoinedDuringTheLine(
+        conversation, [_replying(300), _says_the_line(1500)], capabilities=GPT_LIVE_CAPABILITIES
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+    assert OWNER_FACTS in harness.sent("connect")[0].args["instructions"]
+
+    await harness.active_profiles.switch("rob", "general")
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=6)
+    await asyncio.sleep(0.6)
+
+    assert OWNER_FACTS not in harness.sent("connect")[1].args["instructions"]
+    assert len(harness.sent("connect")) == 2
+    assert provider.played_ms_at_close[0] < 300 + 1000, "the line played on after the join"
+
+
+async def test_a_join_after_an_in_place_switch_away_from_the_notes_still_restarts(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities=DEFAULT_CAPABILITIES,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    assert OWNER_FACTS in harness.sent("connect")[0].args["instructions"]
+    await harness.active_profiles.switch("rob", "general")  # in place: notes out, conversation kept
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100, _voiced("rob")))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=2)
+
+    assert OWNER_FACTS not in harness.sent("connect")[1].args["instructions"]
+
+
+async def test_live_style_refs_carry_the_delegation_id(harness: _Harness) -> None:
+    delegation = _delegation(1500, "del_1", "how is my portfolio doing")
+    delegation["event"]["target"] = "delegate"  # worded by the call, so no transcript is needed
+    harness.start(
+        [delegation],
+        _frames(2000, _voiced("rob")),
+        capabilities={"delegation_style": "live", "emits_speech_events": False},
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    [delivered] = harness.sent("deliver_result")
+    assert delivered.args["ref"] == {"delegation_id": "del_1", "call_id": None, "task_id": 1}
+
+
+async def test_announces_start_after_the_task_is_on_disk(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness.start([_delegation(1500, "call_1", "how is my portfolio doing")], _frames(2000, _voiced("rob")))
+    assert harness.provider is not None
+    say = harness.provider.say
+    states_at_announce: list[list[str]] = []
+
+    async def reading_history(text: str, *, expects_answer: bool = False) -> None:
+        lines = harness.tracker.history_path.read_text(encoding="utf-8").splitlines()
+        states_at_announce.append([json.loads(line)["state"] for line in lines])
+        await say(text, expects_answer=expects_answer)
+
+    monkeypatch.setattr(harness.provider, "say", reading_history)
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    # The call's receipt carried no task number, so the start notice is spoken.
+    assert harness.texts("say")[0] == STARTED_1
+    assert states_at_announce[0] == ["routing", "running"]
+
+
+async def test_runs_on_the_speakers_active_profile(harness: _Harness, api: FakeHermesApi) -> None:
+    harness.start([_delegation(1500, "call_1", "how is my portfolio doing")], _frames(2000, _voiced("alex")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    [start] = api.requests_to("POST", "/runs")
+    assert (start.path, start.body["session_id"]) == ("/p/general/v1/runs", "duplex-alex-general")
+    assert harness.stub.requests[0][3] == "general", "the router is told the active profile"
+
+
+async def test_two_people_on_different_profiles_each_run_on_their_own_and_the_prompt_follows_the_last_heard(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    def voiced(t_ms: int) -> Iterable[str]:
+        return ("rob",) if t_ms < 3000 else ("alex",)
+
+    def handoff(at_ms: int, call_id: str, task: str) -> dict[str, Any]:
+        # Anchored at the call's own offset: frames run ahead of the session, so arrival time would not be.
+        call = _delegation(at_ms, call_id, task)
+        call["event"]["offset_ms"] = at_ms
+        return call
+
+    harness.start(
+        [handoff(2000, "call_1", "how is my portfolio doing"), handoff(6500, "call_2", "what's the weather")],
+        _frames(8000, voiced),
+        prompter=_RecordingPrompter(),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("deliver_result")) == 2)
+
+    runs = {(start.path, start.body["session_id"]) for start in api.requests_to("POST", "/runs")}
+    assert runs == {
+        ("/p/stock-picker/v1/runs", "duplex-rob-stock-picker"),
+        ("/p/general/v1/runs", "duplex-alex-general"),
+    }
+    assert sorted((request[1], request[3]) for request in harness.stub.requests) == [
+        ("alex", "general"),
+        ("rob", "stock-picker"),
+    ]
+    connects = [call.args["instructions"] for call in harness.sent("connect")]
+    latest = [*connects, *harness.texts("update_instructions")][-1]
+    assert latest == "instructions for general"
+    assert (harness.active_profiles.get("rob"), harness.active_profiles.get("alex")) == (
+        "stock-picker",
+        "general",
+    )
+
+
+async def test_refuses_an_active_profile_the_person_may_no_longer_use(
+    tmp_path: Path, api: FakeHermesApi, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The real router, so the log shows its decision line before the refusal line.
+    config = _config(tmp_path)
+    router = CompositeRouter(config.router, config.profiles, [KnnBackend(fake_embed)])
+    await router.configure()
+    harness = _Harness(tmp_path, api, router=router)
+    # Alex switched to stock-picker while he could use it; the session's permissions no longer allow it.
+    harness.active_profiles = _active_profiles(tmp_path, _config(tmp_path, alex_profiles=["*"]))
+    assert (await harness.active_profiles.switch("alex", "stock-picker")).outcome == "switched"
+    caplog.set_level(logging.INFO)
+    try:
+        harness.start(
+            [_delegation(1500, "call_1", "how is my portfolio doing")], _frames(2000, _voiced("alex"))
+        )
+
+        await harness.wait_for(lambda: bool(harness.sent("say")))
+
+        [said] = harness.texts("say")
+        assert "stock-picker" in said
+        assert api.requests_to("POST", "/runs") == []
+        assert harness.tracker.get(1) is None
+        decisions = [r for r in caplog.records if r.name == "hermes_duplex.router.composite"]
+        refusals = [
+            r for r in caplog.records if r.name == "hermes_duplex.session" and "refused" in r.getMessage()
+        ]
+        assert len(decisions) == 1 and "profile=stock-picker" in decisions[0].getMessage()
+        assert len(refusals) == 1 and "alex" in refusals[0].getMessage()
+    finally:
+        await harness.stop()
+
+
+async def test_router_is_told_which_profiles_the_speaker_may_use(harness: _Harness) -> None:
+    harness.start([_delegation(1500, "call_1", "how is my portfolio doing")], _frames(2000, _voiced("alex")))
+
+    await harness.wait_for(lambda: bool(harness.sent("say")))
+
+    # The router suggests only profiles the speaker may use.
+    assert harness.stub.permitted == [{"general": True, "stock-picker": False}]
+
+
+def _switch_rob_to_general_after(harness: _Harness, text: str) -> None:
+    """Rob switches to general right after asking ``text``, so his next request runs there; the session
+    confirms it with ``ROB_ON_GENERAL`` before announcing that request's start."""
+    harness.stub.after_route[text] = lambda: harness.active_profiles.switch("rob", "general")
+
+
+ROB_ON_GENERAL = switched_to("general")
+
+AFTER_THE_SWITCH_IS_CONFIRMED = {"on_sent": "say", "event": {"type": "output_transcript", "delta": ""}}
+"""A script step that changes nothing, so the next ``on_sent: say`` step waits for the say after the
+switch confirmation."""
+
+
+async def _session_that_ended(tmp_path: Path, api: FakeHermesApi) -> _Harness:
+    """A session in which Rob delegated the portfolio question (a run that stays open), and which then
+    ended; its task is left unattended in its tracker."""
+    api.run_scripts.append(RunScript(events=[{"event": "run.started"}]))  # its own, for _complete_run
+    first = _Harness(tmp_path, api)
+    first.start([_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob")))
+    await first.wait_for(lambda: bool(first.sent("say")))
+    assert first.conversation is not None and first._run is not None
+    await first.conversation.close("rob left")
+    await asyncio.wait_for(first._run, timeout=5)
+    return first
+
+
+async def _close(*harnesses: _Harness) -> None:
+    for harness in harnesses:
+        await harness.stop()
+
+
+def _complete_run(api: FakeHermesApi, output: str) -> None:
+    """End the fake's only run as completed with ``output``, as if Hermes finished it meanwhile."""
+    [run] = api.runs.values()
+    run.script.events.append({"event": "run.completed", "output": output})
+
+
+async def test_a_new_session_adopts_the_open_task_and_queues_behind_it(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    first = await _session_that_ended(tmp_path, api)
+    api.run_scripts.append(OPEN_RUN)
+    second = _Harness(tmp_path, api)
+    second.tracker = first.tracker  # one tracker per service, shared by its sessions
+    try:
+        second.start(
+            [
+                _delegation(500, "call_2", "and what about Tesla"),
+                {
+                    "on_sent": "say",
+                    "event": {
+                        "type": "delegation",
+                        "id": "c3",
+                        "tool_args": {"task": "what are you working on"},
+                    },
+                },
+            ],
+            _frames(1000, _voiced("rob")),
+        )
+        await second.wait_for(lambda: len(second.sent("say")) >= 2)
+
+        old, new = second.tracker.get(1), second.tracker.get(2)
+        assert old is not None and old.state == "running", "its Hermes run goes on"
+        assert new is not None
+        assert second.texts("say") == [QUEUED_TESLA, task_summary([old, new])]
+    finally:
+        await _close(first, second)
+
+
+async def test_a_result_that_finished_while_the_person_was_away_is_announced_in_their_next_session(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    first = await _session_that_ended(tmp_path, api)
+    _complete_run(api, "Up 2% today.")
+    second = _Harness(tmp_path, api)
+    second.tracker = first.tracker
+    try:
+        second.start([], _frames(200, _voiced("rob")))
+        await second.wait_for(lambda: bool(second.sent("say")))
+
+        assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
+        task = second.tracker.get(1)
+        assert task is not None and task.state == "completed"
+        assert api.requests_to("GET", f"/runs/{task.run_id}"), "the ended run was read by its status"
+    finally:
+        await _close(first, second)
+
+
+async def test_status_and_cancel_reach_an_adopted_task(tmp_path: Path, api: FakeHermesApi) -> None:
+    first = await _session_that_ended(tmp_path, api)
+    second = _Harness(tmp_path, api)
+    second.tracker = first.tracker
+    try:
+        second.start(
+            [
+                _delegation(500, "c2", "what are you working on"),
+                {
+                    "on_sent": "say",
+                    "event": {"type": "delegation", "id": "c3", "tool_args": {"task": "cancel task 1"}},
+                },
+            ],
+            _frames(1000, _voiced("rob")),
+        )
+        await second.wait_for(lambda: len(second.sent("say")) >= 2)
+
+        assert second.texts("say")[0] == (
+            '"how is my portfolio doing" on the stock-picker agent is running, and I\'ll tell you when it '
+            "finishes."
+        )
+        assert second.texts("say")[1] == CANCELLED_1
+        assert len(api.requests_to("POST", "/stop")) == 1
+        await asyncio.sleep(0.1)
+        assert len(second.sent("say")) == 2, "the run's own cancelled event is not announced again"
+    finally:
+        await _close(first, second)
+
+
+async def test_other_peoples_unattended_tasks_are_not_adopted(tmp_path: Path, api: FakeHermesApi) -> None:
+    first = await _session_that_ended(tmp_path, api)
+    _complete_run(api, "Up 2% today.")
+    second = _Harness(tmp_path, api)
+    second.tracker = first.tracker
+    try:
+        second.start([], _frames(200, _voiced("alex")))
+        await asyncio.sleep(0.3)
+
+        assert second.sent("say") == []
+        task = second.tracker.get(1)
+        assert task is not None and task.state == "running", "nobody followed Rob's task"
+        assert [task.number for task in second.tracker.adopt("rob").open_tasks] == [1], (
+            "still waiting for Rob"
+        )
+    finally:
+        await _close(first, second)
+
+
+async def test_a_restarted_service_announces_what_its_previous_run_left_open(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    first = await _session_that_ended(tmp_path, api)
+    await first.stop()  # the service stops; its tracker's state is lost, the history file stays
+    _complete_run(api, "Up 2% today.")
+
+    restarted = TaskTracker(tmp_path / "home")
+    await restarted.restore()
+    second = _Harness(tmp_path, api)
+    second.tracker = restarted
+    try:
+        second.start([], _frames(200, _voiced("rob")))
+        await second.wait_for(lambda: bool(second.sent("say")))
+
+        assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
+    finally:
+        await second.stop()
+
+
+async def test_asks_who_is_asking_when_nobody_was_voiced(harness: _Harness, api: FakeHermesApi) -> None:
+    harness.start([_delegation(1500, "call_1", "how is my portfolio doing")], _frames(2000))
+
+    await harness.wait_for(lambda: bool(harness.sent("send_function_output")))
+    await asyncio.sleep(0.1)
+
+    # The call itself is answered with the question, so the model asks it; nothing else is said.
+    [output] = harness.sent("send_function_output")
+    assert output.args == {
+        "call_id": "call_1",
+        "payload": {"status": "not_started", "message": WHO_IS_ASKING},
+    }
+    assert harness.sent("say") == []
+    assert harness.stub.requests == []
+    assert api.requests_to("POST", "/runs") == []
+
+
+async def test_credits_the_person_voiced_most_in_the_last_four_seconds(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    # Alex talked long before; Rob is the only one voiced in the 4 s before the call.
+    def voiced(t_ms: int) -> Iterable[str]:
+        return ("alex",) if t_ms < 1000 else ("rob",) if t_ms >= 5000 else ()
+
+    harness.start([_delegation(6000, "call_1", "how is my portfolio doing")], _frames(6000, voiced))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    assert harness.stub.requests[0][1] == "rob"
+    assert api.requests_to("POST", "/runs")[0].body["session_id"] == "duplex-rob-stock-picker"
+
+
+async def test_control_status_summarizes_the_speakers_open_tasks(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "what are you working on"}},
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    running = harness.tracker.get(1)
+    assert running is not None
+    assert harness.texts("say") == [STARTED_1, task_summary([running])]
+    assert len(api.requests_to("POST", "/runs")) == 1
+
+
+async def test_control_cancel_stops_the_most_recent_running_task(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "cancel that"}},
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    task = harness.tracker.get(1)
+    assert task is not None and task.state == "cancelled"
+    [stop] = api.requests_to("POST", "/stop")
+    assert stop.path == f"/p/stock-picker/v1/runs/{task.run_id}/stop"
+    assert harness.texts("say") == [STARTED_1, CANCELLED_1]
+    assert harness.sent("deliver_result") == [], "the cancel is confirmed once, by say"
+
+
+async def test_cancel_is_confirmed_once_when_the_run_reports_cancelled_before_stop_returns(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    run = RunScript(events=[{"event": "run.started"}])
+    api.run_scripts.append(run)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "cancel that"}},
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+    assert harness._hermes is not None
+
+    async def stop_after_the_run_reports_cancelled(profile: str, run_id: str) -> None:
+        run.events.append({"event": "run.cancelled"})
+        await harness.wait_for(
+            lambda: (task := harness.tracker.get(1)) is not None and task.state == "cancelled"
+        )
+
+    harness._hermes.stop = stop_after_the_run_reports_cancelled  # type: ignore[method-assign]
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+    await asyncio.sleep(0.2)
+
+    assert harness.texts("say") == [STARTED_1, CANCELLED_1]
+    assert harness.sent("deliver_result") == [], "the cancel is confirmed once, by say"
+
+
+async def test_control_cancel_by_number(harness: _Harness, api: FakeHermesApi) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    _switch_rob_to_general_after(harness, "how is my portfolio doing")
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            AFTER_THE_SWITCH_IS_CONFIRMED,
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "what's the weather"}},
+            },
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c3", "tool_args": {"task": "cancel task 1"}},
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 4)
+
+    assert harness.texts("say") == [ROB_ON_GENERAL, STARTED_1, STARTED_WEATHER, CANCELLED_1]
+    second = harness.tracker.get(2)
+    assert second is not None and second.state == "running"
+
+
+async def test_second_task_on_the_same_profile_is_queued_behind_the_first(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "and what about Tesla"}},
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    assert harness.texts("say")[1] == QUEUED_TESLA
+    sessions = [request.body["session_id"] for request in api.requests_to("POST", "/runs")]
+    assert sessions == ["duplex-rob-stock-picker", "duplex-rob-stock-picker"]
+
+
+async def test_tasks_on_different_profiles_run_concurrently(harness: _Harness, api: FakeHermesApi) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    _switch_rob_to_general_after(harness, "how is my portfolio doing")
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            AFTER_THE_SWITCH_IS_CONFIRMED,
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "what's the weather"}},
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    assert harness.texts("say") == [ROB_ON_GENERAL, STARTED_1, STARTED_WEATHER]
+    [delivered] = harness.sent("deliver_result")
+    assert delivered.args["ref"]["task_id"] == 2
+    first = harness.tracker.get(1)
+    assert first is not None and first.state == "running"
+
+
+async def test_progress_is_throttled_per_delegation(harness: _Harness, api: FakeHermesApi) -> None:
+    api.run_scripts.append(
+        RunScript(
+            events=[
+                {"event": "run.started"},
+                *(
+                    {"event": "tool.started", "tool": "web_search", "preview": f"step {n}"}
+                    for n in range(1, 5)
+                ),
+                {"event": "run.completed", "output": "done"},
+            ]
+        )
+    )
+    ticks = iter(range(2, 1000, 2))  # each progress event is 2 s after the previous one
+    harness.start(
+        [_delegation(500, "call_1", "how is my portfolio doing")],
+        _frames(1000, _voiced("rob")),
+        clock=lambda: float(next(ticks)),
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    # Progress at 2 s and 8 s; 4 s and 6 s are within 5 s of a report.
+    assert harness.texts("report_progress") == [
+        "web_search: step 1",
+        "web_search: step 4",
+    ]
+
+
+async def test_queued_run_that_ends_without_a_start_passes_through_running(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.start_replies.append(admission_queued(with_run_id=True))
+    api.run_scripts.append(RunScript(events=[{"event": "run.completed", "output": "done"}]))
+    harness.start([_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    states = [json.loads(line)["state"] for line in harness.tracker.history_path.read_text().splitlines()]
+    assert states == ["routing", "queued", "running", "completed"]
+    assert harness.texts("deliver_result") == [frame_result("stock-picker", "done", 500)]
+
+
+async def test_failed_run_delivers_a_short_failure_notice(harness: _Harness, api: FakeHermesApi) -> None:
+    api.run_scripts.append(
+        RunScript(events=[{"event": "run.started"}, {"event": "run.failed", "error": "model overloaded"}])
+    )
+    harness.start([_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+    assert harness.texts("deliver_result") == ['Sorry, "how is my portfolio doing" failed: model overloaded.']
+    task = harness.tracker.get(1)
+    assert task is not None and task.state == "failed"
+
+
+async def test_hermes_unreachable_is_spoken_and_fails_the_task(tmp_path: Path, api: FakeHermesApi) -> None:
+    harness = _Harness(tmp_path, api, api_base="http://127.0.0.1:9")
+    try:
+        harness.start(
+            [_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob"))
+        )
+
+        await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+
+        [notice] = harness.texts("deliver_result")
+        assert "Hermes is unreachable" in notice
+        task = harness.tracker.get(1)
+        assert task is not None and task.state == "failed"
+    finally:
+        await harness.stop()
+
+
+async def test_audio_flows_both_ways_and_the_ui_hears_about_it(harness: _Harness) -> None:
+    harness.start(
+        [
+            {"at_input_ms": 200, "event": {"type": "input_transcript", "delta": "hello", "final": True}},
+            {"at_input_ms": 200, "event": {"type": "output_transcript", "delta": "Hi there."}},
+            {"at_input_ms": 200, "event": {"type": "output_audio", "ms": 100, "item_id": "item_1"}},
+            {"at_input_ms": 200, "event": {"type": "output_done"}},
+        ],
+        _frames(400, _voiced("rob")),
+    )
+    assert harness.provider is not None and harness.conversation is not None
+    conversation = harness.conversation
+
+    await harness.wait_for(lambda: sum(len(pcm) for pcm in conversation.played) >= 100 * RATE // 1000 * 2)
+
+    assert harness.provider.input_ms == 400
+    transcript = [event["transcript"] for event in conversation.notified if "transcript" in event]
+    assert transcript == [{"speaker": "user", "text": "hello"}, {"speaker": "assistant", "text": "Hi there."}]
+
+
+def _open_task(number: int, text: str) -> Task:
+    moment = datetime(2026, 11, 3, tzinfo=UTC)
+    return Task(
+        number=number,
+        uuid=f"u{number}",
+        person="rob",
+        profile="stock-picker",
+        effort="medium",
+        model=None,
+        text=text,
+        state="running",
+        run_id=f"run_{number}",
+        created_at=moment,
+        updated_at=moment,
+    )
+
+
+PORTFOLIO = _open_task(1, "how is my portfolio doing")
+TESLA = _open_task(2, "and what about Tesla")
+
+
+@pytest.mark.parametrize(
+    ("words", "task_id", "number"),
+    [
+        ("cancel the portfolio one", None, 1),
+        ("how's the Tesla thing", None, 2),
+        ("what about Tesla's stock", None, 2),
+        ("cancel that", None, None),  # names no topic, and two are running
+        ("cancel the weather one", None, None),  # unrelated words
+        ("", None, None),
+        ("cancel task 2", None, 2),
+        ("cancel task number 1", None, 1),
+        ("stop task #7", None, 7),  # named outright, though not open: the caller says it is not found
+        ("cancel the top 5 stocks", None, None),  # a number that is not a task number
+        ("the portfolio one", 2, 2),  # a tool call's task_id comes first
+        ("about tesla and my portfolio", None, None),  # a tie is no clear winner
+    ],
+)
+def test_resolve_task_by_id_then_named_number_then_topic(
+    words: str, task_id: int | None, number: int | None
+) -> None:
+    assert _resolve_task([PORTFOLIO, TESLA], words, task_id) == number
+
+
+@pytest.mark.parametrize(
+    "words", ["cancel the latest one", "the new one", "the other one", "the first one", "the last one"]
+)
+def test_order_and_recency_words_name_no_task(words: str) -> None:
+    assert _topic_words(words) == set()
+    assert _resolve_task([PORTFOLIO, TESLA], words) is None
+
+
+def test_news_is_a_topic_word_not_a_plural_of_new() -> None:
+    assert _topic_words("any news about Tesla") == {"news", "tesla"}
+    assert _topic_words("my stocks") == {"stock"}, "other plurals still drop their s"
+
+
+@pytest.mark.parametrize("words", ["don't", "won't", "never mind", "now", "just", "no, just stop it now"])
+def test_contractions_and_dismissals_add_no_topic_words(words: str) -> None:
+    assert _topic_words(words) == set()
+
+
+@pytest.mark.parametrize("words", ["cancel that", "", "cancel the latest one", "never mind, don't do it"])
+def test_resolve_task_with_one_open_task_and_no_topic_words_means_that_one(words: str) -> None:
+    assert _resolve_task([TESLA], words) == 2
+    assert _resolve_task([], words) is None
+
+
+def test_resolve_task_with_one_open_task_and_other_topic_words_names_none() -> None:
+    assert _resolve_task([TESLA], "cancel the weather one") is None
+    assert _resolve_task([TESLA], "cancel the Tesla one") == 2
+
+
+async def test_status_and_cancel_find_the_task_by_its_topic(harness: _Harness, api: FakeHermesApi) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "and what about Tesla"}},
+            },
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c3", "tool_args": {"task": "how's the Tesla thing"}},
+            },
+            {
+                "on_sent": "say",
+                "event": {
+                    "type": "delegation",
+                    "id": "c4",
+                    "tool_args": {"task": "cancel the portfolio one"},
+                },
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 4)
+
+    portfolio, tesla = harness.tracker.get(1), harness.tracker.get(2)
+    assert portfolio is not None and tesla is not None
+    assert harness.texts("say")[2].startswith('"and what about Tesla" on the stock-picker agent is ')
+    assert "portfolio" not in harness.texts("say")[2]
+    assert harness.texts("say")[3] == CANCELLED_1
+    assert portfolio.state == "cancelled" and tesla.state in ("queued", "running")
+    [stop] = api.requests_to("POST", "/stop")
+    assert stop.path.endswith(f"/runs/{portfolio.run_id}/stop")
+
+
+async def test_cancel_naming_no_task_asks_which_when_several_are_running(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c2", "tool_args": {"task": "what's the weather"}},
+            },
+            {
+                "on_sent": "say",
+                "event": {"type": "delegation", "id": "c3", "tool_args": {"task": "cancel that"}},
+            },
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+
+    running = [task for number in (1, 2) if (task := harness.tracker.get(number))]
+    assert harness.texts("say")[2] == which_to_cancel(running)
+    assert [task.state for task in running] == ["running", "running"]
+    assert api.requests_to("POST", "/stop") == []
+
+
+def _after_say(call_id: str, task: str) -> dict[str, Any]:
+    """A delegation of ``task`` sent once the session's previous notice is said."""
+    return {"on_sent": "say", "event": {"type": "delegation", "id": call_id, "tool_args": {"task": task}}}
+
+
+async def test_cancel_the_latest_one_asks_which_when_several_are_running(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "what's the weather"),
+            _after_say("c3", "cancel the latest one"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+
+    running = [task for number in (1, 2) if (task := harness.tracker.get(number))]
+    assert harness.texts("say")[2] == which_to_cancel(running)
+    assert [task.state for task in running] == ["running", "running"]
+    assert api.requests_to("POST", "/stop") == []
+
+
+async def test_cancel_naming_a_task_that_is_not_open_while_another_is_finds_none(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts += [OPEN_RUN, RunScript(events=[{"event": "run.started"}])]
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "what's the weather"),
+            _after_say("c3", "cancel task 1"),
+            _after_say("c4", "cancel task 1"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 4)
+
+    weather = harness.tracker.get(2)
+    assert harness.texts("say")[2:] == [CANCELLED_1, NO_SUCH_TASK]
+    assert weather is not None and weather.state == "running"
+    assert len(api.requests_to("POST", "/stop")) == 1
+
+
+async def test_cancel_naming_a_task_when_none_is_open_has_nothing_to_cancel(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel task 1"),
+            _after_say("c3", "cancel task 1"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+
+    assert harness.texts("say") == [STARTED_1, CANCELLED_1, NOTHING_TO_CANCEL]
+
+
+async def test_cancel_about_another_topic_asks_about_the_only_open_task(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel the Tesla question"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    portfolio = harness.tracker.get(1)
+    assert portfolio is not None and portfolio.state == "running"
+    assert harness.texts("say") == [
+        STARTED_1,
+        'The only one running is "how is my portfolio doing". Cancel that?',
+    ]
+    assert harness.texts("say")[1] == only_one_running(portfolio)
+    assert api.requests_to("POST", "/stop") == []
+
+
+async def test_the_cancel_question_is_said_to_be_answered(harness: _Harness, api: FakeHermesApi) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel the Tesla question"),
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    assert [call.args["expects_answer"] for call in harness.sent("say")] == [False, True]
+
+
+@pytest.mark.parametrize("answer", ["yes", "Yes, please."])
+async def test_yes_to_the_cancel_question_cancels_the_only_open_task(
+    harness: _Harness, api: FakeHermesApi, answer: str
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel the Tesla question"),
+            _after_say("c3", answer),  # handed off as said, as GPT-Live does
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+
+    assert harness.texts("say")[2] == CANCELLED_1
+    assert len(api.requests_to("POST", "/stop")) == 1
+    assert [request[0] for request in harness.stub.requests] == [
+        "how is my portfolio doing",
+        "cancel the Tesla question",
+    ], "the answer is never routed"
+
+
+async def test_no_to_the_cancel_question_keeps_the_task_and_a_second_answer_is_not_run(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            _after_say("c2", "cancel the Tesla question"),
+            _after_say("c3", "no"),
+            # Said before the next notice: the late "yes" below.
+            {"at_input_ms": 0, "event": {"type": "delegation", "id": "c4", "tool_args": {"task": "yes"}}},
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 3)
+    await asyncio.sleep(0.1)
+
+    portfolio = harness.tracker.get(1)
+    assert portfolio is not None and portfolio.state == "running"
+    assert harness.texts("say")[2:] == [NO_QUESTION_PENDING]
+    assert api.requests_to("POST", "/stop") == []
+    assert [request[0] for request in harness.stub.requests] == [
+        "how is my portfolio doing",
+        "cancel the Tesla question",
+    ]
+
+
+async def test_a_cancel_task_call_about_another_topic_asks_and_a_yes_cancels(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(OPEN_RUN)
+    cancel = {"type": "delegation", "id": "c2", "target": "cancel_task", "tool_args": {"about": "Tesla"}}
+    harness.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {"on_sent": "say", "event": cancel},
+            {"on_sent": "send_function_output", "event": _after_say("c3", "yes")["event"]},
+        ],
+        _frames(1000, _voiced("rob")),
+    )
+
+    await harness.wait_for(lambda: len(harness.sent("say")) >= 2)
+
+    portfolio = harness.tracker.get(1)
+    assert portfolio is not None
+    outputs = {call.args["call_id"]: call.args["payload"] for call in harness.sent("send_function_output")}
+    assert outputs["c2"] == {"status": "ok", "message": only_one_running(portfolio)}
+    assert harness.texts("say")[1] == CANCELLED_1
+    assert len(api.requests_to("POST", "/stop")) == 1
+
+
+async def test_a_session_already_hearing_the_person_adopts_what_another_session_leaves(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(RunScript(events=[{"event": "run.started"}]))
+    web = _Harness(tmp_path, api)
+    discord = _Harness(tmp_path, api)
+    discord.tracker = web.tracker
+    try:
+        web.start([_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob")))
+        await web.wait_for(lambda: bool(web.sent("say")))
+        discord.start([], _frames(200, _voiced("rob")))  # Rob is heard here too, before the web call ends
+        await asyncio.sleep(0.1)
+        assert web.conversation is not None and web._run is not None
+        await web.conversation.close("rob left the web call")
+        await asyncio.wait_for(web._run, timeout=5)
+        conversation = discord.conversation
+        assert conversation is not None
+        await discord.wait_for(lambda: any("tasks" in event for event in conversation.notified))
+        await asyncio.sleep(0.1)  # its run is read as still going, and followed
+
+        _complete_run(api, "Up 2% today.")
+        await discord.wait_for(lambda: bool(discord.sent("say")))
+
+        assert discord.texts("say") == [frame_result("stock-picker", "Up 2% today.", 500)]
+        task = discord.tracker.get(1)
+        assert task is not None and task.state == "completed"
+    finally:
+        await _close(web, discord)
+
+
+async def test_a_session_does_not_adopt_what_another_leaves_for_someone_who_left_it(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(RunScript(events=[{"event": "run.started"}]))
+    web = _Harness(tmp_path, api)
+    discord = _Harness(tmp_path, api)
+    discord.tracker = web.tracker
+    try:
+        web.start([_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob")))
+        await web.wait_for(lambda: bool(web.sent("say")))
+        discord.start([], _frames(200, _voiced("rob")))
+        await asyncio.sleep(0.1)
+        assert discord.conversation is not None and web.conversation is not None and web._run is not None
+        discord.conversation.departed.add("rob")  # Rob left the Discord channel
+        await web.conversation.close("rob left the web call")
+        await asyncio.wait_for(web._run, timeout=5)
+        await asyncio.sleep(0.2)
+
+        assert not any("tasks" in event for event in discord.conversation.notified)
+        assert [task.number for task in web.tracker.adopt("rob").open_tasks] == [1], "left for later"
+    finally:
+        await _close(web, discord)
+
+
+async def test_a_person_who_left_adopts_what_was_left_for_them_meanwhile_once_they_are_back(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(RunScript(events=[{"event": "run.started"}]))
+    web = _Harness(tmp_path, api)
+    discord = _Harness(tmp_path, api)
+    discord.tracker = web.tracker
+    try:
+        web.start([_delegation(500, "call_1", "how is my portfolio doing")], _frames(1000, _voiced("rob")))
+        await web.wait_for(lambda: bool(web.sent("say")))
+        discord.start([], _frames(200, _voiced("rob")))
+        await asyncio.sleep(0.1)
+        assert discord.conversation is not None and web.conversation is not None and web._run is not None
+        discord.conversation.departed.add("rob")  # Rob left the Discord channel
+        await web.conversation.close("rob left the web call")
+        await asyncio.wait_for(web._run, timeout=5)
+        await asyncio.sleep(0.2)
+        conversation = discord.conversation
+        assert not any("tasks" in event for event in conversation.notified)
+
+        conversation.departed.discard("rob")  # Rob is back in the channel and speaks
+        conversation.feed(_frames(200, _voiced("rob")))
+        await discord.wait_for(lambda: any("tasks" in event for event in conversation.notified))
+        await asyncio.sleep(0.1)  # its run is read as still going, and followed
+        _complete_run(api, "Up 2% today.")
+        await discord.wait_for(lambda: bool(discord.sent("say")))
+
+        assert discord.texts("say") == [frame_result("stock-picker", "Up 2% today.", 500)]
+    finally:
+        await _close(web, discord)
+
+
+async def test_a_result_not_yet_spoken_when_the_session_ends_is_told_in_the_next_one(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(RunScript(events=[{"event": "run.started"}]))
+    first = _Harness(tmp_path, api)
+    # Rob starts talking after the start notice and never stops, so the result waits for the floor.
+    first.start(
+        [
+            _delegation(500, "call_1", "how is my portfolio doing"),
+            {"on_sent": "say", "event": {"type": "speech_started"}},
+        ],
+        _frames(1000, _voiced("rob")),
+        clock=lambda: 0.0,
+    )
+    await first.wait_for(lambda: bool(first.sent("say")))
+    _complete_run(api, "Up 2% today.")
+    await first.wait_for(lambda: (task := first.tracker.get(1)) is not None and task.state == "completed")
+    await asyncio.sleep(0.1)
+    assert first.sent("deliver_result") == [] and len(first.sent("say")) == 1, "the result is unspoken"
+    assert first.conversation is not None and first._run is not None
+    await first.conversation.close("rob left")
+    await asyncio.wait_for(first._run, timeout=5)
+
+    second = _Harness(tmp_path, api)
+    second.tracker = first.tracker
+    try:
+        second.start([], _frames(200, _voiced("rob")))
+        await second.wait_for(lambda: bool(second.sent("say")))
+
+        assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
+    finally:
+        await _close(first, second)
+
+
+async def test_an_adopted_run_whose_status_cannot_be_read_ends_as_news(
+    tmp_path: Path, api: FakeHermesApi
+) -> None:
+    first = await _session_that_ended(tmp_path, api)
+    [run] = api.runs.values()
+    run.script.polls.append(503)
+    _complete_run(api, "Up 2% today.")
+    second = _Harness(tmp_path, api)
+    second.tracker = first.tracker
+    try:
+        second.start([], _frames(200, _voiced("rob")))
+        await second.wait_for(lambda: bool(second.sent("say")))
+
+        assert second.texts("say") == [AWAY_1 + frame_result("stock-picker", "Up 2% today.", 500)]
+    finally:
+        await _close(first, second)
+
+
+# --- Hermes context, presence, and open tasks in the instructions ---------------------------------
+
+OWNER_FACTS = "Rob lives in Lisbon."
+
+
+def _owner_context(harness: _Harness) -> Callable[[str, str | None, bool], PromptContext]:
+    """The service's prompt context with rob as the Hermes owner, ``USER.md`` on, and stock-picker's
+    ``USER.md`` holding ``OWNER_FACTS``."""
+    home = harness.tmp_path / "home"
+    user_md = home / "profiles" / "stock-picker" / "memories" / "USER.md"
+    user_md.parent.mkdir(parents=True, exist_ok=True)
+    user_md.write_text(OWNER_FACTS, encoding="utf-8")
+    config = harness.config
+    config = replace(
+        config,
+        hermes=replace(config.hermes, voice_context_files=frozenset({"user"})),
+        people={**config.people, "rob": replace(config.people["rob"], hermes_owner=True)},
+    )
+    files = HermesContextFiles(home, ("user",), 4000)
+    return lambda profile, person, alone: service.prompt_context(
+        config, profile, person, alone, context_files=files
+    )
+
+
+async def test_the_owners_notes_are_in_the_instructions_only_while_they_are_alone(harness: _Harness) -> None:
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start([], [], person="rob", conversation=conversation, prompt_context_for=_owner_context(harness))
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    conversation.company.clear()
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("update_instructions")) == 1)
+
+    # Someone joining restarts the provider even though it replaces instructions, so its conversation
+    # said with the owner's notes goes too; the notes come back in place.
+    alone, with_alex = harness.sent("connect")
+    assert OWNER_FACTS in alone.args["instructions"]
+    assert OWNER_FACTS not in with_alex.args["instructions"]
+    [alone_again] = harness.texts("update_instructions")
+    assert OWNER_FACTS in alone_again
+
+
+async def test_without_instruction_replacement_someone_joining_restarts_at_once_without_the_owners_notes(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)  # a quiet restart would never come
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities={"replaces_instructions": False},
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100, _voiced("rob")))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    first, second = harness.sent("connect")
+    assert OWNER_FACTS in first.args["instructions"]
+    assert OWNER_FACTS not in second.args["instructions"]
+    assert harness.sent("update_instructions") == []
+
+
+async def test_someone_elses_conversation_never_carries_the_owners_notes(harness: _Harness) -> None:
+    conversation = _MemoryConversation(_frames(200, _voiced("alex")))
+    harness.start(
+        [], [], person="alex", conversation=conversation, prompt_context_for=_owner_context(harness)
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    conversation.feed(_frames(100))
+    await asyncio.sleep(0.05)
+
+    [connect] = harness.sent("connect")
+    assert OWNER_FACTS not in connect.args["instructions"]
+    assert all(OWNER_FACTS not in text for text in harness.texts("update_instructions"))
+
+
+async def test_open_tasks_are_kept_current_in_place_where_the_provider_replaces_instructions(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(
+        RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "up 2%"}])
+    )
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        _frames(2000, _voiced("rob")),
+        person="rob",
+        prompt_context_for=_owner_context(harness),
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+    await harness.wait_for(lambda: "<open_tasks>" not in harness.texts("update_instructions")[-1])
+
+    listed = [text for text in harness.texts("update_instructions") if "<open_tasks>" in text]
+    assert listed and all('"how is my portfolio doing" on the stock-picker agent' in text for text in listed)
+    assert len(harness.sent("connect")) == 1
+
+
+async def test_open_tasks_never_restart_a_provider_that_cannot_replace_instructions(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(
+        RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "up 2%"}])
+    )
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        _frames(2000, _voiced("rob")),
+        person="rob",
+        capabilities={"replaces_instructions": False},
+        prompt_context_for=_owner_context(harness),
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+    await asyncio.sleep(0.1)
+
+    assert len(harness.sent("connect")) == 1
+    assert harness.sent("update_instructions") == []
+
+
+async def test_a_hand_off_and_its_result_never_restart_gpt_live_for_someone_with_nothing_else_said(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    # The default config: no Hermes context files, and rob has no voice_context of his own, so his
+    # open tasks are all the instructions could say about him.
+    api.run_scripts.append(
+        RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "up 2%"}])
+    )
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        _frames(2000, _voiced("rob")),
+        person="rob",
+        capabilities={"replaces_instructions": False},
+        prompt_context_for=lambda profile, person, alone: service.prompt_context(
+            harness.config, profile, person, alone
+        ),
+    )
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+    await asyncio.sleep(0.3)
+
+    assert len(harness.sent("connect")) == 1
+    assert harness.sent("update_instructions") == []
+    assert harness.texts("deliver_result") == [frame_result("stock-picker", "up 2%", 500)]
+
+
+async def test_the_instructions_list_the_newest_open_tasks_by_topic_and_profile(harness: _Harness) -> None:
+    for n in range(1, 13):
+        task = await harness.tracker.create(
+            person="rob", profile="general", effort="medium", model=None, text=f"please check item {n}"
+        )
+        await harness.tracker.transition(task.number, "running", run_id=f"run_{n}")
+    harness.start(
+        [],
+        [],
+        person="rob",
+        prompt_context_for=lambda profile, person, alone: service.prompt_context(
+            harness.config, profile, person, alone
+        ),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+
+    instructions = harness.sent("connect")[0].args["instructions"]
+    assert '"check item 3" on the general agent' in instructions
+    assert '"check item 12" on the general agent' in instructions
+    assert "item 2" not in instructions
+
+
+async def test_a_context_file_changing_mid_call_waits_for_the_next_connect(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(
+        RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "up 2%"}])
+    )
+    context = _owner_context(harness)
+    user_md = harness.tmp_path / "home" / "profiles" / "stock-picker" / "memories" / "USER.md"
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [
+            _delegation(1500, "call_1", "how is my portfolio doing"),
+            {"on_sent": "deliver_result", "event": {"type": "close", "reason": "expired"}},
+        ],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities={"replaces_instructions": False},
+        prompt_context_for=context,
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    # A background rewrite landing, or the owner editing USER.md, while the call is on:
+    user_md.write_text("Rob lives in Porto now.", encoding="utf-8")
+    conversation.feed(_frames(2000, _voiced("rob")))
+
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    first, second = harness.sent("connect")
+    assert harness.sent("deliver_result"), "the task's changes restarted nothing before its result"
+    assert OWNER_FACTS in first.args["instructions"]
+    assert "Rob lives in Porto now." in second.args["instructions"]
+    assert harness.sent("update_instructions") == []
+
+
+async def test_a_context_file_changing_mid_call_is_not_sent_with_an_open_task_update(
+    harness: _Harness, api: FakeHermesApi
+) -> None:
+    api.run_scripts.append(
+        RunScript(events=[{"event": "run.started"}, {"event": "run.completed", "output": "up 2%"}])
+    )
+    user_md = harness.tmp_path / "home" / "profiles" / "stock-picker" / "memories" / "USER.md"
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [_delegation(1500, "call_1", "how is my portfolio doing")],
+        [],
+        person="rob",
+        conversation=conversation,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    user_md.write_text("Rob lives in Porto now.", encoding="utf-8")
+    conversation.feed(_frames(2000, _voiced("rob")))
+
+    await harness.wait_for(lambda: bool(harness.sent("deliver_result")))
+    await harness.wait_for(lambda: "<open_tasks>" not in harness.texts("update_instructions")[-1])
+
+    assert all(OWNER_FACTS in text for text in harness.texts("update_instructions"))
+    assert all("Porto" not in text for text in harness.texts("update_instructions"))
+
+
+async def test_audio_held_for_the_owner_alone_is_not_played_once_someone_joins(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)  # a quiet restart would never come
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [
+            {"at_input_ms": 100, "event": {"type": "output_transcript", "delta": "Your hearing is Friday."}},
+            {"at_input_ms": 100, "event": {"type": "output_audio", "ms": 5000, "item_id": "item_1"}},
+            {"at_input_ms": 100, "event": {"type": "output_done"}},
+        ],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities={"replaces_instructions": False, "supports_truncate": True},
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    played_at_join = sum(len(pcm) for pcm in conversation.played)
+    await asyncio.sleep(0.5)
+
+    played_ms = (sum(len(pcm) for pcm in conversation.played) - played_at_join) / 2 / RATE * 1000
+    assert played_ms < 100
+    assert [call.args["item_id"] for call in harness.sent("truncate")] == ["item_1"]
+    summary = harness.sent("connect")[1].args["history_summary"]
+    assert "hearing" not in summary
+    assert "(nothing yet)" in summary
+
+
+class _StillReplyingAsItCloses(FakeProvider):
+    """A fake provider whose first ``close`` is answered only after ``in_flight`` arrives, as a real
+    provider's socket still yields what the server sent before it saw the close."""
+
+    def __init__(
+        self, script: Iterable[Mapping[str, Any]], in_flight: Iterable[ProviderEvent], **kwargs: Any
+    ) -> None:
+        super().__init__(script, **kwargs)
+        self._in_flight = list(in_flight)
+
+    async def events(self) -> AsyncIterator[ProviderEvent]:
+        async for event in super().events():
+            if isinstance(event, Closed) and event.reason == "closed by client":
+                for late in self._in_flight:
+                    yield late
+                self._in_flight.clear()
+            yield event
+
+
+def _played_ms(conversation: _MemoryConversation) -> float:
+    return sum(len(pcm) for pcm in conversation.played) / 2 / RATE * 1000
+
+
+@pytest.mark.parametrize(
+    "capabilities, item_id",
+    [(GPT_LIVE_CAPABILITIES, None), (DEFAULT_CAPABILITIES, "item_1")],
+    ids=["gpt-live", "realtime"],
+)
+async def test_output_arriving_after_someone_joins_from_the_session_with_the_owners_notes_is_dropped(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    capabilities: Mapping[str, object],
+    item_id: str | None,
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)  # a quiet restart would never come
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    output = {"type": "output_audio", "ms": 5000, "item_id": item_id}
+    provider = _StillReplyingAsItCloses(
+        [
+            {"at_input_ms": 100, "event": {"type": "output_transcript", "delta": "Your hearing is Friday."}},
+            {"at_input_ms": 100, "event": output},
+            # The restarted provider session's own reply plays.
+            {"on_sent": "connect", "event": {**output, "ms": 200, "item_id": item_id and "item_2"}},
+        ],
+        [
+            OutputAudio(pcm=bytes(2 * RATE), item_id=item_id),  # 1 s
+            OutputTranscript(delta=" Bring the custody papers."),
+            OutputDone(),
+        ],
+        capabilities=capabilities,
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    played_at_join = _played_ms(conversation)
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await asyncio.sleep(0.6)
+
+    played_ms = _played_ms(conversation) - played_at_join
+    assert 150 < played_ms < 400, "only the restarted provider session's 200 ms reply plays to alex"
+    first, second = harness.sent("connect")
+    assert OWNER_FACTS in first.args["instructions"]
+    assert OWNER_FACTS not in second.args["instructions"]
+    assert harness.sent("update_instructions") == [], (
+        "a join with the owner's notes restarts on every provider"
+    )
+    assert "hearing" not in second.args["history_summary"]
+    assert "custody" not in second.args["history_summary"]
+
+
+async def test_a_reply_still_being_generated_when_someone_joins_is_neither_played_nor_reseeded(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.3)  # for the restart once alone again
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _StillReplyingAsItCloses(
+        [],
+        [OutputTranscript(delta="Your lawyer is Ana."), OutputAudio(pcm=bytes(2 * RATE), item_id=None)],
+        capabilities=GPT_LIVE_CAPABILITIES,
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 100)  # nothing is playing yet
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await asyncio.sleep(0.5)
+    conversation.company.clear()
+    conversation.feed(_frames(100))  # alone again: a later reseed must not bring it back either
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 3, timeout_s=8)
+
+    assert conversation.played == []
+    assert all("lawyer" not in (call.args["history_summary"] or "") for call in harness.sent("connect"))
+
+
+async def test_a_hand_off_from_the_session_with_the_owners_notes_after_someone_joins_is_asked_again(
+    harness: _Harness, api: FakeHermesApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _StillReplyingAsItCloses(
+        [],
+        [DelegationRequested("call_1", None, DELEGATE_TOOL, {"task": "email my lawyer Ana"})],
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 100)
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: bool(harness.sent("say")))
+
+    assert harness.texts("say") == [NOT_HEARD]
+    assert len(harness.sent("connect")) == 2, "said to the restarted provider session"
+    assert api.runs == {}
+    assert harness.sent("send_function_output") == []
+
+
+class _SlowProvider(FakeProvider):
+    """A fake provider whose ``held`` calls (``update_instructions``, ``close``, or a ``connect`` after
+    the first) wait until ``release`` is set, as over a slow round trip. A held ``connect`` emits
+    ``opening`` first, as a model that starts speaking at once. Counts the input frames each provider
+    session received."""
+
+    def __init__(
+        self,
+        script: Iterable[Mapping[str, Any]],
+        held: Iterable[str],
+        opening: Iterable[ProviderEvent] = (),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(script, **kwargs)
+        self.held = set(held)
+        self.release = asyncio.Event()
+        self.closing = False
+        self.frames_per_session: list[int] = []
+        self._opening = list(opening)
+
+    async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
+        await super().connect(instructions, voice, history_summary)
+        self.frames_per_session.append(0)
+        if "connect" in self.held and len(self.frames_per_session) > 1:
+            for event in self._opening:
+                self._events.put_nowait(event)
+            self._opening.clear()
+            await self.release.wait()
+
+    async def send_audio(self, pcm16: bytes) -> None:
+        await super().send_audio(pcm16)
+        self.frames_per_session[-1] += 1
+
+    async def update_instructions(self, text: str) -> None:
+        await super().update_instructions(text)
+        if "update_instructions" in self.held:
+            await self.release.wait()
+
+    async def close(self) -> None:
+        self.closing = True
+        if "close" in self.held:
+            await self.release.wait()
+        await super().close()
+
+
+async def test_someone_joining_restarts_the_provider_even_behind_queued_instruction_updates(
+    harness: _Harness, api: FakeHermesApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each task change updates the open tasks in place; with one update slow and another queued
+    # behind it, the restart for alex must still come, and until it does the provider session that
+    # heard the owner's notes is sent nothing: no input, progress, results, or notices.
+    for _ in range(2):
+        api.run_scripts.append(
+            RunScript(
+                events=[
+                    {"event": "run.started"},
+                    {"event": "tool.started", "tool": "web_search", "preview": "step 1"},
+                    {"event": "run.completed", "output": "up 2%"},
+                ]
+            )
+        )
+    progress_held = asyncio.Event()
+    run_events = HermesApiClient.events
+
+    async def events_after_the_start_held(
+        client: HermesApiClient, profile: str, run_id: str
+    ) -> AsyncIterator[RunEvent]:
+        async for event in run_events(client, profile, run_id):
+            if event.kind != "started":
+                await progress_held.wait()
+            yield event
+
+    monkeypatch.setattr(HermesApiClient, "events", events_after_the_start_held)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _SlowProvider(
+        [
+            _delegation(100, "call_1", "how is my portfolio doing"),
+            _delegation(300, "call_2", "and what about Tesla"),
+        ],
+        held={"update_instructions"},
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))  # the slow one
+    conversation.feed(_frames(140, _voiced("rob")))
+    await harness.wait_for(lambda: len(harness.tracker.active_for("rob")) == 2)  # the queued one
+    await asyncio.sleep(0.1)
+
+    frames_before_join = provider.frames_per_session[0]
+    sent_before_join = len(provider.calls)
+    conversation.company.add("alex")
+    conversation.feed(_frames(100, _voiced("alex")))  # speaking from his first frame on
+    progress_held.set()
+    await asyncio.sleep(0.3)
+    assert [call.method for call in provider.calls[sent_before_join:]] == []
+    assert provider.frames_per_session == [frames_before_join]
+
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await harness.wait_for(
+        lambda: len(harness.sent("report_progress")) == 2 and len(harness.sent("say")) >= 2
+    )
+
+    first, second = harness.sent("connect")
+    assert OWNER_FACTS in first.args["instructions"]
+    assert OWNER_FACTS not in second.args["instructions"]
+    after_join = [call.method for call in provider.calls[sent_before_join:]]
+    assert after_join[: after_join.index("connect")] == ["close"]
+    assert all(OWNER_FACTS not in text for text in harness.texts("update_instructions")[1:])
+
+
+async def test_someone_joining_while_the_provider_reconnects_with_the_owners_notes_restarts_it(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)  # for the restart once alone
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    conversation.company.add("alex")
+    provider = _SlowProvider(
+        [],
+        held={"connect"},
+        # What the provider session opened with the owner's notes says at once:
+        opening=[
+            OutputTranscript(delta="Your hearing is Friday."),
+            OutputAudio(pcm=bytes(2 * RATE), item_id=None),
+            OutputDone(),
+        ],
+        capabilities=GPT_LIVE_CAPABILITIES,
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 200)
+    conversation.company.clear()  # rob alone: a quiet restart brings his notes in
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    conversation.company.add("alex")  # back while that provider session opens
+    conversation.feed(_frames(100))
+    await asyncio.sleep(0.1)
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 3)
+    await asyncio.sleep(0.3)
+
+    _, alone, with_alex = harness.sent("connect")
+    assert OWNER_FACTS in alone.args["instructions"]
+    assert OWNER_FACTS not in with_alex.args["instructions"]
+    assert conversation.played == []
+    assert "hearing" not in with_alex.args["history_summary"]
+    assert all(
+        "hearing" not in event["transcript"]["text"]
+        for event in conversation.notified
+        if "transcript" in event
+    )
+
+
+@pytest.mark.parametrize("replaces_instructions", [False, True], ids=["gpt-live", "realtime"])
+async def test_someone_joining_while_the_provider_reconnects_keeps_what_was_said_alone_out_of_the_reseed(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, replaces_instructions: bool
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(400, _voiced("rob")))
+    harness.start(
+        [
+            {"at_input_ms": 100, "event": {"type": "output_transcript", "delta": "Your hearing is Friday."}},
+            {"at_input_ms": 100, "event": {"type": "output_done"}},
+            {"at_input_ms": 200, "event": {"type": "close", "reason": "expired"}},
+        ],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities={"replaces_instructions": replaces_instructions, "supports_truncate": False},
+        prompt_context_for=_owner_context(harness),
+    )
+    provider = harness.provider
+    assert provider is not None
+    await harness.wait_for(lambda: provider.input_ms >= 200)  # it expires there
+    await asyncio.sleep(0.05)
+    assert len(harness.sent("connect")) == 1
+
+    conversation.company.add("alex")  # during the reconnect's first wait
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    second = harness.sent("connect")[1]
+    assert OWNER_FACTS not in second.args["instructions"]
+    assert "hearing" not in second.args["history_summary"]
+
+
+async def test_what_the_owner_said_alone_that_is_transcribed_after_someone_joins_is_not_reseeded(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _StillReplyingAsItCloses(
+        [],
+        [InputTranscript(delta="remind me to call my lawyer Ana", final=True, start_ms=0)],
+        capabilities=GPT_LIVE_CAPABILITIES,
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 100)
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    assert "lawyer" not in harness.sent("connect")[1].args["history_summary"]
+    assert all(
+        "lawyer" not in event["transcript"]["text"]
+        for event in conversation.notified
+        if "transcript" in event
+    )
+
+
+class _HeldPlaybackConversation(_MemoryConversation):
+    """A ``_MemoryConversation`` with a playback queue (``audible``) that ``flush_playback`` empties,
+    whose ``play`` waits for ``release_play`` once ``hold_play`` is set, as a slow transport write."""
+
+    def __init__(self, frames: Sequence[InputFrame]) -> None:
+        super().__init__(frames)
+        self.audible: list[bytes] = []
+        self.hold_play = False
+        self.play_held = asyncio.Event()
+        self.release_play = asyncio.Event()
+
+    async def play(self, pcm16_mono: bytes, rate: int) -> None:
+        if self.hold_play:
+            self.play_held.set()
+            await self.release_play.wait()
+        await super().play(pcm16_mono, rate)
+        self.audible.append(pcm16_mono)
+
+    async def flush_playback(self) -> None:
+        self.audible.clear()
+
+
+async def test_audio_reaching_the_conversation_after_someone_joins_is_flushed_before_the_restarted_session(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _HeldPlaybackConversation(_frames(200, _voiced("rob")))
+    provider = _SlowProvider(
+        [{"at_input_ms": 100, "event": {"type": "output_audio", "ms": 5000}}],
+        held={"close"},
+        capabilities={"replaces_instructions": False, "supports_truncate": False},
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+    conversation.hold_play = True
+    await harness.wait_for(conversation.play_held.is_set)
+
+    conversation.company.add("alex")  # the join's flush runs while a chunk is still on its way
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: provider.closing)
+    conversation.hold_play = False
+    conversation.release_play.set()
+    await harness.wait_for(lambda: bool(conversation.audible))  # it arrived after the flush
+
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await asyncio.sleep(0.1)
+    assert conversation.audible == []
+
+
+async def test_when_the_person_spoken_to_leaves_the_instructions_move_to_the_conversations_person(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")) + _frames(200, _voiced("alex")))
+    harness.start([], [], person="rob", conversation=conversation, prompt_context_for=_owner_context(harness))
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))
+    assert OWNER_FACTS not in harness.texts("update_instructions")[-1]  # on alex now
+
+    conversation.departed.add("alex")
+    conversation.feed(_frames(200))
+    await harness.wait_for(lambda: OWNER_FACTS in harness.texts("update_instructions")[-1])
+
+
+async def test_when_the_person_spoken_to_leaves_the_instructions_move_to_the_one_person_left(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start([], [], conversation=conversation, prompt_context_for=_owner_context(harness))
+    await harness.wait_for(lambda: OWNER_FACTS in "".join(harness.texts("update_instructions")[-1:]))
+    conversation.feed(_frames(200, _voiced("alex")))
+    await harness.wait_for(lambda: OWNER_FACTS not in harness.texts("update_instructions")[-1])
+
+    conversation.departed.add("alex")
+    conversation.feed(_frames(200))
+    await harness.wait_for(lambda: OWNER_FACTS in harness.texts("update_instructions")[-1])
+
+
+@pytest.mark.parametrize("replaces_instructions", [False, True], ids=["gpt-live", "realtime"])
+async def test_someone_joining_cuts_nothing_off_when_nothing_private_is_in_the_instructions(
+    harness: _Harness, replaces_instructions: bool
+) -> None:
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [
+            {"at_input_ms": 100, "event": {"type": "output_transcript", "delta": "Sure, here it is."}},
+            {"at_input_ms": 100, "event": {"type": "output_done"}},
+            {"at_input_ms": 100, "event": {"type": "output_audio", "ms": 2000, "item_id": "item_1"}},
+            {"after_ms": 1000, "event": {"type": "close", "reason": "expired"}},
+        ],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities={"replaces_instructions": replaces_instructions, "supports_truncate": True},
+        prompt_context_for=lambda profile, person, alone: service.prompt_context(
+            harness.config, profile, person, alone
+        ),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    played_at_join = sum(len(pcm) for pcm in conversation.played)
+    await asyncio.sleep(0.4)
+    played_ms = (sum(len(pcm) for pcm in conversation.played) - played_at_join) / 2 / RATE * 1000
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    assert played_ms > 250, "the answer was cut off when alex joined"
+    assert harness.sent("truncate") == []
+    assert "Sure, here it is." in harness.sent("connect")[1].args["history_summary"]
+
+
+class _ConnectingRealtimeProvider(FakeProvider):
+    """A fake provider whose ``connect`` after the first waits for ``release``, and whose ``truncate``
+    raises meanwhile, as ``RealtimeProvider`` does with no socket open yet."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.release = asyncio.Event()
+        self.connecting = False
+        self._connects = 0
+
+    async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
+        self._connects += 1
+        if self._connects > 1:
+            self.connecting = True
+            await self.release.wait()
+        await super().connect(instructions, voice, history_summary)
+        self.connecting = False
+
+    async def truncate(self, item_id: str, audio_end_ms: int) -> None:
+        if self.connecting:
+            raise RuntimeError("connect() has not succeeded yet")
+        await super().truncate(item_id, audio_end_ms)
+
+
+async def _start_rob_alone_on_general_with_a_held_update(
+    harness: _Harness, script: Iterable[Mapping[str, Any]] = ()
+) -> tuple[_MemoryConversation, _SlowProvider]:
+    """Start a Realtime-style session for rob, the owner, alone on general (whose instructions carry
+    none of his notes); instruction updates wait for ``provider.release``."""
+    await harness.active_profiles.switch("rob", "general")
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _SlowProvider(script, held={"update_instructions"})
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 200)
+    assert OWNER_FACTS not in harness.sent("connect")[0].args["instructions"]
+    return conversation, provider
+
+
+async def test_someone_joining_while_an_update_brings_the_owners_notes_in_restarts_the_provider(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation, provider = await _start_rob_alone_on_general_with_a_held_update(harness)
+    await harness.active_profiles.switch("rob", "stock-picker")  # his notes go in, in place
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))
+    assert OWNER_FACTS in harness.texts("update_instructions")[0]
+
+    conversation.company.add("alex")  # before the provider confirms the update
+    conversation.feed(_frames(40))
+    await asyncio.sleep(0.1)
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=3)
+
+    assert OWNER_FACTS not in harness.sent("connect")[1].args["instructions"]
+
+
+async def test_a_notice_waits_out_a_muted_provider_session_for_the_restarted_one(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation, provider = await _start_rob_alone_on_general_with_a_held_update(harness)
+    await harness.active_profiles.switch("rob", "stock-picker")
+    await harness.wait_for(lambda: bool(harness.sent("say")))  # confirmed before anyone joins
+    conversation.company.add("alex")
+    conversation.feed(_frames(40))
+    await asyncio.sleep(0.1)
+
+    await harness.active_profiles.switch("rob", "general")  # a notice while the session is muted
+    await asyncio.sleep(0.2)
+    assert harness.texts("say") == [switched_to("stock-picker")], "nothing is said to the muted session"
+
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("say")) == 2)
+    methods = [call.method for call in provider.calls]
+    assert methods.index("say", methods.index("say") + 1) > methods.index("connect", 1)
+    assert harness.texts("say")[1] == switched_to("general")
+
+
+async def test_a_call_answered_after_someone_joins_gets_no_output_from_the_muted_session(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    caplog.set_level(logging.INFO, logger="hermes_duplex.session")
+    switch_call = {
+        "at_input_ms": 220,
+        "event": {
+            "type": "delegation",
+            "id": "call_1",
+            "target": "switch_profile",
+            "tool_args": {"profile": "stock-picker"},
+        },
+    }
+    conversation, provider = await _start_rob_alone_on_general_with_a_held_update(harness, [switch_call])
+    entered, answer = asyncio.Event(), asyncio.Event()
+
+    async def slow_listener(profile: str) -> bool:
+        entered.set()
+        await answer.wait()
+        return False
+
+    harness.active_profiles.subscribe("rob", slow_listener)  # after the session's own listener
+    conversation.feed(_frames(40, _voiced("rob")))
+    await asyncio.wait_for(entered.wait(), timeout=3)  # the switch is under way, the update held
+    conversation.company.add("alex")
+    conversation.feed(_frames(40))
+    await asyncio.sleep(0.1)
+
+    answer.set()  # the call is answered now, while the session that made it is muted
+    await asyncio.sleep(0.1)
+    assert "call_1" not in {call.args["call_id"] for call in harness.sent("send_function_output")}
+    assert "call call_1 was made by an earlier or muted provider session" in caplog.text
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+
+async def test_someone_joining_while_a_realtime_provider_reconnects_does_not_end_the_session(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(300, _voiced("rob")))
+    provider = _ConnectingRealtimeProvider(
+        [
+            {"at_input_ms": 100, "event": {"type": "output_audio", "ms": 100, "item_id": "item_1"}},
+            {"at_input_ms": 100, "event": {"type": "output_done"}},
+            {"at_input_ms": 250, "event": {"type": "close", "reason": "expired"}},
+        ],
+        capabilities=DEFAULT_CAPABILITIES,
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.connecting)  # reconnecting with the owner's notes
+    conversation.company.add("alex")
+    conversation.feed(_frames(40))
+    await asyncio.sleep(0.2)
+    provider.release.set()
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 3)
+
+    assert harness.sent("truncate") == [], "nothing to truncate while connecting"
+    assert OWNER_FACTS not in harness.sent("connect")[2].args["instructions"]
+    assert harness.conversation is not None and harness.conversation.closed_reason is None

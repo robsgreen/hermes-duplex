@@ -1,0 +1,4 @@
+{"wait_for": "session.start"}
+{"type": "session.started", "event_id": "event_1", "session": {"id": "sess_3", "model": "gpt-live-1"}}
+{"type": "session.output_audio.delta", "event_id": "event_2", "delta": "AAABAP//"}
+{"drop": true}

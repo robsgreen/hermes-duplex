@@ -1,0 +1,4 @@
+{"wait_for": "session.start"}
+{"type": "session.started", "event_id": "event_1", "session": {"id": "sess_2", "model": "gpt-live-1"}}
+{"type": "session.delegation.created", "event_id": "event_2", "delegation": {"id": "del_9", "target": "decisions", "type": "delegation"}, "offset_ms": 800}
+{"close": {"code": 1000}}

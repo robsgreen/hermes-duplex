@@ -1,0 +1,7 @@
+model:
+  provider: fake
+  default: general-default
+providers:
+  fake:
+    api: ${llm_url}
+    transport: chat_completions
