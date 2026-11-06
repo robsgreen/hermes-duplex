@@ -5,14 +5,17 @@ import asyncio
 import json
 import os
 import signal
+import threading
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import aiohttp
 import discord
+import numpy as np
+import numpy.typing as npt
 import pytest
 import yaml
 from aiohttp import web
@@ -479,4 +482,33 @@ async def test_start_loads_each_persons_saved_active_profile(tmp_path: Path) -> 
     try:
         assert duplex._active_profiles.get("rob") == "stock-picker"
     finally:
+        await duplex.stop()
+
+
+class _HeldEmbedder:
+    """``fake_embed`` that holds every call after the first (the router's) until ``release`` is set."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.release = threading.Event()
+
+    def __call__(self, texts: Sequence[str]) -> npt.NDArray[np.floating]:
+        self.calls += 1
+        if self.calls > 1:
+            self.release.wait(timeout=5)
+        return fake_embed(texts)
+
+
+async def test_start_prewarms_the_switch_target_model_without_waiting_for_it(tmp_path: Path) -> None:
+    embed = _HeldEmbedder()
+    duplex = build_service(_config(tmp_path), embed=embed)
+
+    await asyncio.wait_for(duplex.start(), timeout=2)  # the prewarm is still held
+    try:
+        await _wait_until(lambda: embed.calls == 2)  # the matcher embeds its phrases in the background
+        embed.release.set()
+        assert await duplex._active_profiles.resolve("the anything agent") == "general"
+        assert embed.calls == 3, "only the words are embedded now"
+    finally:
+        embed.release.set()
         await duplex.stop()

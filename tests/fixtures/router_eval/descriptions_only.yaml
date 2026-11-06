@@ -58,8 +58,8 @@ phrases:
   - {text: never mind cancel the task, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
   - {text: stop working on that, profile: _control, active: general, effort: medium, control_intent: cancel}
   - {text: forget about it, profile: _control, active: stock-picker, effort: medium, control_intent: cancel}
-  # _switch: requests to switch profiles the switch-request parser does not read, and tasks that say
-  # "go to" or "use" and must stay tasks.
+  # _switch: requests to switch profiles in words beyond a profile's name, and tasks that say "go to"
+  # or "use" and must stay tasks.
   - {text: go to the stock trader profile, profile: _switch, active: general, effort: medium, target: stock-picker}
   - {text: use my portfolio agent, profile: _switch, active: general, effort: medium, target: stock-picker}
   - {text: take me to the general assistant, profile: _switch, active: stock-picker, effort: medium, target: general}

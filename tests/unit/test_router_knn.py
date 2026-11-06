@@ -9,8 +9,9 @@ import numpy.typing as npt
 import pytest
 
 from hermes_duplex.config import CONTROL_PROFILE, ControlExamples, ProfileConfig
+from hermes_duplex.router import knn
 from hermes_duplex.router.base import ProfileSpec, RouteRequest, control_spec
-from hermes_duplex.router.knn import KnnBackend, ProfileMatcher
+from hermes_duplex.router.knn import Embedder, KnnBackend, ProfileMatcher
 from tests.fakes.fake_embedder import fake_embed
 
 PROFILES = (
@@ -170,7 +171,7 @@ async def test_other_words_resolve_by_meaning_to_a_clear_winner(words: str, prof
     "words",
     [
         "switch to Sarah",  # like nothing a profile is
-        "switch agents",  # nothing left once the asking is dropped
+        "use my agent",  # nothing left once the asking is dropped
         "go to the stocks general agent",  # as near to one as to the other
     ],
 )
@@ -182,9 +183,87 @@ async def test_profile_phrases_are_embedded_once() -> None:
     embed = _CountingEmbedder()
     matcher = ProfileMatcher(MATCHED_PROFILES, embed)
 
-    await matcher.resolve("the trades one")
-    await matcher.resolve("the holdings one")
+    await matcher.resolve("the trades agent")
+    await matcher.resolve("the holdings agent")
 
     phrases = ["stock picker", "stocks", "the stock picker", MATCHED_PROFILES["stock-picker"].description]
     phrases += ["general", MATCHED_PROFILES["general"].description]
     assert embed.texts == [*phrases, "trades", "holdings"]
+
+
+@pytest.mark.parametrize(
+    ("words", "profile"),
+    [
+        ("my holdings", None),  # "holdings" is only in stock-picker's description
+        ("my holdings agent", "stock-picker"),
+        ("the reminders", None),
+        ("the reminders bot", "general"),
+        ("the stock trader", "stock-picker"),  # near its name, so no agent noun is needed
+    ],
+)
+async def test_a_description_counts_only_when_the_words_call_it_an_agent(
+    words: str, profile: str | None
+) -> None:
+    assert await ProfileMatcher(MATCHED_PROFILES, fake_embed).resolve(words) == profile
+
+
+async def test_a_further_request_in_the_words_is_not_matched() -> None:
+    embed = _CountingEmbedder()
+
+    await ProfileMatcher(MATCHED_PROFILES, embed).resolve(
+        "connect me with the investing agent, what's Apple at"
+    )
+
+    assert embed.texts[-1] == "investing"
+
+
+class _FailingLoad:
+    """Stands in for ``load_model``: fails until ``works`` is set, counting its calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.works = False
+
+    def __call__(self, model: str) -> Embedder:
+        self.calls += 1
+        if not self.works:
+            raise OSError("no network")
+        return fake_embed
+
+
+async def test_a_failed_model_load_is_not_retried_for_a_while(monkeypatch: pytest.MonkeyPatch) -> None:
+    load = _FailingLoad()
+    monkeypatch.setattr(knn, "load_model", load)
+    now = [0.0]
+    matcher = ProfileMatcher(MATCHED_PROFILES, clock=lambda: now[0])
+
+    with pytest.raises(OSError):
+        await matcher.resolve("the holdings agent")
+    now[0] = knn.MODEL_RETRY_S - 1
+    load.works = True
+    with pytest.raises(RuntimeError):
+        await matcher.resolve("the holdings agent")
+    assert load.calls == 1, "remembered: not tried again"
+    assert await matcher.resolve("stocks") == "stock-picker", "names and aliases need no model"
+
+    now[0] = knn.MODEL_RETRY_S
+    assert await matcher.resolve("the holdings agent") == "stock-picker"
+    assert load.calls == 2
+
+
+async def test_prewarm_loads_the_model_and_logs_a_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    load = _FailingLoad()
+    monkeypatch.setattr(knn, "load_model", load)
+    matcher = ProfileMatcher(MATCHED_PROFILES)
+
+    await matcher.prewarm()  # does not raise
+    assert "could not load the switch-target model" in caplog.text
+
+    load.works = True
+    warm = ProfileMatcher(MATCHED_PROFILES)
+    await warm.prewarm()
+    assert load.calls == 2
+    assert await warm.resolve("the holdings agent") == "stock-picker"
+    assert load.calls == 2, "loaded once, by the prewarm"

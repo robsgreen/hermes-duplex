@@ -5,6 +5,7 @@ import pytest
 
 from hermes_duplex.switching import (
     SwitchRequest,
+    TargetWords,
     is_affirmative,
     is_negative,
     read_switch_request,
@@ -20,7 +21,7 @@ NAMES = {
 }
 
 
-def _target(text: str, names: dict[str, list[str]]) -> str:
+def _target(text: str, names: dict[str, list[str]]) -> str | None:
     """The target of the switch request ``text`` makes, which must make one."""
     request = read_switch_request(text, names)
     assert request is not None, f"{text!r} makes no switch request"
@@ -69,15 +70,22 @@ def test_switch_phrase_names_a_profile(text: str, profile: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "text", ["switch to finance", "let me talk to the finance agent", "Can I change to accounts, please?"]
+    ("text", "words"),
+    [
+        ("switch to finance", "finance"),
+        ("let me talk to the finance agent", "finance agent"),
+        ("Can I change to accounts, please?", "accounts"),
+    ],
 )
-def test_unknown_target_of_a_switch_that_opens_what_is_said_is_ambiguous(text: str) -> None:
-    assert read_switch_request(text, NAMES) == SwitchRequest("ambiguous", None)
+def test_unknown_target_of_a_switch_that_opens_what_is_said_is_left_to_its_meaning(
+    text: str, words: str
+) -> None:
+    assert read_switch_request(text, NAMES) == SwitchRequest(None, words, None)
 
 
-def test_a_bare_switch_to_a_word_that_is_no_profile_still_asks_which() -> None:
+def test_a_bare_switch_to_a_word_that_is_no_profile_still_is_a_switch_request() -> None:
     # Indistinguishable from "switch to finance" without knowing what the word means.
-    assert read_switch_request("switch to Celsius", NAMES) == SwitchRequest("ambiguous", None)
+    assert read_switch_request("switch to Celsius", NAMES) == SwitchRequest(None, "Celsius", None)
 
 
 @pytest.mark.parametrize(
@@ -139,7 +147,7 @@ def test_a_phrase_that_asks_for_no_switch_is_none(text: str) -> None:
 def test_alias_that_fits_two_profiles_is_ambiguous() -> None:
     names = {"stock-picker": ["the markets"], "news": ["the markets"]}
 
-    assert read_switch_request("talk to the markets", names) == SwitchRequest("ambiguous", None)
+    assert read_switch_request("talk to the markets", names) == SwitchRequest("ambiguous", "markets", None)
 
 
 def test_exact_name_wins_over_another_profiles_alias() -> None:
@@ -200,24 +208,24 @@ def test_request_after_the_target_is_the_rest(text: str, rest: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "target"),
+    ("text", "target", "words"),
     [
-        ("switch to stock-picker", "stock-picker"),
-        ("let me talk to the stock picker please", "stock-picker"),
-        ("switch to stocks, thanks!", "stock-picker"),
-        ("go back to general and thank you", "general"),
-        ("switch to the general profile", "general"),
-        ("switch to general and", "general"),
-        ("talk to stocks about", "stock-picker"),
+        ("switch to stock-picker", "stock-picker", "stock-picker"),
+        ("let me talk to the stock picker please", "stock-picker", "stock picker"),
+        ("switch to stocks, thanks!", "stock-picker", "stocks"),
+        ("go back to general and thank you", "general", "general"),
+        ("switch to the general profile", "general", "general profile"),
+        ("switch to general and", "general", "general"),
+        ("talk to stocks about", "stock-picker", "stocks"),
     ],
 )
-def test_polite_or_unjoined_words_after_the_target_are_no_request(text: str, target: str) -> None:
-    assert read_switch_request(text, NAMES) == SwitchRequest(target, None)
+def test_polite_or_unjoined_words_after_the_target_are_no_request(text: str, target: str, words: str) -> None:
+    assert read_switch_request(text, NAMES) == SwitchRequest(target, words, None)
 
 
 def test_about_joins_a_request_only_to_a_switch_that_opens_what_is_said() -> None:
     assert read_switch_request("I'd like to talk to general about Paris", NAMES) == SwitchRequest(
-        "general", "Paris"
+        "general", "general", "Paris"
     )
     assert read_switch_request("remind me to talk to general about Paris", NAMES) is None
 
@@ -258,9 +266,15 @@ def test_spoken_form_is_how_a_name_is_said(name: str, spoken: tuple[str, ...]) -
     assert spoken_form(name) == spoken
 
 
-@pytest.mark.parametrize("text", ["ok, switch to finance please", "Hmm, can we talk to the finance agent?"])
-def test_an_unknown_target_said_alone_after_lead_ins_asks_which(text: str) -> None:
-    assert read_switch_request(text, NAMES) == SwitchRequest("ambiguous", None)
+@pytest.mark.parametrize(
+    ("text", "words"),
+    [
+        ("ok, switch to finance please", "finance"),
+        ("Hmm, can we talk to the finance agent?", "finance agent"),
+    ],
+)
+def test_an_unknown_target_said_alone_after_lead_ins_is_a_switch_request(text: str, words: str) -> None:
+    assert read_switch_request(text, NAMES) == SwitchRequest(None, words, None)
 
 
 @pytest.mark.parametrize(
@@ -337,21 +351,99 @@ def test_go_to_a_place_is_no_switch_request(text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "text",
-    ["go to the stock trader profile", "go back to the markets agent please", "let me go to the money agent"],
+    ("text", "words"),
+    [
+        ("go to the stock trader profile", "stock trader profile"),
+        ("go back to the markets agent please", "markets agent"),
+        ("let me go to the money agent", "money agent"),
+    ],
 )
-def test_go_to_an_agent_that_fits_no_name_asks_which(text: str) -> None:
-    assert _target(text, NAMES) == "ambiguous"
+def test_go_to_an_agent_that_fits_no_name_is_left_to_its_meaning(text: str, words: str) -> None:
+    assert read_switch_request(text, NAMES) == SwitchRequest(None, words, None)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Each phrasing of the table, with a target that ends in an agent noun.
+        (
+            "use my portfolio agent",
+            SwitchRequest(None, "my portfolio agent", None),
+        ),  # "my" keeps it from the alias
+        ("use my retirement agent", SwitchRequest(None, "my retirement agent", None)),
+        (
+            "connect me with the stock research assistant",
+            SwitchRequest(None, "stock research assistant", None),
+        ),
+        ("connect me to the general bot", SwitchRequest("general", "general bot", None)),
+        ("give me the house profile", SwitchRequest("home", "house profile", None)),
+        ("I need the trading agent", SwitchRequest(None, "trading agent", None)),
+        ("I want the money assistant please", SwitchRequest(None, "money assistant", None)),
+        ("put me on the trading agent", SwitchRequest(None, "trading agent", None)),
+        ("take me to the everyday assistant", SwitchRequest("general", "everyday assistant", None)),
+        ("can I speak with the markets bot", SwitchRequest(None, "markets bot", None)),
+        ("let me talk with stocks", SwitchRequest("stock-picker", "stocks", None)),
+        # A place phrasing with a name or alias needs no agent noun.
+        ("move me to stocks", SwitchRequest("stock-picker", "stocks", None)),
+        ("put me on the house", SwitchRequest("home", "house", None)),
+        # A target that ends in an agent noun keeps a further request apart.
+        (
+            "connect me with the investing agent, what's Apple at",
+            SwitchRequest(None, "investing agent", "what's Apple at"),
+        ),
+        (
+            "switch to the investing agent and check NVDA",
+            SwitchRequest(None, "investing agent", "check NVDA"),
+        ),
+        ("talk to the travel agent about my trip", SwitchRequest(None, "travel agent", "my trip")),
+    ],
+)
+def test_switch_phrasings_and_agent_nouns(text: str, expected: SwitchRequest) -> None:
+    assert read_switch_request(text, NAMES) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "can I talk to Sarah about the stock picker",
+        "connect me with my accountant",
+        "find me a travel agent",
+        "I need a travel agent",
+        "change my profile picture",
+        "use a different approach",
+        "use the stock picker",  # an agent phrasing always needs an agent noun
+        "use stocks agent",  # and "the" or "my"
+        "call my agent",
+        "go to the gym",
+        "put me on hold",
+        "take me to the airport",
+        "give me the weather",
+        "connect me to the trading desk",
+        "I need the latest report from my real estate agent",  # too long for a target
+        "use my agent to book a flight",
+        "help me pick a different agent for my house sale",
+        "remind me to use the stock agent",  # mid-sentence, only an exact name counts
+    ],
+)
+def test_wordings_that_only_sound_like_a_switch_are_none(text: str) -> None:
+    assert read_switch_request(text, NAMES) is None
 
 
 @pytest.mark.parametrize(
     ("text", "words"),
     [
-        ("go to the stock trader profile", "stock trader"),
-        ("Can I talk to my portfolio agent, please?", "portfolio"),
-        ("connect me with the agent for reminders", "for reminders"),
-        ("switch agents", ""),
+        ("go to the stock trader profile", TargetWords("stock trader", True)),
+        ("Can I talk to my portfolio agent, please?", TargetWords("portfolio", True)),
+        ("connect me with the agent for reminders", TargetWords("for reminders", True)),
+        ("my stock broker", TargetWords("stock broker", False)),
+        ("the stock trader", TargetWords("stock trader", False)),
+        # Ends where the parser ends a target: at a connector, "about", or a sentence break.
+        ("connect me with the investing agent, what's Apple at", TargetWords("investing", True)),
+        ("talk to Sarah about the stock picker", TargetWords("sarah", False)),
+        ("switch to the money agent and check NVDA", TargetWords("money", True)),
+        ("I want to switch to the stock agent", TargetWords("stock", True)),
+        ("", TargetWords("", False)),
     ],
 )
-def test_target_words_drop_the_asking(text: str, words: str) -> None:
+def test_target_words_drop_the_asking(text: str, words: TargetWords) -> None:
     assert target_words(text) == words

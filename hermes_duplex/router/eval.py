@@ -14,11 +14,16 @@ A phrase file is YAML with a ``phrases`` list and an optional ``profiles`` secti
   for as its ``target``. A follow-up names the phrase it ``follows``, said earlier by the same
   speaker. A ``control_intent`` key is allowed and not scored.
 
+``_switch`` is no router choice: the session reads switch requests with the switch-request parser
+(``switching.read_switch_request``) before routing, and resolves words that fit no profile name or
+alias by meaning (``ProfileMatcher``). So ``_switch`` phrases are not routed, and every phrase is read
+by the parser, the way the session reads it, to score how well switch requests are told from tasks.
+
 For each target the eval reports effort accuracy, suggestion precision and recall, how well it tells
-``_control`` requests and ``_switch`` requests from tasks (precision, recall, and how often a task is
-taken as one), how often a switch request's words resolve to its ``target`` (``ProfileMatcher``), how
-often the deciding backend's top choice is the labelled one (with macro-F1 and the confusion matrix),
-latency percentiles, and the deadline-miss rate (``EvalReport``).
+``_control`` requests from tasks (precision, recall, and how often a task is taken as one), how often
+the deciding backend's top choice is the labelled one (with macro-F1 and the confusion matrix),
+latency percentiles, and the deadline-miss rate; and, the same for every target, how well the parser
+and the matcher tell switch requests from tasks and find their ``target`` (``EvalReport``).
 """
 
 import dataclasses
@@ -32,8 +37,8 @@ from typing import Any, cast, get_args
 import numpy as np
 import yaml
 
-from ..config import CONTROL_PROFILE, SWITCH_PROFILE, Config, ProfileConfig, RouterConfig
-from ..profiles import ProfileResolver
+from ..config import CONTROL_PROFILE, Config, ProfileConfig, RouterConfig
+from ..profiles import ProfileResolver, resolve_switch_request
 from .base import Effort, RouterBackend
 from .composite import CompositeRouter
 from .factory import build_backends
@@ -44,13 +49,16 @@ logger = logging.getLogger(__name__)
 COMPOSITE = "composite"
 """The target name of the composite router, beside the backend names."""
 
+SWITCH_LABEL = "_switch"
+"""The label of a phrase that asks to switch profiles."""
+
 NO_ANSWER = "no_answer"
 """The confusion-matrix column of phrases no backend answered in time."""
 
 _EFFORTS: tuple[Effort, ...] = get_args(Effort)
 _PHRASE_KEYS = frozenset({"text", "profile", "active", "effort", "follows", "control_intent", "target"})
 _PROFILE_KEYS = frozenset({"description", "examples", "aliases"})
-_NOT_TASKS = (CONTROL_PROFILE, SWITCH_PROFILE)
+_NOT_TASKS = (CONTROL_PROFILE, SWITCH_LABEL)
 """The labels of phrases that are no task: they never run on a profile."""
 
 
@@ -90,10 +98,11 @@ class EvalReport:
 
     target: str
     phrase_count: int
+    """Phrases routed: all but the ``_switch`` ones."""
     deadline_ms: int
     effort_accuracy: float | None
-    """Share of task phrases (labelled with a profile, not ``_control`` or ``_switch``) whose effort is
-    the labelled one. A backend that judges no effort is scored on the router's default effort."""
+    """Share of task phrases (labelled with a profile) whose effort is the labelled one. A backend
+    that judges no effort is scored on the router's default effort."""
     effort_off_by_one_rate: float | None
     """Share of task phrases exactly one effort level off (low vs medium, medium vs high)."""
     suggestions_made: int
@@ -113,20 +122,20 @@ class EvalReport:
     """Of the task phrases, the share routed as ``_control`` requests, so never run; None when there
     are none."""
     switch_precision: float | None
-    """Of the phrases routed as switch requests (``RouteDecision.switch_request``), the share labelled
-    ``_switch``; None when none were."""
+    """Of all phrases, those the session takes for switch requests (``SwitchScores``), the share
+    labelled ``_switch``; None when it takes none. The same for every target."""
     switch_recall: float | None
-    """Of the phrases labelled ``_switch``, the share routed as switch requests; None when there are
-    none."""
+    """Of the phrases labelled ``_switch``, the share the session takes for switch requests; None
+    when there are none."""
     task_as_switch_rate: float | None
-    """Of the task phrases, the share routed as switch requests, so never run; None when there are
-    none."""
+    """Of the task phrases, the share the session takes for switch requests, so never runs; None when
+    there are none."""
     target_accuracy: float | None
-    """Of the ``_switch`` phrases with a ``target``, the share whose whole text resolves to it
-    (``ProfileMatcher.resolve``), whether or not the router took them as switch requests; None when
-    there are none or no matcher was given."""
+    """Of the ``_switch`` phrases with a ``target``, the share the session takes for a switch to that
+    target; None when there are none or no matcher was given."""
     choice_accuracy: float
-    """Share of phrases whose top-scored choice (profile or ``_control``) is the labelled one. This
+    """Share of routed phrases (all but ``_switch`` ones) whose top-scored choice (profile or
+    ``_control``) is the labelled one. This
     is the deciding backend's scoring: a top ``_control`` below the router's bar still counts as
     ``_control`` here, though the request is routed as a task."""
     macro_f1: float
@@ -147,13 +156,12 @@ class EvalReport:
 @dataclass(frozen=True)
 class _Outcome:
     """What a target decided for one phrase; ``choice`` None means no backend answered. ``control``
-    and ``switch`` are whether it was routed as a ``_control`` or a switch request."""
+    is whether it was routed as a ``_control`` request."""
 
     choice: str | None
     effort: Effort
     suggestion: str | None
     control: bool
-    switch: bool
     latency_ms: float
     in_time: bool
 
@@ -239,8 +247,10 @@ async def evaluate(
     over ``backends``. Phrases are routed in order, each with its ``active`` profile and every profile
     permitted. A follow-up is sent by the speaker of the phrase it follows, with that speaker's earlier
     phrases as history; each other phrase starts a new speaker. ``clock`` returns seconds and times
-    each request; the deadline is ``router.deadline_ms``. ``phrases`` must not be empty. ``resolver``
-    resolves each ``_switch`` phrase with a ``target`` for ``target_accuracy`` (None: not scored).
+    each request; the deadline is ``router.deadline_ms``. ``phrases`` must hold one that is not
+    ``_switch``. Every phrase is also read for a switch request (``switch_scores``), with ``resolver``
+    resolving words that fit no profile name or alias (None: such words name no profile, and
+    ``target_accuracy`` is not scored).
 
     Raises ``PhraseFileError`` when a phrase's profile is neither a profile nor ``_control`` or
     ``_switch``, its ``target`` is not a profile, or its ``active`` is not a profile; ``ValueError``
@@ -248,11 +258,10 @@ async def evaluate(
     rejects its arguments. A backend raising from ``classify``
     leaves the phrase unanswered; one raising from ``configure`` propagates.
     """
-    choices = (*profiles, *_NOT_TASKS)
-    if unknown := sorted({phrase.profile for phrase in phrases} - set(choices)):
+    choices = (*profiles, CONTROL_PROFILE)
+    if unknown := sorted({phrase.profile for phrase in phrases} - {*choices, SWITCH_LABEL}):
         raise PhraseFileError(f"phrases expect profiles the router does not have: {', '.join(unknown)}")
-    targeted = [(phrase, phrase.target) for phrase in phrases if phrase.target is not None]
-    if unknown := sorted({target for _, target in targeted if target not in profiles}):
+    if unknown := sorted({phrase.target for phrase in phrases if phrase.target not in (None, *profiles)}):
         raise PhraseFileError(f"phrases target profiles the router does not have: {', '.join(unknown)}")
     if unknown := sorted({phrase.active for phrase in phrases} - set(profiles)):
         raise PhraseFileError(
@@ -262,11 +271,14 @@ async def evaluate(
     if missing := [target for target in targets if target != COMPOSITE and target not in by_name]:
         raise ValueError(f"no backend named '{missing[0]}' to evaluate")
 
-    target_accuracy: float | None = None
-    if resolver is not None and targeted:
-        resolved = [await resolver.resolve(phrase.text) == target for phrase, target in targeted]
-        target_accuracy = sum(resolved) / len(resolved)
+    routed = [index for index, phrase in enumerate(phrases) if phrase.profile != SWITCH_LABEL]
+    if not routed:
+        raise PhraseFileError(f"every phrase is '{SWITCH_LABEL}': there is nothing to route")
+
+    switches = await switch_scores(phrases, profiles, resolver)
     speakers = _speakers(phrases)
+    routed_phrases = [phrases[index] for index in routed]
+    routed_speakers = [speakers[index] for index in routed]
     reports: list[EvalReport] = []
     for target in targets:
         if target == COMPOSITE:
@@ -274,9 +286,59 @@ async def evaluate(
         else:
             alone = dataclasses.replace(router, backend=target, fast_path=None)
             composite = CompositeRouter(alone, profiles, [by_name[target]], clock=clock)
-        outcomes = await _run(composite, choices, phrases, speakers, router.deadline_ms, clock)
-        reports.append(_report(target, phrases, outcomes, choices, router.deadline_ms, target_accuracy))
+        outcomes = await _run(composite, choices, routed_phrases, routed_speakers, router.deadline_ms, clock)
+        reports.append(_report(target, routed_phrases, outcomes, choices, router.deadline_ms, switches))
     return reports
+
+
+@dataclass(frozen=True)
+class SwitchScores:
+    """How well the session tells switch requests from tasks in a phrase file, and finds their target:
+    ``EvalReport``'s ``switch_precision``, ``switch_recall``, ``task_as_switch_rate``, and
+    ``target_accuracy``."""
+
+    precision: float | None
+    recall: float | None
+    task_as_switch_rate: float | None
+    target_accuracy: float | None
+    taken: Mapping[str, str | None]
+    """Each phrase text the session takes for a switch request, to the profile it switches to (None:
+    it asks which agent is meant)."""
+
+
+async def switch_scores(
+    phrases: Sequence[LabelledPhrase],
+    profiles: Mapping[str, ProfileConfig],
+    resolver: ProfileResolver | None,
+) -> SwitchScores:
+    """Read each of ``phrases`` for a switch request as the session does (``resolve_switch_request``
+    over ``profiles``' names and aliases), with ``resolver`` resolving words that fit no name or
+    alias by meaning (None: they name no profile). ``_control`` phrases count as neither switch nor
+    task."""
+    names = {name: profile.aliases for name, profile in profiles.items()}
+
+    async def by_meaning(words: str) -> str | None:
+        return await resolver.resolve(words) if resolver is not None else None
+
+    taken: dict[str, str | None] = {}
+    for phrase in phrases:
+        if (request := await resolve_switch_request(phrase.text, names, by_meaning)) is not None:
+            taken[phrase.text] = None if request.target == "ambiguous" else request.target
+    labelled = [phrase for phrase in phrases if phrase.profile == SWITCH_LABEL]
+    tasks = [phrase for phrase in phrases if phrase.profile not in _NOT_TASKS]
+    targeted = [phrase for phrase in labelled if phrase.target is not None]
+    return SwitchScores(
+        precision=_share(sum(phrase.text in taken for phrase in labelled), len(taken)),
+        recall=_share(sum(phrase.text in taken for phrase in labelled), len(labelled)),
+        task_as_switch_rate=_share(sum(phrase.text in taken for phrase in tasks), len(tasks)),
+        target_accuracy=None
+        if resolver is None
+        else _share(
+            sum(phrase.text in taken and taken[phrase.text] == phrase.target for phrase in targeted),
+            len(targeted),
+        ),
+        taken=taken,
+    )
 
 
 def to_json(reports: Sequence[EvalReport]) -> dict[str, Any]:
@@ -363,17 +425,7 @@ async def _run(
         choice = max(choices, key=lambda choice: probs.get(choice, 0.0)) if probs else None
         in_time = choice is not None and latency_ms <= deadline_ms
         control = decision.control_intent is not None
-        outcomes.append(
-            _Outcome(
-                choice,
-                decision.effort,
-                decision.suggestion,
-                control,
-                decision.switch_request,
-                latency_ms,
-                in_time,
-            )
-        )
+        outcomes.append(_Outcome(choice, decision.effort, decision.suggestion, control, latency_ms, in_time))
     return outcomes
 
 
@@ -383,7 +435,7 @@ def _report(
     outcomes: Sequence[_Outcome],
     choices: Sequence[str],
     deadline_ms: int,
-    target_accuracy: float | None,
+    switches: SwitchScores,
 ) -> EvalReport:
     count = len(phrases)
     scored = list(zip(phrases, outcomes, strict=True))
@@ -396,22 +448,21 @@ def _report(
     steps = [
         abs(_EFFORTS.index(outcome.effort) - _EFFORTS.index(phrase.effort))
         for phrase, outcome in scored
-        if phrase.profile not in _NOT_TASKS
+        if phrase.profile != CONTROL_PROFILE
     ]
     suggested = [(phrase, outcome) for phrase, outcome in scored if outcome.suggestion is not None]
     right_suggestions = sum(
         outcome.suggestion == phrase.profile and phrase.profile != phrase.active
         for phrase, outcome in suggested
     )
-    switches = [
-        (phrase, outcome) for phrase, outcome in scored if phrase.profile not in (*_NOT_TASKS, phrase.active)
+    elsewhere = [
+        (phrase, outcome)
+        for phrase, outcome in scored
+        if phrase.profile not in (CONTROL_PROFILE, phrase.active)
     ]
-    tasks = [outcome for phrase, outcome in scored if phrase.profile not in _NOT_TASKS]
+    tasks = [outcome for phrase, outcome in scored if phrase.profile != CONTROL_PROFILE]
     controls = [outcome.control for phrase, outcome in scored if phrase.profile == CONTROL_PROFILE]
-    switch_requests = [outcome.switch for phrase, outcome in scored if phrase.profile == SWITCH_PROFILE]
     tasks_as_control = [outcome.control for outcome in tasks]
-    tasks_as_switch = [outcome.switch for outcome in tasks]
-    routed_as_switch = sum(outcome.switch for outcome in outcomes)
     p50, p95, p99 = np.percentile(
         [outcome.latency_ms for outcome in outcomes], [50, 95, 99], method="inverted_cdf"
     )
@@ -424,15 +475,15 @@ def _report(
         suggestions_made=len(suggested),
         suggestion_precision=_share(right_suggestions, len(suggested)),
         suggestion_recall=_share(
-            sum(outcome.suggestion == phrase.profile for phrase, outcome in switches), len(switches)
+            sum(outcome.suggestion == phrase.profile for phrase, outcome in elsewhere), len(elsewhere)
         ),
         control_precision=_share(sum(controls), sum(outcome.control for outcome in outcomes)),
         control_recall=_share(sum(controls), len(controls)),
         task_as_control_rate=_share(sum(tasks_as_control), len(tasks_as_control)),
-        switch_precision=_share(sum(switch_requests), routed_as_switch),
-        switch_recall=_share(sum(switch_requests), len(switch_requests)),
-        task_as_switch_rate=_share(sum(tasks_as_switch), len(tasks_as_switch)),
-        target_accuracy=target_accuracy,
+        switch_precision=switches.precision,
+        switch_recall=switches.recall,
+        task_as_switch_rate=switches.task_as_switch_rate,
+        target_accuracy=switches.target_accuracy,
         choice_accuracy=sum(confusion[choice][choice] for choice in choices) / count,
         macro_f1=_macro_f1(confusion, choices),
         latency_p50_ms=float(p50),
@@ -528,8 +579,8 @@ def _phrases(
             raise PhraseFileError(f"{here}.effort: expected one of {', '.join(_EFFORTS)}")
         if follows is not None and follows not in texts:
             raise PhraseFileError(f"{here}.follows: no earlier phrase is '{follows}'")
-        if target is not None and (profile != SWITCH_PROFILE or not isinstance(target, str)):
-            raise PhraseFileError(f"{here}.target: expected a profile name, on a '{SWITCH_PROFILE}' phrase")
+        if target is not None and (profile != SWITCH_LABEL or not isinstance(target, str)):
+            raise PhraseFileError(f"{here}.target: expected a profile name, on a '{SWITCH_LABEL}' phrase")
         texts.add(text)
         phrases.append(
             LabelledPhrase(

@@ -9,7 +9,7 @@ from types import MappingProxyType
 
 import pytest
 
-from hermes_duplex.config import CONTROL_PROFILE, SWITCH_PROFILE, ControlExamples, ProfileConfig, RouterConfig
+from hermes_duplex.config import CONTROL_PROFILE, ControlExamples, ProfileConfig, RouterConfig
 from hermes_duplex.providers.base import ModelChoice
 from hermes_duplex.router.base import (
     BackendResult,
@@ -142,7 +142,7 @@ async def _route(
     return await router.route(text, speaker, active_profile=active, permitted=permitted, history=history)
 
 
-async def test_choices_always_include_every_profile_control_and_switch(stub: _StubBackend) -> None:
+async def test_choices_always_include_every_profile_and_control(stub: _StubBackend) -> None:
     router = CompositeRouter(
         RouterConfig(backend="knn", control_examples=ControlExamples(status=("progress report",))),
         PROFILES,
@@ -151,13 +151,8 @@ async def test_choices_always_include_every_profile_control_and_switch(stub: _St
 
     await router.configure()
 
-    assert [spec.name for spec in stub.configured] == [
-        "stock-picker",
-        "general",
-        CONTROL_PROFILE,
-        SWITCH_PROFILE,
-    ]
-    control = stub.configured[-2]
+    assert [spec.name for spec in stub.configured] == ["stock-picker", "general", CONTROL_PROFILE]
+    control = stub.configured[-1]
     assert isinstance(control, ControlSpec)
     assert control.description == "progress of a task already running, or cancelling it"
     assert control.examples == (
@@ -171,11 +166,6 @@ async def test_choices_always_include_every_profile_control_and_switch(stub: _St
     )
     assert control.intents["progress report"] == "status"
     assert control.intents["never mind"] == "cancel"
-    switch = stub.configured[-1]
-    assert switch.description == "changing which agent or profile the user talks to"
-    assert "go to the stock picker profile" in switch.examples, "templates name each profile"
-    assert "can I talk to the general agent" in switch.examples
-    assert "switch agents" in switch.examples
 
 
 async def test_backends_see_the_speakers_active_profile(router: CompositeRouter, stub: _StubBackend) -> None:
@@ -386,51 +376,6 @@ async def test_control_needs_strong_evidence_else_the_request_is_a_task(
     assert decision.model == (None if intent is not None else FALLBACK)
 
 
-@pytest.mark.parametrize(
-    ("switch_prob", "switch_request"),
-    [
-        (0.95, True),  # exactly the bar
-        (0.949, False),  # just below it
-        (0.9, False),  # the top choice, and confident, but not strong evidence
-    ],
-)
-async def test_a_switch_request_needs_strong_evidence_else_the_request_is_a_task(
-    router: CompositeRouter, stub: _StubBackend, switch_prob: float, switch_request: bool
-) -> None:
-    stub.answer({SWITCH_PROFILE: switch_prob, "general": 1 - switch_prob, "stock-picker": 0.0})
-
-    decision = await _route(router, "go to the stock trader profile", active="stock-picker")
-
-    assert (decision.switch_request, decision.control_intent, decision.source) == (
-        switch_request,
-        None,
-        "knn",
-    )
-    assert decision.suggestion is None
-    assert decision.model == (None if switch_request else FALLBACK)
-
-
-async def test_a_control_answer_strong_enough_wins_over_a_switch(
-    router: CompositeRouter, stub: _StubBackend
-) -> None:
-    stub.answer({CONTROL_PROFILE: 0.999, SWITCH_PROFILE: 0.001}, control_intent="status")
-
-    decision = await _route(router, "what are you working on", active="general")
-
-    assert (decision.control_intent, decision.switch_request) == ("status", False)
-
-
-async def test_fast_path_switch_waits_for_the_main_path() -> None:
-    main, fast = _main(delay_s=0.05), _StubBackend()
-    main.answer({SWITCH_PROFILE: 0.99, "general": 0.01})
-    fast.answer({SWITCH_PROFILE: 0.999, "general": 0.001})
-
-    decision = await _route(_two_path_router(main, fast), "use my portfolio agent", active="general")
-
-    assert (decision.source, decision.switch_request) == ("decisions", True)
-    assert not main.cancelled
-
-
 async def test_profiles_with_only_a_description_still_run_tasks(clock: _Clock) -> None:
     """The live test on picard: with profiles that had no examples, every hand-off was answered as a
     status question. The main path leaned to ``_control`` for tasks; the ``knn`` fast path only knows
@@ -476,7 +421,6 @@ async def test_logs_one_structured_line_per_decision(clock: _Clock, caplog: pyte
         "speaker": "rob",
         "profile": "stock-picker",
         "control": None,
-        "switch": False,
         "effort": "high",
         "model": "anthropic/deep-1",
         "suggestion": "general",
@@ -528,12 +472,7 @@ async def test_configures_both_paths() -> None:
 
     await _two_path_router(main, fast).configure()
 
-    assert [spec.name for spec in main.configured] == [
-        "stock-picker",
-        "general",
-        CONTROL_PROFILE,
-        SWITCH_PROFILE,
-    ]
+    assert [spec.name for spec in main.configured] == ["stock-picker", "general", CONTROL_PROFILE]
     assert main.configured == fast.configured
 
 

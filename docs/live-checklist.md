@@ -300,7 +300,7 @@ provider each result is for. Start each on `general` (say "back to general" firs
 
 1. Say "switch to stock-picker".
 2. Say "let me talk to the stock picker" (an alias for the profile already active).
-3. Say "switch to finance".
+3. Say "switch to Sarah".
 4. Say "back to general and what's the weather tomorrow?"
 5. Stop the service, start it again, rejoin, and ask "what's the weather?"
 6. Say "don't switch to stocks", then "remind me to talk to Sarah tomorrow", then "should I move my
@@ -311,9 +311,11 @@ provider each result is for. Start each on `general` (say "back to general" firs
 9. On Discord: leave the voice channel, run `/duplex profile stock-picker`, rejoin, and say "what's
    NVDA at?"
 10. Say "go to the stock trader profile", then "back to general", then "use my portfolio agent",
-    then "back to general", then "go to stocks and check NVDA".
+    then "back to general", then "connect me with the investing agent, what's Apple at?", then "back
+    to general", then "go to stocks and check NVDA".
 11. Say "remind me to go to the dentist on Friday", then "can I talk to you about my weekend plans",
-    then "connect me with the Sarah agent".
+    then "connect me with the Sarah agent", then "can I talk to Sarah about the stock picker", then
+    "change my profile picture", then "find me a travel agent".
 12. On Discord, run `/duplex profile the stock trader` (typed, not picked from the list).
 
 Expected: step 1 is confirmed aloud ("You're now talking to stock-picker."; on `gpt-live`,
@@ -332,13 +334,12 @@ do you mean?": each is handed off whole as an ordinary request. In step 9 the re
 applies next time; once you speak again the log shows `voice instructions now speak for profile
 stock-picker` (on `gpt-live` a restart once the call is quiet), no "You're now talking to" is spoken,
 and the request runs on `stock-picker`. Step 10 switches to `stock-picker` each time without a
-Hermes run: the first is read by the switch parser and resolved by meaning (the log shows `switch
-target 'stock trader' by meaning: stock-picker`), the second goes through the router (its `route`
-line shows `switch=True`; if it shows `switch=False`, record its `top3`: a switch needs `_switch` at
-0.95 or more) and then the same resolution; the last switches and then runs "check NVDA" on
-`stock-picker`. In step 11 the first two run as ordinary tasks on `general` (`switch=False`), and
-the third, if the router takes it for a switch, gets "Sorry, which agent do you mean?" and runs
-nothing. Step 12 switches to `stock-picker`.
+Hermes run and no `route` line for them: each is read by the switch parser and resolved by meaning
+(the log shows `switch target 'stock trader' by meaning: stock-picker`, then `'portfolio'`, then
+`'investing'`); "what's Apple at?" then runs on `stock-picker`, and the last switches and then runs
+"check NVDA" there. In step 11 every one runs as an ordinary task on `general` (a `route` line each;
+the Sarah one may draw a switch question: answer no), and none gets "Sorry, which agent do you
+mean?". Step 12 switches to `stock-picker`.
 
 ### 17. Switch suggestions
 
@@ -381,11 +382,13 @@ With `gpt-live`:
 4. Ask another long one, and while it is spoken run `/duplex profile stock-picker`, then at once
    `/duplex profile general`.
 
-Expected: the assistant finishes what it is saying, then says "Switching you to stock-picker." and
-only then the log shows `restarting the voice provider for profile stock-picker`, then `reconnected
+Expected: the assistant finishes what it is saying, then says "Switching you to stock-picker." and,
+once nobody speaks, only then the log shows `restarting the voice provider for profile stock-picker`, then `reconnected
 the voice provider` within about a second; the pause is short, the conversation carries on, and the
 restarted session does not say "You're now talking to stock-picker." too. In step 3 the answer is
-not cut off: the restart comes after it and after "Switching you to general.". In step 4 the
+not cut off: the restart comes after it and after "Switching you to general."; if you start
+speaking right after that line, the restart waits until you stop. If the slow task's result arrives
+around the line, it is heard in full or said again after the restart. In step 4 the
 assistant says "You're now talking to general." without a restart (the call was already on
 `general`). The
 model remembers the recent conversation, the slow task's result is still spoken when it finishes,

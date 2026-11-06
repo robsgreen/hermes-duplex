@@ -76,7 +76,10 @@ class DuplexService:
         active_profiles: ActiveProfiles,
         context_files: HermesContextFiles,
         transports: Sequence[Transport],
+        profile_matcher: ProfileMatcher | None = None,
     ) -> None:
+        """``profile_matcher`` is the switch-target matcher ``active_profiles`` resolves words with,
+        prewarmed on ``start``; None prewarms nothing."""
         self._config = config
         self._prompt_context = prompt_context(config)
         self._provider_factory = provider_factory
@@ -86,6 +89,8 @@ class DuplexService:
         self._permissions = permissions
         self._active_profiles = active_profiles
         self._context_files = context_files
+        self._profile_matcher = profile_matcher
+        self._prewarm: asyncio.Task[None] | None = None
         self.transports = tuple(transports)
         """The enabled transports, in start order."""
         self._sessions: dict[asyncio.Task[None], Conversation] = {}
@@ -94,9 +99,10 @@ class DuplexService:
 
     async def start(self) -> None:
         """Restore the tasks a previous run left open, load each person's saved active profile,
-        configure the router, start having Hermes write the context texts that are missing or stale
-        (in the background: every profile's file rewrites, and the briefing on the owner's active
-        profile), then start every transport; returns once they accept conversations.
+        configure the router, start loading the switch-target matcher's model and having Hermes write
+        the context texts that are missing or stale (in the background: every profile's file rewrites,
+        and the briefing on the owner's active profile), then start every transport; returns once
+        they accept conversations, whether or not the model has loaded.
 
         The restored tasks stay unattended until a conversation hears their person
         (``TaskTracker.restore``).
@@ -106,6 +112,8 @@ class DuplexService:
         await self._tracker.restore()
         self._active_profiles.load()
         await self._router.configure()
+        if self._profile_matcher is not None:
+            self._prewarm = asyncio.create_task(self._profile_matcher.prewarm())
         self._context_files.refresh_stale(self._config.profiles, ("soul", "user"))
         if (owner := hermes_owner(self._config)) is not None:
             self._context_files.refresh_stale([self._active_profiles.get(owner)], ("briefing",))
@@ -125,9 +133,9 @@ class DuplexService:
     async def stop(self) -> None:
         """Stop everything within ``STOP_TIMEOUT_S``, logging anything it had to abandon.
 
-        Cancels every voice session (each closes its provider socket and leaves its tasks unattended;
-        the Hermes runs themselves continue, and the next ``start`` restores them from the task
-        history), then stops the transports, which closes their
+        Cancels the matcher's prewarm and every voice session (each closes its provider socket and
+        leaves its tasks unattended; the Hermes runs themselves continue, and the next ``start``
+        restores them from the task history), then stops the transports, which closes their
         conversations and the web server, then closes the task tracker, cancels context-file
         rewrites still running, and closes the Hermes client and the router's backends.
         Conversations that arrive meanwhile are closed at once. Idempotent; does nothing before
@@ -139,6 +147,8 @@ class DuplexService:
         started = time.monotonic()
         try:
             async with asyncio.timeout(STOP_TIMEOUT_S):
+                if self._prewarm is not None:
+                    self._prewarm.cancel()
                 await self._stop_sessions()
                 for transport in self.transports:
                     await transport.stop()
@@ -231,17 +241,15 @@ def build_service(config: Config, *, embed: Embedder | None = None) -> DuplexSer
 
     ``embed`` replaces the embedding model of the knn router backend and of the switch-target matcher
     (tests pass a deterministic one); by default the backend loads its model2vec model on ``start``,
-    and the matcher the same model on the first switch whose words name no profile exactly.
+    and the matcher the same model in the background from ``start``.
 
     Raises ``ConfigError`` for an unknown provider or router backend name, or a router backend whose
     settings are missing.
     """
     permissions = PermissionChecker(config)
+    matcher = ProfileMatcher(config.profiles, embed)
     active_profiles = ActiveProfiles(
-        config.hermes_home / "duplex" / ACTIVE_PROFILES_FILE_NAME,
-        permissions,
-        config,
-        resolver=ProfileMatcher(config.profiles, embed),
+        config.hermes_home / "duplex" / ACTIVE_PROFILES_FILE_NAME, permissions, config, resolver=matcher
     )
     providers = provider_factory(config.provider.name)
     hermes = HermesApiClient(config.hermes.api_base, lambda profile: _profile_key(config, profile))
@@ -261,6 +269,7 @@ def build_service(config: Config, *, embed: Embedder | None = None) -> DuplexSer
         active_profiles=active_profiles,
         context_files=build_context_files(config, hermes),
         transports=transports,
+        profile_matcher=matcher,
     )
 
 

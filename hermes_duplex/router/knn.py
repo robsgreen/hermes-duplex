@@ -10,6 +10,7 @@ import functools
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
+from typing import NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -26,15 +27,19 @@ Embedder = Callable[[Sequence[str]], npt.NDArray[np.floating]]
 DEFAULT_MODEL = "minishlab/potion-base-8M"
 TARGET_MIN_SIMILARITY = 0.4
 """``ProfileMatcher`` takes a profile only when the words' cosine similarity to one of its phrases is
-at least this. With ``DEFAULT_MODEL`` on the router eval's profiles, the words of every labelled switch
-target that resolves ("stock trader", "portfolio", "investing", "markets", "for reminders and
-weather") score 0.448 or more, while names of nothing a profile covers (people, places, units, foods,
-"money", "news", "Tesla") score 0.273 or less; topics a description names ("finance", "weather",
-"calendar", 0.41 to 0.45) resolve to that profile."""
+at least this. Checked with ``DEFAULT_MODEL`` against the held-out switch phrasings
+(``tests/fixtures/router_eval/switch_heldout.yaml``, five profiles, never used to choose it): every
+target that resolves to its profile scores 0.416 ("finance agent") to 0.797 ("headlines bot"), while
+the words that should name no profile ("regular", "real estate", "leasing", "insurance", "financial
+advisor", "metric units") score 0.254 or less. On the router eval's own phrases resolving targets
+score 0.448 or more."""
 TARGET_MARGIN = 0.15
 """How much the top profile's similarity must beat every other profile's by; a closer call names no
-single profile, so the person is asked which. On the router eval every resolving target wins by 0.33
-or more."""
+single profile. On the held-out switch phrasings every resolving target wins by 0.28 or more (the
+narrowest is "finance agent", 0.416 against 0.132), so the margin turns away only near ties."""
+MODEL_RETRY_S = 300.0
+"""After the model fails to load, ``ProfileMatcher`` matches names and aliases only for this long
+before it tries to load it again, so a missing download never slows every switch."""
 DEFAULT_TEMPERATURE = 0.05
 """Softmax temperature over cosine scores; lower is sharper. Cosines between paraphrases and
 unrelated phrases differ by a few tenths, which this turns into a clear winner."""
@@ -135,12 +140,14 @@ class ProfileMatcher:
     profile, by name first and then by meaning.
 
     Words that start with a profile's name or alias resolve as a spoken switch target does
-    (``switching.resolve_profile``). Any others are stripped of their switch phrasing
+    (``switching.resolve_profile``). Any others are reduced to the words that say which agent
     (``switching.target_words``) and compared, by cosine similarity of static embeddings, with each
-    profile's name, aliases, and description; a profile's score is its best similarity. The top
-    profile is taken when its score is at least ``TARGET_MIN_SIMILARITY`` and beats every other
-    profile's by at least ``TARGET_MARGIN``; otherwise the words name no single profile. Whether the
-    person may use the profile is not considered here.
+    profile's name and aliases and, only when the person called it an agent, profile, assistant, or
+    bot (``TargetWords.names_an_agent``: "the investing agent", not "my stock broker"), its
+    description; a profile's score is its best similarity. The top profile is taken when its score is
+    at least ``TARGET_MIN_SIMILARITY`` and beats every other profile's by at least ``TARGET_MARGIN``;
+    otherwise the words name no single profile. Whether the person may use the profile is not
+    considered here.
     """
 
     def __init__(
@@ -149,42 +156,63 @@ class ProfileMatcher:
         embed: Embedder | None = None,
         *,
         model: str = DEFAULT_MODEL,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """``profiles`` are the configured profiles, in config order. ``embed`` defaults to the
-        model2vec static model ``model``, shared with ``KnnBackend`` and loaded on the first
-        ``resolve`` that needs it."""
+        model2vec static model ``model``, shared with ``KnnBackend`` and loaded by ``prewarm`` or the
+        first ``resolve`` that needs it. ``clock`` returns seconds and times ``MODEL_RETRY_S``."""
         self._names = {name: profile.aliases for name, profile in profiles.items()}
         self._phrases = [
-            (name, phrase)
+            _ProfilePhrase(name, phrase, is_description)
             for name, profile in profiles.items()
-            for phrase in (" ".join(spoken_form(name)), *profile.aliases, profile.description)
+            for phrase, is_description in (
+                (" ".join(spoken_form(name)), False),
+                *((alias, False) for alias in profile.aliases),
+                (profile.description, True),
+            )
             if phrase
         ]
         self._embed = embed
         self._model = model
+        self._clock = clock
         self._vectors: npt.NDArray[np.float64] | None = None
+        self._failed_s: float | None = None
+        """``clock()`` when loading the model last failed, or None."""
         self._ready = asyncio.Lock()
+
+    async def prewarm(self) -> None:
+        """Load the model and embed every profile's phrases now, so the first switch by meaning does not
+        wait for them; a failure is logged, not raised."""
+        if not self._phrases:
+            return
+        try:
+            await self._phrase_vectors()
+        except Exception:
+            logger.exception("could not load the switch-target model; switches match names only for now")
 
     async def resolve(self, words: str) -> str | None:
         """The profile ``words`` mean, by the rule in the class docstring; None when they name no
-        single profile. Raises what the embedding model raises when it cannot be loaded."""
+        single profile. Raises what the embedding model raises when it cannot be loaded, and, for
+        ``MODEL_RETRY_S`` after that, ``RuntimeError`` at once without trying again."""
         if (exact := resolve_profile(words, self._names)) is not None:
             return exact
-        wanted = target_words(words)
+        wanted, names_an_agent = target_words(words)
         if not wanted or not self._phrases:
             return None
         vectors = await self._phrase_vectors()
         assert self._embed is not None
         query = _unit_rows(await asyncio.to_thread(self._embed, [wanted]))[0]
         best: dict[str, float] = {}
-        for (name, _), similarity in zip(self._phrases, vectors @ query, strict=True):
-            best[name] = max(best.get(name, -1.0), float(similarity))
+        for phrase, similarity in zip(self._phrases, vectors @ query, strict=True):
+            if names_an_agent or not phrase.is_description:
+                best[phrase.profile] = max(best.get(phrase.profile, -1.0), float(similarity))
         ranked = sorted(best.items(), key=lambda item: item[1], reverse=True)
         (top, score), runner_up = ranked[0], ranked[1][1] if len(ranked) > 1 else -1.0
         clear = score >= TARGET_MIN_SIMILARITY and score - runner_up >= TARGET_MARGIN
         logger.info(
-            "switch target %r by meaning: %s (similarity %.3f, runner-up %.3f)",
+            "switch target %r by meaning%s: %s (similarity %.3f, runner-up %.3f)",
             wanted,
+            "" if names_an_agent else ", names and aliases only",
             top if clear else "no single profile",
             score,
             runner_up,
@@ -192,14 +220,31 @@ class ProfileMatcher:
         return top if clear else None
 
     async def _phrase_vectors(self) -> npt.NDArray[np.float64]:
-        """The unit embedding of each of ``_phrases``, embedded on first use."""
+        """The unit embedding of each of ``_phrases``, embedded on first use. Raises what loading the
+        model raises, and ``RuntimeError`` within ``MODEL_RETRY_S`` of that."""
         async with self._ready:
             if self._vectors is None:
                 if self._embed is None:
-                    self._embed = await asyncio.to_thread(load_model, self._model)
-                texts = [phrase for _, phrase in self._phrases]
+                    if self._failed_s is not None and self._clock() - self._failed_s < MODEL_RETRY_S:
+                        raise RuntimeError(
+                            f"the {self._model} model failed to load less than {MODEL_RETRY_S:g} s ago"
+                        )
+                    try:
+                        self._embed = await asyncio.to_thread(load_model, self._model)
+                    except Exception:
+                        self._failed_s = self._clock()
+                        raise
+                texts = [phrase.text for phrase in self._phrases]
                 self._vectors = _unit_rows(await asyncio.to_thread(self._embed, texts))
             return self._vectors
+
+
+class _ProfilePhrase(NamedTuple):
+    """One phrase a profile is matched by: its name, an alias, or its description."""
+
+    profile: str
+    text: str
+    is_description: bool
 
 
 @functools.cache

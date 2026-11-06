@@ -227,6 +227,7 @@ class _Harness:
         self.provider: FakeProvider | None = None
         self.conversation: _MemoryConversation | None = None
         self._hermes: HermesApiClient | None = None
+        self.session: VoiceSession | None = None
         self._run: asyncio.Task[None] | None = None
 
     def start(
@@ -263,6 +264,7 @@ class _Harness:
             default_profile=self.config.router.default_profile,
             clock=clock,
         )
+        self.session = session
         self._run = asyncio.create_task(session.run())
 
     async def stop(self) -> None:
@@ -714,6 +716,233 @@ async def test_someone_joining_while_a_gpt_live_switch_restart_waits_restarts_at
 
     assert OWNER_FACTS not in harness.sent("connect")[1].args["instructions"]
     assert switching_to("general") not in harness.texts("say"), "nothing is said to the muted session"
+
+
+class _TalkingConversation(_PacedConversation):
+    """Paced frames until closed; rob is voiced for the first 200 ms and whenever ``speak_for`` says.
+    ``voiced_now`` is whether the latest frame had him voiced."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.voiced_until_s = time.monotonic() + 0.2
+        self.voiced_now = False
+
+    def speak_for(self, seconds: float, after_s: float = 0.0) -> None:
+        asyncio.get_running_loop().call_later(
+            after_s, lambda: setattr(self, "voiced_until_s", time.monotonic() + seconds)
+        )
+
+    async def frames(self) -> AsyncIterator[InputFrame]:
+        t_ms = 0
+        while self.closed_reason is None:
+            self.voiced_now = time.monotonic() < self.voiced_until_s
+            yield InputFrame(silent_frame(RATE), RATE, frozenset({"rob"} if self.voiced_now else ()), t_ms)
+            t_ms += 20
+            await asyncio.sleep(0.02)
+
+
+class _InterruptedProvider(_ClosingProvider):
+    """A ``_ClosingProvider`` whose ``say`` makes rob start speaking ``speak_after_s`` later (None: never),
+    noting at each ``close`` whether rob was speaking."""
+
+    def __init__(
+        self, conversation: _TalkingConversation, script: list[dict[str, Any]], speak_after_s: float | None
+    ):
+        super().__init__(
+            conversation, script, capabilities=GPT_LIVE_CAPABILITIES, prompter=_RecordingPrompter()
+        )
+        self._talking = conversation
+        self._speak_after_s = speak_after_s
+        self.voiced_at_close: list[bool] = []
+
+    async def say(self, text: str, *, expects_answer: bool = False) -> None:
+        if self._speak_after_s is not None:
+            self._talking.speak_for(1.5, after_s=self._speak_after_s)
+        await super().say(text, expects_answer=expects_answer)
+
+    async def close(self) -> None:
+        self.voiced_at_close.append(self._talking.voiced_now)
+        await super().close()
+
+
+@pytest.mark.parametrize("speak_after_s", [0.0, 0.15, 0.25])
+async def test_a_gpt_live_switch_restart_waits_for_quiet_again_after_its_line(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, speak_after_s: float
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
+    conversation = _TalkingConversation()
+    provider = _InterruptedProvider(conversation, [_replying(600), _says_the_line(200)], speak_after_s)
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    await harness.active_profiles.switch("rob", "general")  # rob speaks as, or just after, the line plays
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=8)
+
+    assert harness.texts("say") == [switching_to("general")]
+    assert provider.voiced_at_close == [False], "closed while rob was speaking"
+
+
+async def test_a_gpt_live_switch_line_never_heard_waits_for_quiet_and_the_restarted_session_confirms(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_MAX_WAIT_S", 0.5)
+    conversation = _TalkingConversation()
+    provider = _InterruptedProvider(conversation, [_replying(600)], 0.3)  # the line brings no audio
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(conversation.played))
+
+    await harness.active_profiles.switch("rob", "general")
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=8)
+    await harness.wait_for(lambda: len(harness.texts("say")) == 2)
+
+    assert provider.voiced_at_close == [False], "closed while rob was speaking"
+    assert harness.texts("say") == [switching_to("general"), switched_to("general")]
+    assert [call.method for call in provider.calls][-2:] == ["connect", "say"], "said by the new session"
+
+
+RESULT = "Task 1 finished: NVDA is at 900 dollars, up two percent today."
+
+
+async def test_an_announcement_the_gpt_live_switch_restart_cuts_off_is_said_again(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_MAX_WAIT_S", 0.6)
+    conversation = _PacedConversation(_frames(6000))
+    script: list[dict[str, Any]] = [
+        {"on_sent": "say", "event": {"type": "output_audio", "ms": 200}},  # the line
+        {"after_ms": 2000, "event": {"type": "output_audio", "ms": 300}},  # long after the result was given
+    ]
+    provider = _ClosingProvider(
+        conversation, script, capabilities=GPT_LIVE_CAPABILITIES, prompter=_RecordingPrompter()
+    )
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    assert harness.session is not None
+
+    await harness.active_profiles.switch("rob", "general")
+    await harness.wait_for(lambda: switching_to("general") in harness.texts("say"))
+    harness.session._announce(RESULT)  # pyright: ignore[reportPrivateUsage]  # a result while the line plays
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=4)
+    await harness.wait_for(lambda: harness.texts("say").count(RESULT) == 2)
+
+    methods = [call.method for call in provider.calls]
+    assert methods.index("close") < len(methods) - 1 - methods[::-1].index("say"), "said again after"
+    # Nothing told whether the line was heard before the result was given, so the restarted session
+    # confirms the switch too.
+    assert harness.texts("say") == [switching_to("general"), RESULT, switched_to("general"), RESULT]
+
+
+class _HeldConnectProvider(_ClosingProvider):
+    """A ``_ClosingProvider`` whose second ``connect`` waits for ``release``; ``connecting`` is set once it
+    started."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.connects = 0
+        self.connecting = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
+        self.connects += 1
+        if self.connects == 2:
+            self.connecting.set()
+            await self.release.wait()
+        await super().connect(instructions, voice, history_summary)
+
+
+async def test_a_switch_while_a_gpt_live_restart_connects_is_rendered_once_it_is_ready(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
+    conversation = _TalkingConversation()
+    provider = _HeldConnectProvider(
+        conversation,
+        [_replying(300), _says_the_line(200)],
+        capabilities=GPT_LIVE_CAPABILITIES,
+        prompter=_RecordingPrompter(),
+    )
+    harness.start([], [], person="rob", conversation=conversation, provider=provider)
+    await harness.wait_for(lambda: bool(conversation.played))
+    await harness.active_profiles.switch("rob", "general")
+    await asyncio.wait_for(provider.connecting.wait(), 6)  # reconnecting with general's instructions
+
+    await harness.active_profiles.switch("rob", "stock-picker")  # switched back meanwhile
+    await asyncio.sleep(0.3)
+    assert switched_to("stock-picker") not in harness.texts("say"), "not while general's instructions open"
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 3, timeout_s=6)
+
+    assert [call.args["instructions"] for call in harness.sent("connect")] == [
+        "instructions for stock-picker",
+        "instructions for general",
+        "instructions for stock-picker",
+    ]
+    assert switching_to("stock-picker") in harness.texts("say"), "said by the session that opened on general"
+
+
+async def test_a_join_while_the_gpt_live_switch_line_plays_restarts_at_once_without_the_notes(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.1)
+    monkeypatch.setattr(session_module, "SWITCH_LINE_SETTLE_S", 0.05)
+    conversation = _TalkingConversation()
+
+    class JoinedDuringTheLine(_ClosingProvider):
+        async def say(self, text: str, *, expects_answer: bool = False) -> None:
+            await super().say(text, expects_answer=expects_answer)
+            if text == switching_to("general"):
+                asyncio.get_running_loop().call_later(0.05, lambda: conversation.company.add("alex"))
+
+    provider = JoinedDuringTheLine(
+        conversation, [_replying(300), _says_the_line(1500)], capabilities=GPT_LIVE_CAPABILITIES
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+    assert OWNER_FACTS in harness.sent("connect")[0].args["instructions"]
+
+    await harness.active_profiles.switch("rob", "general")
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=6)
+    await asyncio.sleep(0.6)
+
+    assert OWNER_FACTS not in harness.sent("connect")[1].args["instructions"]
+    assert len(harness.sent("connect")) == 2
+    assert provider.played_ms_at_close[0] < 300 + 1000, "the line played on after the join"
+
+
+async def test_a_join_after_an_in_place_switch_away_from_the_notes_still_restarts(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities=DEFAULT_CAPABILITIES,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("connect")))
+    assert OWNER_FACTS in harness.sent("connect")[0].args["instructions"]
+    await harness.active_profiles.switch("rob", "general")  # in place: notes out, conversation kept
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100, _voiced("rob")))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2, timeout_s=2)
+
+    assert OWNER_FACTS not in harness.sent("connect")[1].args["instructions"]
 
 
 async def test_live_style_refs_carry_the_delegation_id(harness: _Harness) -> None:

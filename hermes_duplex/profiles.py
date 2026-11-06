@@ -16,7 +16,7 @@ from typing import Literal, NamedTuple, Protocol
 
 from .config import Config
 from .people import PermissionChecker
-from .switching import resolve_profile
+from .switching import SwitchRequest, read_switch_request, resolve_profile, target_words
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,29 @@ class ProfileResolver(Protocol):
     async def resolve(self, words: str) -> str | None:
         """The profile ``words`` name, exactly or otherwise; None when they name no single profile."""
         ...
+
+
+async def resolve_switch_request(
+    text: str, names: Mapping[str, Sequence[str]], resolve: Callable[[str], Awaitable[str | None]]
+) -> SwitchRequest | None:
+    """The switch request ``text`` makes as a voice session carries it out: read by
+    ``switching.read_switch_request`` over ``names`` (each profile name to its aliases), with words
+    that fit no name or alias given the profile ``resolve`` finds for them by meaning
+    (``SwitchRequest.target`` None when it finds none: the person is asked which agent).
+
+    Words that name no profile by name or meaning make no switch request at all, and so are an
+    ordinary request, when they are said with a further request ("talk to the travel agent about my
+    trip") or call what they ask for an agent ("go to the insurance agent", "talk to my real estate
+    agent"), since people say that of agents of their own; only a short bare target ("switch to
+    Sarah") asks which agent. None when ``text`` makes no switch request.
+    """
+    request = read_switch_request(text, names)
+    if request is None or request.target is not None:
+        return request
+    target = await resolve(request.words)
+    if target is None and (request.rest is not None or target_words(request.words).names_an_agent):
+        return None
+    return request._replace(target=target)
 
 
 class SwitchResult(NamedTuple):
@@ -151,6 +174,11 @@ class ActiveProfiles:
         except Exception:
             logger.exception("could not resolve %r by meaning; only exact names count", words)
             return resolve_profile(words, self.names)
+
+    async def read_switch_request(self, text: str) -> SwitchRequest | None:
+        """The switch request ``text`` makes, its words resolved as ``resolve`` resolves them
+        (``resolve_switch_request``); None when it makes none."""
+        return await resolve_switch_request(text, self.names, self.resolve)
 
     def fallback_pending(self, person: str) -> str | None:
         """The default ``person`` was moved back to by ``load`` because their saved profile became

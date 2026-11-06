@@ -1,0 +1,117 @@
+# Held-out switch phrasings: requests that ask to switch agents, and requests that only sound like it.
+#
+# The same format as phrases.yaml (see its header and hermes_duplex/router/eval.py). This file is
+# never used to choose the switch-request parser's phrasings or the switch-target matcher's
+# thresholds (TARGET_MIN_SIMILARITY, TARGET_MARGIN in hermes_duplex/router/knn.py); it only checks
+# them. Its phrases come from review probes, written without looking at what the parser reads.
+# `_switch` phrases ask to switch, with the profile they mean as `target` where they name one; every
+# other phrase is a task and must never be taken as a switch request. The profiles are five, so a
+# target has more to be confused with than in phrases.yaml.
+
+profiles:
+  general:
+    description: General questions, weather, reminders, and anything else
+    examples:
+      - what's the weather like
+      - set a reminder for nine
+      - tell me a joke
+  stock-picker:
+    description: Portfolio, holdings, stock research, and trades
+    aliases: [stocks]
+    examples:
+      - how's my portfolio
+      - should I buy NVDA
+      - what did TSLA do today
+  news:
+    description: Headlines, current events, and news briefings
+    examples:
+      - what's in the news
+      - read me the headlines
+  coder:
+    description: Programming help, code review, and debugging
+    examples:
+      - why does my python script crash
+      - review this pull request
+  travel:
+    description: Flights, hotels, trip planning, and itineraries
+    examples:
+      - find me a flight to Lisbon
+      - book a hotel in Rome
+
+phrases:
+  # Switch requests.
+  - {text: use my portfolio agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: connect me with the stock research assistant, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: go to the stock trader profile, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: put me on the trading agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: move me to stocks, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: "connect me with the investing agent, what's Apple at", profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: go to the investing agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: give me the finance agent, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: can I get the markets agent please, profile: _switch, active: general, effort: medium, target: stock-picker}
+  - {text: put me on the coding agent, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: connect me with the developer agent, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: I'd like the programming assistant, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: I need the coding assistant, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: talk to the coder, profile: _switch, active: general, effort: medium, target: coder}
+  - {text: use the travel agent, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: let me speak with the trip planner, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: I want the agent that does flights, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: switch to the travel profile, profile: _switch, active: general, effort: medium, target: travel}
+  - {text: can I talk to the news agent, profile: _switch, active: general, effort: medium, target: news}
+  - {text: take me to the headlines bot, profile: _switch, active: general, effort: medium, target: news}
+  - {text: switch me over to the news one, profile: _switch, active: general, effort: medium, target: news}
+  - {text: back to the regular assistant, profile: _switch, active: stock-picker, effort: medium, target: general}
+
+  # Tasks that say "talk to", "connect", "use", "agent", "profile", "change", "go to", "put me", or
+  # "move", and must stay tasks.
+  - {text: talk to Sarah about the stock picker, profile: general, active: general, effort: low}
+  - {text: can I talk to Sarah about the stock picker, profile: general, active: general, effort: low}
+  - {text: connect me with my accountant, profile: general, active: general, effort: low}
+  - {text: can you connect me with my broker, profile: stock-picker, active: general, effort: low}
+  - {text: find me a travel agent, profile: travel, active: general, effort: low}
+  - {text: find a travel agent in Lisbon, profile: travel, active: general, effort: low}
+  - {text: change my profile picture, profile: general, active: general, effort: low}
+  - {text: change my profile photo on Discord, profile: general, active: general, effort: low}
+  - {text: which profile picture should I use on LinkedIn, profile: general, active: general, effort: medium}
+  - {text: use a different approach, profile: general, active: general, effort: medium}
+  - {text: use a different color scheme in my code editor, profile: coder, active: general, effort: low}
+  - {text: call my agent, profile: general, active: general, effort: low}
+  - {text: go to the gym, profile: general, active: general, effort: low}
+  - {text: help me pick a different agent for my house sale, profile: general, active: general, effort: medium}
+  - {text: who is the best real estate agent in town, profile: general, active: general, effort: medium}
+  - {text: talk to my stock broker, profile: stock-picker, active: general, effort: low}
+  - {text: talk to my real estate agent, profile: general, active: general, effort: low}
+  - {text: can I talk to the leasing agent, profile: general, active: general, effort: low}
+  - {text: go to the insurance agent, profile: general, active: general, effort: low}
+  - {text: I need to go to the travel agent tomorrow, profile: general, active: general, effort: low}
+  - {text: use my brokerage account to buy ten shares of Apple, profile: stock-picker, active: general, effort: high}
+  - {text: "use the news to tell me what's happening in Ukraine", profile: news, active: general, effort: medium}
+  - {text: use the stocks app, profile: stock-picker, active: general, effort: low}
+  - {text: use the portfolio tracker to check my stocks, profile: stock-picker, active: general, effort: low}
+  - {text: use another word for happy, profile: general, active: general, effort: low}
+  - {text: can I talk to you about my investments, profile: stock-picker, active: general, effort: medium}
+  - {text: can I talk to someone about my portfolio, profile: stock-picker, active: general, effort: medium}
+  - {text: talk me through how options work, profile: stock-picker, active: general, effort: medium}
+  - {text: talk to my wife about the weather, profile: general, active: general, effort: low}
+  - {text: I want to talk to my financial advisor, profile: general, active: general, effort: low}
+  - {text: connect me with a good plumber nearby, profile: general, active: general, effort: low}
+  - {text: connect me with customer support, profile: general, active: general, effort: low}
+  - {text: connect me to the trading desk, profile: stock-picker, active: general, effort: low}
+  - {text: connect to the VPN and check the server, profile: coder, active: general, effort: medium}
+  - {text: put me on the waitlist for the restaurant, profile: general, active: general, effort: low}
+  - {text: put me through to my accountant, profile: general, active: general, effort: low}
+  - {text: can you put me through to customer support, profile: general, active: general, effort: low}
+  - {text: put me on speaker, profile: general, active: general, effort: low}
+  - {text: go to the bank website and check my balance, profile: general, active: general, effort: medium}
+  - {text: "I want to go to Rome next spring, find flights", profile: travel, active: general, effort: medium}
+  - {text: take me to the airport, profile: travel, active: general, effort: low}
+  - {text: go to the next song, profile: general, active: general, effort: low}
+  - {text: should I change to a different broker, profile: stock-picker, active: general, effort: medium}
+  - {text: switch my flight to Tuesday, profile: travel, active: general, effort: medium}
+  - {text: change my hotel booking to two nights, profile: travel, active: general, effort: medium}
+  - {text: switch to a cheaper phone plan, profile: general, active: general, effort: medium}
+  - {text: move my savings to an index fund, profile: stock-picker, active: general, effort: high}
+  - {text: change to metric units, profile: general, active: general, effort: low}
+  - {text: talk to me about the weather, profile: general, active: general, effort: low}
+  - {text: I need a new laptop for coding, profile: coder, active: general, effort: medium}

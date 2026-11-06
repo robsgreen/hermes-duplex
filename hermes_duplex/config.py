@@ -35,12 +35,8 @@ ALL_PROFILES = "*"
 CONTROL_PROFILE = "_control"
 """The router's reserved choice for status and cancel requests; no profile may use this name."""
 
-SWITCH_PROFILE = "_switch"
-"""The router's reserved choice for requests to switch profiles; no profile may use this name."""
-
 _RESERVED_PROFILE_NAMES = {
     CONTROL_PROFILE: "is reserved for the router",
-    SWITCH_PROFILE: "is reserved for the router",
     "ambiguous": "is reserved: the switch-request parser returns it when a name fits two profiles",
 }
 """Names no profile may use, each with why."""

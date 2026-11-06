@@ -83,12 +83,10 @@ class _MemoryConversation:
 
 
 class _RecordingRouter:
-    """A router that records each request and routes it as a medium-effort task, or as a switch request
-    when its text is in ``switches``."""
+    """A router that records each request and routes it as a medium-effort task."""
 
     def __init__(self) -> None:
         self.requests: list[str] = []
-        self.switches: set[str] = set()
 
     def model_for(self, profile: str, effort: Effort) -> ModelChoice | None:
         return None
@@ -111,7 +109,6 @@ class _RecordingRouter:
             probabilities={},
             source="knn",
             latency_ms=1,
-            switch_request=text in self.switches,
         )
 
 
@@ -372,6 +369,18 @@ async def test_a_request_after_a_switch_that_does_not_happen_is_dropped(
         "Switch to Celsius. What's the weather in Paris?",
         "switch to finance and check NVDA",
         "go back to bed",
+        # Wordings that sound like asking for an agent, and are not.
+        "can I talk to Sarah about the stock picker",
+        "connect me with my accountant",
+        "find me a travel agent",
+        "change my profile picture",
+        "use a different approach",
+        "call my agent",
+        "go to the gym",
+        # An agent that names no profile, alone or with a further request: the whole hand-off is a task.
+        "talk to the travel agent about my trip",
+        "connect me with the Sarah agent",
+        "go to the insurance agent",
     ],
 )
 async def test_words_that_ask_for_no_switch_are_routed_and_run_as_a_task(
@@ -468,31 +477,53 @@ async def test_a_switch_to_words_that_fit_no_name_switches_by_their_meaning(
     harness.assert_nothing_ran()
 
 
-async def test_a_switch_request_the_router_recognises_switches_by_meaning_and_runs_nothing(
-    harness: _Harness,
+@pytest.mark.parametrize(
+    "words",
+    [
+        "use my portfolio agent",
+        "connect me with the holdings assistant",
+        "put me on the trades agent",
+        "move me to stocks",
+        "go to the stock trader profile",
+    ],
+)
+async def test_a_switch_asked_for_an_agent_switches_by_meaning_without_routing(
+    harness: _Harness, words: str
 ) -> None:
-    harness.router.switches = {"use my portfolio agent"}
-    harness.start([_handoff("call_1", "use my portfolio agent")], _frames(1000, "rob"))
+    harness.start([_handoff("call_1", words)], _frames(1000, "rob"))
 
     await harness.wait_for(lambda: bool(harness.said()))
     await asyncio.sleep(0.1)
 
     assert harness.said() == [switched_to("stock-picker")]
     assert harness.active_profiles.get("rob") == "stock-picker"
-    harness.assert_nothing_ran(routed=["use my portfolio agent"])
+    harness.assert_nothing_ran()
+
+
+async def test_a_switch_to_an_agent_by_meaning_then_runs_the_request_said_with_it(harness: _Harness) -> None:
+    harness.start(
+        [_handoff("call_1", "connect me with the holdings agent, what's Apple at")], _frames(1000, "rob")
+    )
+
+    await harness.wait_for(lambda: bool(harness.api.requests_to("POST", "/runs")))
+
+    (run,) = harness.api.requests_to("POST", "/runs")
+    assert (run.path, run.body["input"]) == ("/p/stock-picker/v1/runs", "what's Apple at")
+    assert harness.router.requests == ["what's Apple at"], "only the rest is routed"
+    await harness.wait_for(lambda: len(harness.said()) == 2)
+    assert harness.said()[0] == switched_to("stock-picker")
 
 
 @pytest.mark.parametrize(
     ("speaker", "words", "notice"),
     [
-        ("rob", "connect me with the Sarah agent", which_profile(EVERY_PROFILE)),  # no single profile
+        ("rob", "switch to the Sarah", which_profile(EVERY_PROFILE)),  # no single profile
         ("alex", "use my portfolio agent", switch_refused("stock-picker")),
     ],
 )
-async def test_a_switch_request_the_router_recognises_that_does_not_switch_is_answered_and_runs_nothing(
+async def test_a_switch_asked_for_an_agent_that_does_not_switch_is_answered_and_runs_nothing(
     harness: _Harness, speaker: str, words: str, notice: str
 ) -> None:
-    harness.router.switches = {words}
     harness.start([_handoff("call_1", words)], _frames(1000, speaker))
 
     await harness.wait_for(lambda: bool(harness.said()))
@@ -500,7 +531,7 @@ async def test_a_switch_request_the_router_recognises_that_does_not_switch_is_an
 
     assert harness.said() == [notice]
     assert harness.active_profiles.get(speaker) == "general"
-    harness.assert_nothing_ran(routed=[words])
+    harness.assert_nothing_ran()
 
 
 async def test_switch_profile_call_switches_and_answers_with_the_outcome(harness: _Harness) -> None:

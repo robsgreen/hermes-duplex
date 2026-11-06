@@ -20,7 +20,7 @@ switch, but never picks the profile.
 | `hermes_duplex/hermes_context.py` | `HermesContextFiles`: each profile's `SOUL.md`, `USER.md`, and briefing for the voice prompt, Hermes's rewrites of them cached under `$HERMES_HOME/duplex/voice_context/`, and their background refreshes; `HermesWriter` asks the profile through the API server. |
 | `hermes_duplex/people.py` | `PermissionChecker`: Discord ids and web tokens to people, and who may use which profile. |
 | `hermes_duplex/profiles.py` | `ActiveProfiles`: each person's active profile, its default, `$HERMES_HOME/duplex/active_profiles.json`, and switch notifications. |
-| `hermes_duplex/switching.py` | Pure text helpers: `read_switch_request` (a spoken switch request and any request after it) and `is_affirmative` / `is_negative` (a short yes or no). |
+| `hermes_duplex/switching.py` | Pure text helpers: the one table of switch phrasings, `read_switch_request` (a spoken switch request and any request after it), `target_words` (the words that say which agent), and `is_affirmative` / `is_negative` (a short yes or no). |
 | `hermes_duplex/prompts/` | The prompt pieces every provider shares: the `VoicePrompter` interface and its inputs (`base.py`), the shared rules (`blocks.py`), and every spoken notice (`notices.py`). Each provider family's prompter is its package's `prompt.py` under `providers/`. See Prompt strategy. |
 | `hermes_duplex/audio/` | 20 ms framing, resampling, the allowlist mixer and attribution ring, the loudness gate, and the output pacer. |
 | `hermes_duplex/transports/` | Sources of conversations (`Transport`, `Conversation`, `InputFrame` in `base.py`): the Discord bot (`discord/`) and the web page and `/ws` (`web/`). |
@@ -252,7 +252,8 @@ empties its playback queue.
 
 `CompositeRouter` (`router/composite.py`) never picks the profile a task runs on: that is the
 speaker's active profile, which the session passes in. It decides the effort (and so the model),
-whether the request is a `_control` or a `_switch` request, and whether to suggest another profile.
+whether the request is a `_control` request, and whether to suggest another profile. Switch requests
+never reach it: the session reads them first (see Active profiles and switching).
 
 It asks two paths at once. The main path is `router.backend`: `decisions` (OpenAI Decisions API,
 `POST {base_url}/decisions`), `jev` (TypeSafe System One, `POST {base_url}/v1/systemone`), or `knn`.
@@ -268,13 +269,6 @@ is described as "progress of a task already running, or cancelling it" (`CONTROL
 so that a new request does not read as one) and
 holds built-in status phrases ("what are you working on", "any updates", "how's that task going") and
 cancel phrases ("cancel that", "stop that task", "never mind"), plus `router.control_examples`.
-`_switch` is described as "changing which agent or profile the user talks to" (`SWITCH_DESCRIPTION`)
-and holds `SWITCH_TEMPLATES` ("go to the … profile", "put me on the … agent", "use the … agent", "can
-I talk to the … agent", "connect me with the … agent", "change profile to …") filled with each
-profile's spoken name, plus "switch agents", "switch profiles", and "use a different agent"
-(`router.base.switch_spec`). Naming the profiles keeps "go to the stock trader profile" nearer to a
-switch than to stock-picker's own topic; the templates name an agent or profile so that "can I talk
-to you about dinner" stays a task.
 
 ```mermaid
 flowchart TD
@@ -286,9 +280,8 @@ flowchart TD
   C -- yes --> W{winner}
   C -- no --> F{fast path confident?}
   F -- yes --> W
-  F -- no --> N[fallback: no suggestion, not _control or _switch]
+  F -- no --> N[fallback: no suggestion, not _control]
   W -- _control ≥ 0.995 --> X[control_intent]
-  W -- _switch ≥ 0.95 --> Y[switch_request]
   W -- otherwise --> S[suggestion rule]
   N --> E[effort: main, else fast, else medium]
   S --> E
@@ -303,7 +296,7 @@ flowchart TD
    from `knn`'s `control_similarity`); any other `_control` answer waits for the main path. Calls
    still running at the end are cancelled.
 2. The first confident answer (top probability ≥ 0.5) of main, then fast path decides; its source is
-   that backend's name. With none, the source is `fallback`: no suggestion, not `_control` or `_switch`.
+   that backend's name. With none, the source is `fallback`: no suggestion, not `_control`.
 3. **`_control`.** A request is a task unless the deciding answer gives `_control` a probability of
    at least 0.995 (`CONTROL_MIN_PROB`; as probabilities sum to 1, `_control` then beats every
    profile by at least 0.99). A weaker `_control` answer, even the top one, leaves it a task on the
@@ -313,13 +306,6 @@ flowchart TD
    description gives tasks up to 0.989 for `_control`. Past the bar, `control_intent` is the
    backend's `status` or `cancel`; Decisions and Jev cannot tell the two apart and get `status`,
    which changes nothing. The session answers it from the tracker, and it never reaches Hermes.
-   **`_switch`.** Likewise a request is a switch request (`RouteDecision.switch_request`, with no
-   model and no suggestion) only when the deciding answer gives `_switch` at least 0.95
-   (`SWITCH_MIN_PROB`), and `_control` did not pass its bar. On the router eval `knn` gives tasks at
-   most 0.926 for `_switch` ("can I talk to you about dinner plans", descriptions only) and the switch
-   requests it is sure of 0.98 or more. A task taken as a switch never runs and may switch the speaker,
-   so weaker answers stay tasks. The fast path never settles `_switch` early; it waits for the main
-   path. The router does not say which profile is asked for: the session resolves the words.
 4. **Suggestion.** With `router.suggest_switch` on (default), the router suggests the other profile
    the speaker may use with the highest probability when that probability is at least
    `router.suggest_threshold` (default 0.85) and beats the active profile's by at least 0.2
@@ -336,9 +322,12 @@ Every decision logs one `route ...` line with the speaker, the active profile, t
 effort, model, suggestion, top-3 probabilities, source, and latency, and attaches the same fields to
 the log record as `route_decision`. `hermes duplex eval-router` runs the same router over labelled
 phrases, each with the speaker's `active` profile, and scores effort accuracy, suggestion precision
-and recall, `_control` and `_switch` precision, recall, and task-taken-as-either rate, and how often a
-`_switch` phrase's words resolve to its labelled `target` (`ProfileMatcher`), besides choice
-accuracy.
+and recall, `_control` precision, recall, and task-taken-as-control rate, and choice accuracy. Phrases
+labelled `_switch` are not routed: every phrase is read for a switch request as the session reads it
+(`profiles.resolve_switch_request` with `ProfileMatcher`), which gives switch precision, recall,
+task-taken-as-switch rate, and how often a switch goes to its labelled `target`.
+`tests/fixtures/router_eval/switch_heldout.yaml` holds switch phrasings and tasks that only sound
+like them, never used to choose the parser's phrasings or the matcher's thresholds.
 
 A `_control` decision never reaches Hermes. People hear tasks only by topic; a task's number is an
 internal id for the tracker, `tasks.jsonl`, logs, `/duplex`, tool arguments, and what the model reads.
@@ -377,7 +366,7 @@ a resolver that fails (the embedding model cannot be loaded) is logged and only 
 - a `switch_profile` tool call (OpenAI Realtime, Grok), whose `profile` is the user's words,
   resolved by `ActiveProfiles.resolve`;
 - hand-off words that `read_switch_request` recognises (GPT-Live, and any provider's `delegate`
-  text), below, or that the router takes for a switch request (`_switch`);
+  text), below; the router never takes a request for a switch;
 - Discord `/duplex profile <name>`, which autocompletes the profiles the caller may use and replies
   privately: `switched_to`, or, when no live voice conversation took the switch, that it applies next
   time;
@@ -385,41 +374,59 @@ a resolver that fails (the embedding model cannot be loaded) is logged and only 
 
 Names resolve to the longest profile name or alias the words start with, a name winning a tie with
 an alias (`switching.resolve_profile`). Words that start with neither resolve by meaning
-(`ProfileMatcher`): `switching.target_words` drops the words that only phrase the asking ("go to",
-"the", "my", "profile", "agent", ...), and what is left is embedded with the `knn` backend's model
-(loaded once per process, `router.knn.load_model`; the profiles' phrases are embedded on the first
-such switch) and compared by cosine similarity with each profile's spoken name, aliases, and
-description, a profile scoring its best. The top profile is taken when it scores at least
-`TARGET_MIN_SIMILARITY` (0.4) and beats every other by `TARGET_MARGIN` (0.15); on the router eval every
-resolving target scores 0.448 or more and wins by 0.33 or more, while words for nothing a profile
-covers (people, places, units, "money", "Tesla") score 0.273 or less. Whether the person may use it is
-checked by the switch. Every path uses this resolution, the web frame and the tool included, so each
+(`ProfileMatcher`): `switching.target_words` keeps the words of the target the way the parser reads
+one (after the switch phrasing, up to "and", "then", "so", "about", or a sentence break) and drops
+"the", "my", "a", polite words, and agent nouns ("agent", "profile", "assistant", "bot"). What is left
+is embedded with the `knn` backend's model (loaded once per process, `router.knn.load_model`; the
+service prewarms it and the profiles' phrases in the background at start, and a failed load is not
+tried again for `MODEL_RETRY_S`, 300 s, while only names count) and compared by cosine similarity
+with each profile's spoken name and aliases, and, only when the words call it an agent (an agent noun
+among them: "the investing agent", not "my stock broker"), its description; a profile scores its best.
+The top profile is taken when it scores at least `TARGET_MIN_SIMILARITY` (0.4) and beats every other
+by `TARGET_MARGIN` (0.15). On the held-out switch phrasings (`switch_heldout.yaml`) every target that
+resolves scores 0.416 or more and wins by 0.28 or more, while the words that resolve to nothing
+("regular", "real estate", "leasing", "insurance", "financial advisor", "metric units") score 0.254 or
+less. Whether the person may use it is checked by the switch. Every path uses this resolution, the web frame and the tool included, so each
 accepts aliases and descriptions. Words that name no single profile get `which_profile`, listing the
 profiles the speaker may use; a profile the person may not use gets `switch_refused`, and the active
 one `already_active` (`notices.switch_reply` words all three).
 
-**Spoken switch requests.** `read_switch_request` looks for a switch phrase ("switch to", "talk to",
-"back to", "change to", "go to") followed by a target, a leading "the" dropped. "go" is also a
-lead-in ("go back to general"), so a phrase may start where a lead-in does. Where the phrase stands decides
-what counts:
+**Spoken switch requests.** `read_switch_request` looks for a switch phrasing from one table
+(`switching._PHRASINGS`, which `target_words` reads too) followed by a target, a leading "the"
+dropped. Each phrasing has a kind: `switch` ("switch to", "change to", "talk to", "talk with", "speak
+to", "speak with"), `place` ("back to", "go to", "move me to", "take me to", "put me on", also said of
+places and things), and `agent` ("use", "connect me with", "connect me to", "give me", "I need", "I
+want", said of anything, so their target must start with "the" or "my" and end in an agent noun,
+"agent", "profile", "assistant", or "bot": "use my portfolio agent", but not "use a different
+approach", "connect me with my accountant", or "I need a travel agent"). "go" is also a lead-in ("go
+back to general"), so a phrasing may start where a lead-in does. Where it stands decides what counts:
 
 - **Opening** what is said, or one of its sentences (after `.`, `;`, `!` or `?`; a comma does not start one), after
   lead-ins, one after another or none, such as "let me", "can I", "can we", "I need to", "I'd
   rather", "please", "go", "hmm", "ok", "I'd like to", or "thanks": the target is a profile's name or
-  alias. A target that fits neither asks which one is meant (`"ambiguous"`) only when the phrase is
-  all that is said: lead-ins before it, at most `UNKNOWN_TARGET_MAX_WORDS` (3) words besides polite
-  ones up to "and", "then", "so", "about", or a sentence break ("switch to finance"), and nothing
-  after but polite words. With anything more ("Switch to Celsius. What's the weather in Paris?",
-  "switch to finance and check NVDA"), or after "back to" or "go to" unless the target ends in
-  "profile" or "agent" ("back to Tesla, what's it at?", "go to the gym"; but "go to the stock trader
-  profile" asks), the whole hand-off is an ordinary request; this matters most on GPT-Live, whose hand-off words are a whole
-  transcript window.
+  alias.
+- **Opening all that is said** (only lead-ins before it), the target may also fit no name or alias
+  (`SwitchRequest.target` None, its `words` left to their meaning), when it holds at most
+  `UNKNOWN_TARGET_MAX_WORDS` (3) words besides "the", "my", polite words, and an agent noun, and
+  either ends in an agent noun ("connect me with the investing agent, what's Apple at", with a
+  further request), or, after a `switch` phrasing, is all that is said but polite words ("switch to
+  Sarah"). With anything more ("Switch to Celsius. What's the weather in Paris?", "switch to
+  finance and check NVDA"), or after a `place` phrasing without an agent noun ("back to Tesla,
+  what's it at?", "go to the gym"), the whole hand-off is an ordinary request; this matters most on
+  GPT-Live, whose hand-off words are a whole transcript window.
 - **Anywhere else**, only an exact profile name is a target, never an alias: "should I move my
   savings back to stocks" makes no request even with an alias "stocks".
 
+`profiles.resolve_switch_request` (`ActiveProfiles.read_switch_request`) then resolves words that fit
+no name or alias by meaning. Words that name no profile that way make no switch request, and the
+hand-off is an ordinary request, when they come with a further request ("talk to the travel agent
+about my trip") or end in an agent noun ("go to the insurance agent", "talk to my real estate
+agent"): people say that of agents of their own. Only a short bare target ("switch to Sarah") gets
+`which_profile`.
+
 A phrase with a negation earlier in its clause ("don't switch to stocks"), one followed by "me",
 "us", or "you" ("talk to me about Tesla"), or one whose target is followed by anything other than
-polite words, "profile" or "agent", or a joined request ("switch to stocks from bonds") is no switch
+polite words, an agent noun, or a joined request ("switch to stocks from bonds") is no switch
 request, and the words are routed as usual. A joined request is what follows "and", "then", "so", or
 a sentence break, or, for an opening phrase, "about" ("talk to stocks about Tesla" switches and
 hands off "Tesla"). Config checks aliases with the parser's own spoken form (`switching.spoken_form`):
@@ -453,15 +460,14 @@ for a live delegation's words):
    asked nothing since (no "?" in its output transcript since it ended), and any question only when
    the hand-off's context is None, no question, or part of that question; so a yes to a later offer
    ("Want me to set a price alert?") is routed as usual, with the offer as its context.
-2. A switch request is carried out with its notice; one that only asks which (`"ambiguous"`) has its
-   words resolved by meaning first (`ActiveProfiles.resolve`). Words after the target joined by "and", "then",
-   "so", or a sentence break ("switch to stocks and check NVDA") are the rest of the request; when
-   the switch happened or the profile was already active, the rest goes on to step 3 on the new
-   profile, with no suggestion; otherwise it is dropped.
+2. A switch request (`ActiveProfiles.read_switch_request`, its words resolved by meaning when they fit
+   no name or alias) is carried out with its notice. Words after the target joined by "and", "then",
+   "so", or a sentence break ("switch to stocks and check NVDA", "connect me with the investing
+   agent, what's Apple at") are the rest of the request; when the switch happened or the profile was
+   already active, the rest goes on to step 3 on the new profile, with no suggestion; when it was
+   refused or named a profile ambiguously, the rest is dropped with that notice.
 3. Any other hand-off from the speaker first ends their pending question unanswered. The request is
-   routed with the speaker's active profile. A `_control` intent is answered from the tracker. A
-   `switch_request` has its whole words resolved (`ActiveProfiles.resolve`) and switched to, with
-   its notice; nothing else in them runs, since only the parser can tell a further request apart.
+   routed with the speaker's active profile. A `_control` intent is answered from the tracker.
 4. A suggestion for a profile the speaker may use holds the request (below). Otherwise the task runs
    at once on the active profile, in the Hermes session `duplex-<person>-<profile>`.
 
@@ -519,21 +525,29 @@ open:
 | GPT-Live | false | The session closes the provider session and reconnects it with the new instructions and the reconnect summary (see Reconnect and re-seed). The restart counts neither as short-lived nor as a failure; Hermes tasks keep running. |
 
 A restart for someone joining the owner happens at once. One for an explicit switch on GPT-Live
-(`VoiceSession._restart_for_switch`) waits until the call is quiet (below), so the reply under way
-finishes; then the old provider session says `notices.switching_to` ("Switching you to
-stock-picker."), and once that has been heard (the floor free where the provider emits speech
-events; otherwise its audio arrived and none for `SWITCH_LINE_SETTLE_S`, 0.5 s, with nothing held or
-playing; at most `SWITCH_LINE_MAX_WAIT_S`, 5 s) it restarts. That line is the confirmation:
-the restarted session does not say `switched_to` too, since hearing both around a pause only repeats
-it. The store switches at once, so a request made while the restart waits already runs on the new
-profile, while the old instructions stay until the restart. There is one pending switch restart per
-session: switches made while it waits join it and only the latest is said and restarted for, and
-when no restart is needed by the time it would say the line (the person switched back to the
-profile the open session speaks for, or a reconnect or a muted session's restart rendered the
-switch), the switch is confirmed with `switched_to` and nothing restarts. The line is never sent
-to a muted session, and a privacy restart never waits for it. One invariant
+(`VoiceSession._restart_for_switch`) waits until a provider session is ready (not connecting, not
+muted) and the call is quiet (below), so the reply under way finishes; then the old provider session
+is given `notices.switching_to` ("Switching you to stock-picker.") as an announcement, after whatever
+is queued before it. The restart waits until every announcement has been said and, for at most
+`SWITCH_LINE_MAX_WAIT_S` (5 s) from the line, until all said has been heard (`_all_said_heard`:
+output audio has arrived since the latest announcement was said, none for `SWITCH_LINE_SETTLE_S`,
+0.5 s, and nothing held or playing), and then until the call is quiet again, so speech that starts
+around the line, or a line never spoken, cuts nobody off. An announcement said to the old session
+and not heard by then (a task's result given while the line plays) is said again by the restarted
+one. The line is the confirmation: the restarted session does not say `switched_to` too, unless the
+line was not heard in time, when it says `switched_to` before what it says again. The store switches
+at once, so a request made while the restart waits already runs on the new profile, while the old
+instructions stay until the restart. There is one pending switch restart per session: switches made
+while it waits join it and only the latest is said and restarted for; a switch made while a restart
+connects waits for that provider session and is restarted for if it opened on the old profile. When
+no restart is needed by the time it would say the line (the person switched back to the profile the
+open session speaks for, or a reconnect or a muted session's restart rendered the switch), the
+switch is confirmed with `switched_to` and nothing restarts. The line is never sent to a muted
+session, and a privacy restart never waits for it. One invariant
 covers the owner's notes: a provider session whose instructions carry the owner's `USER.md` or
-briefing and whose owner is no longer alone (someone joined, or the owner left) is always restarted,
+briefing, now or at any point since it opened (an update in place that takes them out leaves its
+conversation held with them; `_notes_connection`), and whose owner is no longer alone (someone
+joined, or the owner left) is always restarted,
 and until then nothing from it is played or recorded and nothing is sent to it. `_follow_presence`
 checks it on every input frame (`_owner_has_company`), whoever the instructions speak to by then (a
 newcomer heard in their very first frame has already moved them to the newcomer), and mutes that provider session

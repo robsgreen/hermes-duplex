@@ -10,8 +10,8 @@
 # when they say it, and the `effort` it deserves. `active` is required and must be one of `profiles`:
 # the request runs on it, and the router should suggest switching exactly when `profile` is another
 # profile. A `_control` phrase also names its `control_intent` (status or cancel). A `_switch` phrase
-# asks to switch profiles in words the switch-request parser does not read, and names the profile it
-# asks for as its `target` when it names one. A follow-up names
+# asks to switch profiles, and names the profile it asks for as its `target` when it names one; it is
+# not routed, but read by the switch-request parser and resolved by meaning. A follow-up names
 # the phrase it `follows`, said earlier by the same speaker; it is routed after that phrase, and keeps
 # that phrase's `active` unless the speaker switched in between. Texts are unique.
 # `hermes-duplex eval-router` reads this file (format: hermes_duplex/router/eval.py).
@@ -158,8 +158,8 @@ phrases:
   # _control: follow-ups on a running task.
   - {text: is that done, profile: _control, active: stock-picker, effort: medium, control_intent: status, follows: how is my portfolio doing}
   - {text: actually cancel that, profile: _control, active: general, effort: medium, control_intent: cancel, follows: plan a weekend trip to Lisbon}
-  # _switch: requests to switch profiles worded so the switch-request parser does not read them; the
-  # router must take them as switch requests, and their words must resolve to the `target`.
+  # _switch: requests to switch profiles in words beyond a profile's name; the switch-request parser
+  # must read them, and their words must resolve to the `target`.
   - {text: go to the stock trader profile, profile: _switch, active: general, effort: medium, target: stock-picker}
   - {text: use my portfolio agent, profile: _switch, active: general, effort: medium, target: stock-picker}
   - {text: can I talk to the investing agent, profile: _switch, active: general, effort: medium, target: stock-picker}

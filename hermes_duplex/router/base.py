@@ -1,18 +1,16 @@
-"""The router's data types, the interface every router backend implements, and the ``_control`` and
-``_switch`` choices.
+"""The router's data types, the interface every router backend implements, and the ``_control`` choice.
 
 A backend scores one request against every choice it was configured with; the composite router
 (``composite.py``) turns those scores into a ``RouteDecision``.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Protocol
 
-from ..config import CONTROL_PROFILE, SWITCH_PROFILE, ControlExamples, ProfileConfig
+from ..config import CONTROL_PROFILE, ControlExamples, ProfileConfig
 from ..providers.base import ModelChoice
-from ..switching import spoken_form
 
 Effort = Literal["low", "medium", "high"]
 """How hard a task's model should think; Hermes receives it as ``model_options.reasoning.effort``."""
@@ -31,39 +29,10 @@ BUILTIN_CONTROL_EXAMPLES: Mapping[ControlIntent, tuple[str, ...]] = {
     "cancel": ("cancel that", "stop that task", "never mind"),
 }
 
-SWITCH_DESCRIPTION = "changing which agent or profile the user talks to"
-"""The fixed description of the ``_switch`` choice."""
-
-SWITCH_TEMPLATES: tuple[str, ...] = (
-    "go to the … profile",
-    "put me on the … agent",
-    "use the … agent",
-    "can I talk to the … agent",
-    "connect me with the … agent",
-    "change profile to …",
-)
-"""Phrasings of a switch request; ``switch_spec`` fills the "…" with each profile's spoken name."""
-
-BUILTIN_SWITCH_EXAMPLES: tuple[str, ...] = ("switch agents", "switch profiles", "use a different agent")
-"""Switch requests that name no profile."""
-
-
-def switch_spec(profiles: Iterable[str]) -> ProfileSpec:
-    """The ``_switch`` choice for ``profiles``: ``SWITCH_TEMPLATES`` filled with each profile's spoken
-    name ("go to the stock picker profile"), then ``BUILTIN_SWITCH_EXAMPLES``. Naming the profiles
-    keeps a request such as "go to the stock trader profile" nearer to asking for a switch than to the
-    profile's own topic."""
-    filled = (
-        template.replace("…", " ".join(spoken_form(name)))
-        for template in SWITCH_TEMPLATES
-        for name in profiles
-    )
-    return ProfileSpec(SWITCH_PROFILE, SWITCH_DESCRIPTION, (*filled, *BUILTIN_SWITCH_EXAMPLES))
-
 
 @dataclass(frozen=True)
 class ProfileSpec:
-    """One choice a backend can route to: a Hermes profile, ``_control``, or ``_switch``."""
+    """One choice a backend can route to: a Hermes profile, or ``_control``."""
 
     name: str
     description: str
@@ -106,14 +75,12 @@ def control_spec(extra: ControlExamples) -> ControlSpec:
 def choice_specs(
     profiles: Mapping[str, ProfileConfig], control_examples: ControlExamples
 ) -> list[ProfileSpec]:
-    """Every choice a backend is configured with: each profile in order, then ``_control``, then
-    ``_switch``."""
+    """Every choice a backend is configured with: each profile in order, then ``_control``."""
     specs: list[ProfileSpec] = [
         ProfileSpec(name=name, description=profile.description, examples=profile.examples)
         for name, profile in profiles.items()
     ]
     specs.append(control_spec(control_examples))
-    specs.append(switch_spec(profiles))
     return specs
 
 
@@ -139,8 +106,7 @@ class RouteDecision:
     the active profile's model for ``effort``, None for the Hermes profile's own default (and for a
     ``_control`` request). ``suggestion`` is another profile the speaker may use that clearly fits
     the request better, or None. ``control_intent`` is set when the request asks about or stops the
-    speaker's tasks, and ``switch_request`` when it asks to switch profiles; either is answered
-    locally and never dispatched to Hermes.
+    speaker's tasks; such a request is answered locally and never dispatched to Hermes.
     ``probabilities`` maps every choice to the deciding backend's probability (empty when none
     answered).
     """
@@ -152,9 +118,6 @@ class RouteDecision:
     probabilities: Mapping[str, float]
     source: RouteSource
     latency_ms: int
-    switch_request: bool = False
-    """Whether the request asks to switch profiles (the ``_switch`` choice) rather than being a task;
-    which profile it asks for is not decided here. Never set together with ``control_intent``."""
 
 
 @dataclass(frozen=True)
