@@ -173,3 +173,5 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-05 13:39 - CI run 42037181312: check + e2e passed (test fix worked); deps-compat failed on curl 429 from raw.githubusercontent. Added curl retries; committed locally, awaiting push yes
 - 2026-11-05 13:43 - User chose git fetch for deps-compat; local commit amended, steps run locally (44 pins, resolved, no openai); awaiting push yes
 - 2026-11-05 14:22 - Pushed c731f12 (deps-compat git fetch) to PR #1 with user yes
+- 2026-11-06 05:04 - Live test on picard: DAVE NoDecryptorForUser (frames ok=0). Cause davey 0.2.0 vs Hermes 0.1.7. Pinned davey>=0.1.7,<0.2; committed locally (1193 pass), awaiting push yes
+- 2026-11-06 05:38 - User approved: default to task, _control only on strong evidence (keep model routers). Dispatching coder. davey pin 540ddcb still unpushed.
