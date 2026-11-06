@@ -177,3 +177,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-06 05:38 - User approved: default to task, _control only on strong evidence (keep model routers). Dispatching coder. davey pin 540ddcb still unpushed.
 - 2026-11-06 05:48 - User approved SOUL.md/USER.md context feature; USER.md only when owner alone or on web. Brief written; dispatch after router fix lands.
 - 2026-11-06 05:54 - Router default-to-task committed (1210 pass, e2e 5 per coder). Control recall 0.613 trade-off. Follow-up idea: reword _control description.
+- 2026-11-06 05:54 - User: Hermes should do the rewrite. Dispatching coder for context-files change.
