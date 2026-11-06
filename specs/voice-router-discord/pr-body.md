@@ -36,8 +36,8 @@ Also:
 
 ### Testing
 - `uv run ruff check . && uv run ruff format --check . && uv run pyright`: clean.
-- `uv run pytest -m "not live and not e2e"`: 1193 passed.
-- `uv run pytest -m e2e`: 5 passed against a real hermes-agent @6112c2a gateway with two profiles and a fake LLM (recipe in README). They cover a voice switch, a refused switch, a "yes" to a switch suggestion, the active profile surviving a restart, and doctor. The CI e2e job has not run on GitHub Actions yet.
+- `uv run pytest -m "not live and not e2e"`: 1530 passed.
+- `uv run pytest -m e2e`: 6 passed against a real hermes-agent @6112c2a gateway with two profiles and a fake LLM (recipe in README). They cover a voice switch, a refused switch, a "yes" to a switch suggestion, the active profile surviving a restart, a SOUL.md rewrite used in a call, and doctor. The CI e2e job has not run on GitHub Actions yet.
 - **Router eval** (103 labelled phrases, real potion-base-8M, knn):
   - choice accuracy 0.825;
   - switch suggestions 20 of 20 right, 20 of 38 needed ones made;
@@ -48,21 +48,25 @@ Also:
 - [ ] Generate and commit the live fixtures: `OPENAI_API_KEY=… uv run python -m tests.live.make_audio_fixtures`, then `HERMES_DUPLEX_LIVE=1 uv run pytest -m live`.
 - [ ] Run `docs/live-checklist.md` on real Discord.
   - Items 1–15: DAVE receive, barge-in, multi-speaker, rejoin, tasks across conversations, and each provider's prompt.
-  - Profile items 16–24, especially:
+  - Profile items 16–25, especially:
     - on OpenAI Realtime, a "yes" to "Want me to switch?" and to "Cancel that?";
     - on Grok, that an instructions-only update is confirmed and tools still work after a switch.
 - [ ] Confirm the Grok items marked unverified in README known limitations.
 
+### Since the first push
+- **Hermes context in the voice prompt (opt-in):** each profile's SOUL.md, the owner's USER.md and a "current projects" briefing, rewritten for voice by the profile itself and cached; the person's open tasks; per-person `voice_context`. USER.md and the briefing appear only on the web or when the owner is alone on Discord; once someone joins, a session that carried them is restarted and nothing from it reaches the newcomer.
+- **Router:** a request is a task unless status/cancel is near-certain; abandoned backend calls no longer log unretrieved errors.
+- **Switching:** quiet switches on GPT-Live ("Switching you to …" after the reply, then reconnect); switch phrasings from one table; targets matched by meaning when an agent is named, by name otherwise. Held-out switch set (141 phrases): precision 1.000, recall 0.920, task taken as switch 0.000.
+- **Fixes from live testing on picard:** Discord DAVE decryption (davey pinned to Hermes's 0.1.x), CI download rate limit, a racy test.
+
 ### Known issues (from review, not addressed)
-- **A short follow-up sentence can be lost.** A switch to a word that is not a profile, followed by a very short sentence, still asks "which agent?" and drops the sentence: "Switch to Celsius. What's it now?". Longer follow-ups are handed off.
-- **A second speaker's "yes" can be held back.** On a shared Discord call, while one person's switch question waits, another person's bare "yes" to a new offer of their own gets "That question was for rob."
-- **Late answers on GPT-Live are spotted by question marks.** The guard against late answers notices a new question from the voice by its "?". On GPT-Live this depends on transcript punctuation and timing, so a stray late "yes" may run, or a quick "yes" to a new offer may be held back.
-- **An OpenAI switch question can be dropped.** If the person starts speaking just as the question goes out, it can be lost; the request then runs on the old profile after 30 s.
-- **A switch can hand off a meaningless remainder.** For example "talk to general about it" hands off "it".
-- **"You're back on general" can be missed.** It is not said if the service restarts twice before the person speaks again.
-- **Cancel by number.** On GPT-Live, a question context like "Should I cancel task 3 or task 4?" can resolve to task 3 and cancel it at once.
-- **Accepted by the user:** earlier task results are read in full wherever the person is next heard, including shared Discord channels.
-- **Plus low observations in the spec's review record,** for example a huge `tasks.restore_max_age_h` fails start.
+- **Decisions/Jev are unmeasured** for the status/cancel bar (0.995, tuned on knn); a loosely worded cancel may start a task instead. Needs `eval-router --config` with keys.
+- **Decisions often misses the 300 ms deadline** on picard; raising `router.deadline_ms` to ~1000 is suggested.
+- **A few unusual switch wordings** ("back to the regular assistant", "the agent that does flights") run as tasks; "switch to <name>" always works.
+- **An announcement being spoken when someone joins** an owner-only call is cut and not repeated.
+- **Cancel by number** on GPT-Live ("Should I cancel task 3 or task 4?") can cancel task 3.
+- **Accepted by the user:** earlier task results are read in full wherever the person is next heard.
+- **Plus low observations** in the spec's review record.
 
 ### Risk
 **Level:** medium. This is a new plugin with no existing users. It cancels and starts Hermes runs on users' behalf, and real-service behavior is unverified until the manual checklist runs.
