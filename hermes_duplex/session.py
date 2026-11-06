@@ -487,12 +487,14 @@ class VoiceSession:
     a change of the open tasks alone, which waits for the next restart or reconnect. A restart for a
     person first heard, for a person who left, or for a person alone again, waits until the call is
     quiet (``RESTART_QUIET_S``), so it does not cut off what they are saying; one for someone joining
-    them happens at once. When someone joins while the instructions carry the owner's ``USER.md`` or
-    briefing, the provider is restarted at once whether or not it ``replaces_instructions`` (an update
-    in place would keep its conversation, said with the owner's notes), the output not heard yet is
-    dropped, and everything the closing provider session still outputs is ignored
-    (``_drop_output_for_newcomers``); a hand-off it still makes is not run, and the people are asked
-    to say it again (``NOT_HEARD``). Hermes tasks keep running through it.
+    them happens at once. A provider session whose instructions carry the owner's ``USER.md`` or
+    briefing, open or still opening, is muted as soon as the owner is no longer alone, and always
+    restarted, whether or not it ``replaces_instructions`` (an update in place would keep its
+    conversation, said with the owner's notes) and whatever instruction changes are under way
+    (``_drop_output_for_newcomers``). Until it is replaced, the output not heard yet is dropped,
+    nothing it outputs is played or recorded in the transcript, and nothing is sent to it: no input,
+    notices, results, progress, or function outputs; a hand-off it still makes is not run, and the
+    people are asked to say it again (``NOT_HEARD``). Hermes tasks keep running through it.
     Hand-offs always run on the speaker's own active profile, whatever the instructions speak for.
 
     People switch their active profile only by asking: a ``switch_profile`` call, whose ``profile``
@@ -700,7 +702,7 @@ class VoiceSession:
         if self._conversation.person is not None:
             self._listen_for_switches(self._conversation.person)
         try:
-            await self._connect(None)
+            await self._connect(reseed=False)
             events = asyncio.create_task(self._handle_events())
             pumps = (
                 asyncio.create_task(self._pump_input()),
@@ -727,21 +729,24 @@ class VoiceSession:
             await self._tracker.leave_unattended(self._task_numbers, self._untold)
             await self._provider.close()
 
-    async def _connect(self, summary: str | None) -> None:
-        """Open a provider session re-seeded with ``summary`` (None: a new call) on a fresh timeline.
+    async def _connect(self, *, reseed: bool) -> None:
+        """Open a provider session on a fresh timeline, re-seeded (``_reseed_summary``) unless it
+        starts a new call.
 
-        The instructions are rendered from the current prompt context, built afresh. Everything placed
-        on the previous provider session's timeline is forgotten, and work waiting for that timeline to
-        reach a point is woken to find it ended.
+        The instructions and the re-seed are rendered from the conversation as it is now, under
+        ``_instructions_lock``. The new provider session counts as the current one from the start, so
+        someone joining while it opens mutes it like an open one (``_drop_output_for_newcomers``).
+        Everything placed on the previous provider session's timeline is forgotten, and work waiting
+        for that timeline to reach a point is woken to find it ended.
         """
         async with self._instructions_lock:
-            self._prompt_context = context = self._current_context()
+            async with self._input_advanced:
+                self._connection += 1
+                self._sent_ms = 0
+                self._input_advanced.notify_all()
+            self._prompt_context = self._rendered_context = context = self._current_context()
+            summary = self._reseed_summary() if reseed else None
             await self._provider.connect(self._provider.prompter.instructions(context), self._voice, summary)
-            self._rendered_context = context
-        async with self._input_advanced:
-            self._connection += 1
-            self._sent_ms = 0
-            self._input_advanced.notify_all()
         self._attribution.clear()
         self._input_transcript = _TimedTranscript()
         self._output_transcript = _TimedTranscript()
@@ -763,15 +768,8 @@ class VoiceSession:
             await self._conversation.flush_playback()
         await self._end_input_line()
         await self._end_output_line()
-        open_tasks = [
-            task
-            for number in self._task_numbers
-            if (task := self._tracker.get(number)) and task.state not in TERMINAL_STATES
-        ]
-        lines = list(self._history)
-        summary = self._provider.prompter.reseed(lines[len(lines) - self._lines_to_reseed() :], open_tasks)
         try:
-            await retry_connect(lambda: self._connect(summary), sleep=self._sleep)
+            await retry_connect(lambda: self._connect(reseed=True), sleep=self._sleep)
         except WireError as error:
             logger.error("could not reconnect the voice provider: %s", error.reason)
             return False
@@ -793,7 +791,7 @@ class VoiceSession:
             for person in frame.voiced_speakers - self._people_heard:
                 self._first_heard(person)
             await self._follow_presence()
-            if not self._provider_open.is_set():
+            if not self._provider_ready():
                 continue  # reconnecting: the new provider session starts with the input after it opens
             # Placed on the provider session's own timeline: the transport's t_ms never restarts.
             connection, t_ms = self._connection, self._sent_ms
@@ -808,14 +806,15 @@ class VoiceSession:
         """Keep the instructions on someone in the conversation, and what is only for a person alone
         out of them once they are not.
 
-        When the person the instructions speak to has left, they move to the conversation's
-        ``person``, or else to the one person from config still present, if either is (once the call is
-        quiet). When the person stops being alone (someone joined, or they left), the instructions change
-        at once, and, if the open provider session's instructions carried text only for them alone (the
-        owner's ``USER.md`` or briefing), the output not heard yet is dropped first
-        (``_drop_output_for_newcomers``) and the provider restarts, even one that
-        ``replaces_instructions``; when they are alone again, the change waits until the call is
-        quiet."""
+        Whenever the current provider session's instructions carry the owner's ``USER.md`` or briefing
+        and the owner is no longer alone in the conversation (someone joined, or the owner left), that
+        provider session is muted and restarted (``_drop_output_for_newcomers``), whoever the
+        instructions speak to by then. When the person the instructions speak to has left, they move
+        to the conversation's ``person``, or else to the one person from config still present, if
+        either is (once the call is quiet). When the person stops being alone, the instructions change
+        at once; when they are alone again, the change waits until the call is quiet."""
+        if self._owner_has_company() and not self._muted():
+            await self._drop_output_for_newcomers()
         person = self._context_person
         if person is None:
             return
@@ -823,11 +822,17 @@ class VoiceSession:
         if target == person and self._conversation.alone(person) == self._context_alone:
             return
         no_longer_alone = self._context_alone
-        private = no_longer_alone and _carries_owner_texts(self._rendered_context)
-        if private:
-            await self._drop_output_for_newcomers()
         profile = self._context_profile if target == person else self._active_profiles.get(target)
-        self._change_prompt_context(profile, target, when_quiet=not no_longer_alone, restart=private)
+        self._change_prompt_context(profile, target, when_quiet=not no_longer_alone)
+
+    def _owner_has_company(self) -> bool:
+        """Whether the current provider session's instructions carry the owner's notes
+        (``_carries_owner_texts``) while the owner, the person they speak to, is not alone in the
+        conversation."""
+        context = self._rendered_context
+        if context is None or not _carries_owner_texts(context):
+            return False
+        return context.person is None or not self._conversation.alone(context.person)
 
     def _present_person(self) -> str | None:
         """Whom the instructions move to when their person has left: the conversation's ``person``
@@ -839,18 +844,34 @@ class VoiceSession:
 
     async def _drop_output_for_newcomers(self) -> None:
         """Someone now hears the call besides the owner, who was alone in it with their notes in the
-        instructions: ignore whatever the open provider session outputs from now on, discard the output
-        not heard yet, as a barge-in does, and keep the transcript so far out of every later re-seed.
-        The caller restarts the provider."""
+        instructions of the current provider session (open or opening): mute it (``_muted``), discard
+        the output not heard yet, as a barge-in does, keep the transcript so far out of every later
+        re-seed, and restart it (``_apply_prompt_context``)."""
         self._muted_connection = self._connection
         await self._barge_in("someone joined")
         self._input_line = self._output_line = ""
         self._reseed_after_line = self._lines_added
+        self._spawn(self._apply_prompt_context())
 
     def _muted(self) -> bool:
-        """Whether the open provider session's output is ignored: it was said with the owner's notes
-        in the instructions after someone joined them (``_drop_output_for_newcomers``)."""
+        """Whether the current provider session heard the owner's notes and someone has joined them
+        since (``_drop_output_for_newcomers``). Until it is replaced, which its restart guarantees
+        (``_apply_prompt_context``), nothing it outputs is played, recorded, or acted on, and nothing
+        is sent to it (``_provider_ready``)."""
         return self._muted_connection == self._connection
+
+    def _provider_ready(self) -> bool:
+        """Whether a provider session is open and may be sent input, notices, and answers: not muted."""
+        return self._provider_open.is_set() and not self._muted()
+
+    async def _wait_for_provider_ready(self) -> None:
+        """Wait until ``_provider_ready``: a muted provider session is waited out until its
+        replacement opens."""
+        while True:
+            await self._provider_open.wait()
+            if not self._muted():
+                return
+            await asyncio.sleep(FRAME_MS / 1000)
 
     def _first_heard(self, person: str) -> None:
         """Take in ``person``, voiced for the first time in this session or for the first time since
@@ -967,8 +988,8 @@ class VoiceSession:
                         self._floor.speech_stopped()
                     case ResponseStarted():
                         self._floor.response_started()
-                    case OutputAudio() | OutputTranscript() if self._muted():
-                        pass  # said with the owner's notes after someone joined them
+                    case OutputAudio() | OutputTranscript() | InputTranscript() if self._muted():
+                        pass  # heard or said with the owner's notes after someone joined them
                     case DelegationRequested() if self._muted():
                         # Made with the owner's notes, and the provider session is closing, so nothing
                         # could answer it: the people are asked to say it again in the next one.
@@ -1025,14 +1046,12 @@ class VoiceSession:
         # The conversation has no voice of its own to say it with.
         await self._conversation.notify({"transcript": {"speaker": "assistant", "text": PROVIDER_LOST}})
 
-    def _change_prompt_context(
-        self, profile: str, person: str | None, *, when_quiet: bool = False, restart: bool = False
-    ) -> None:
+    def _change_prompt_context(self, profile: str, person: str | None, *, when_quiet: bool = False) -> None:
         """Make the instructions speak for ``profile`` and to ``person``, with the context built afresh
         (``_current_context``), and bring the open provider session's instructions up to date in the
         background; nothing happens when the context comes out as it was. With ``when_quiet``, a
-        provider that must restart for them waits until the call is quiet first; with ``restart``, the
-        provider restarts at once even where it could take them in place (``_apply_prompt_context``)."""
+        provider that must restart for them waits until the call is quiet first
+        (``_apply_prompt_context``)."""
         before = (self._context_profile, self._context_person, self._context_alone)
         self._context_profile, self._context_person = profile, person
         context = self._current_context()
@@ -1046,7 +1065,7 @@ class VoiceSession:
                 " alone" if self._context_alone else "",
             )
         self._prompt_context = context
-        self._spawn(self._apply_prompt_context(when_quiet=when_quiet, restart=restart))
+        self._spawn(self._apply_prompt_context(when_quiet=when_quiet))
 
     def _same_instructions(self, context: PromptContext, other: PromptContext | None) -> bool:
         """Whether instructions rendered from ``context`` need not replace ones rendered from ``other``:
@@ -1078,24 +1097,28 @@ class VoiceSession:
         tasks = self._tracker.active_for(person) if person is not None else ()
         return tuple((topic(task.text), task.profile) for task in tasks[-OPEN_TASKS_MAX:])
 
-    async def _apply_prompt_context(self, *, when_quiet: bool = False, restart: bool = False) -> None:
+    async def _apply_prompt_context(self, *, when_quiet: bool = False) -> None:
         """Give the open provider session instructions rendered from the current prompt context.
 
-        A provider that ``replaces_instructions`` gets them in place, unless ``restart``. Any other, or
-        one whose update fails, is closed for ``_handle_events`` to reconnect as a restart; with
-        ``restart``, that restart is for someone who joined the owner (``_drop_output_for_newcomers``),
-        so a provider session opened since with the owner's notes is muted too. With ``when_quiet``, that
+        A muted provider session (``_muted``) is restarted at once, whatever its instructions. Otherwise,
+        a provider that ``replaces_instructions`` gets them in place. Any other, or one whose update
+        fails, is closed for ``_handle_events`` to reconnect as a restart; with ``when_quiet``, that
         restart waits until nobody has been voiced for ``RESTART_QUIET_S``, no output is held or
         playing, and, where the provider emits speech events, the floor is free. Does nothing when no
         provider session is open (the next connect renders the current context) or when the open one
         already has them.
         """
-        replaces = self._capabilities["replaces_instructions"] and not restart
+        replaces = self._capabilities["replaces_instructions"]
         if when_quiet and not replaces:
             await self._wait_for_quiet()
         async with self._instructions_lock:
             context = self._prompt_context
-            if not self._provider_open.is_set() or self._same_instructions(context, self._rendered_context):
+            if not self._provider_open.is_set():
+                return
+            if self._muted():
+                await self._restart_provider(context)
+                return
+            if self._same_instructions(context, self._rendered_context):
                 return
             if replaces:
                 try:
@@ -1106,8 +1129,6 @@ class VoiceSession:
                     self._rendered_context = context
                     return
             if not (when_quiet and replaces):
-                if restart:
-                    self._muted_connection = self._connection
                 await self._restart_provider(context)
                 return
         # The update failed for a person first heard: restart, but without cutting anyone off.
@@ -1151,10 +1172,18 @@ class VoiceSession:
         line, self._output_line = self._output_line, ""
         await self._add_transcript_line("assistant", line)
 
-    def _lines_to_reseed(self) -> int:
-        """How many of the latest transcript lines a re-seed may carry: those added since someone
-        joined a person alone (``_drop_output_for_newcomers``), or all of them."""
-        return min(len(self._history), self._lines_added - self._reseed_after_line)
+    def _reseed_summary(self) -> str:
+        """The summary a reconnected provider session starts from: the latest transcript lines, none
+        from before someone last joined the owner while their notes were in the instructions
+        (``_drop_output_for_newcomers``), and this session's open tasks."""
+        open_tasks = [
+            task
+            for number in self._task_numbers
+            if (task := self._tracker.get(number)) and task.state not in TERMINAL_STATES
+        ]
+        count = min(len(self._history), self._lines_added - self._reseed_after_line)
+        lines = list(self._history)
+        return self._provider.prompter.reseed(lines[len(lines) - count :], open_tasks)
 
     async def _add_transcript_line(self, speaker: Literal["user", "assistant"], text: str) -> None:
         text = text.strip()
@@ -1230,8 +1259,8 @@ class VoiceSession:
     async def _answer(self, request: DelegationRequested, payload: Mapping[str, Any]) -> None:
         """Send ``payload`` as the function output for the call ``request``, after which the model
         responds; dropped when the provider session that made the call has ended."""
-        if not self._provider_open.is_set() or request.id not in self._delegation_ids:
-            logger.info("call %s was made by an earlier provider session; not answered", request.id)
+        if not self._provider_ready() or request.id not in self._delegation_ids:
+            logger.info("call %s was made by an earlier or muted provider session; not answered", request.id)
             return
         # Counted before sending, so the reply's events cannot arrive ahead of the count.
         self._floor.response_requested()
@@ -1746,10 +1775,7 @@ class VoiceSession:
         gated = self._capabilities["emits_speech_events"]
         waiting_since_s: float | None = None
         while True:
-            await self._provider_open.wait()
-            if self._muted():
-                await asyncio.sleep(FRAME_MS / 1000)  # whatever it said would be ignored
-                continue
+            await self._wait_for_provider_ready()
             if not gated or (self._floor.free and not self._output_pending()):
                 return
             now_s = self._clock()
@@ -1761,9 +1787,9 @@ class VoiceSession:
             await asyncio.sleep(FRAME_MS / 1000)
 
     async def _report_progress(self, ref: DelegationRef, text: str) -> None:
-        """Report progress on ``ref``'s task to the open provider session, tied to the delegation
-        only when that session requested it."""
-        await self._provider_open.wait()
+        """Report progress on ``ref``'s task to the open provider session, once it is not muted, tied
+        to the delegation only when that session requested it."""
+        await self._wait_for_provider_ready()
         if not self._requested_here(ref):
             ref = DelegationRef(delegation_id=None, call_id=None, task_id=ref.task_id)
         await self._provider.report_progress(ref, text)

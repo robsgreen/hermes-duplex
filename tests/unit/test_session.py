@@ -17,7 +17,7 @@ from hermes_duplex import service
 from hermes_duplex import session as session_module
 from hermes_duplex.audio.frames import silent_frame
 from hermes_duplex.config import Config, load_config
-from hermes_duplex.dispatch.hermes_api import HermesApiClient
+from hermes_duplex.dispatch.hermes_api import HermesApiClient, RunEvent
 from hermes_duplex.hermes_context import HermesContextFiles
 from hermes_duplex.people import PermissionChecker
 from hermes_duplex.profiles import ActiveProfiles
@@ -37,6 +37,7 @@ from hermes_duplex.providers.base import (
     DELEGATE_TOOL,
     Closed,
     DelegationRequested,
+    InputTranscript,
     ModelChoice,
     OutputAudio,
     OutputDone,
@@ -1969,6 +1970,294 @@ async def test_a_hand_off_from_the_session_with_the_owners_notes_after_someone_j
     assert len(harness.sent("connect")) == 2, "said to the restarted provider session"
     assert api.runs == {}
     assert harness.sent("send_function_output") == []
+
+
+class _SlowProvider(FakeProvider):
+    """A fake provider whose ``held`` calls (``update_instructions``, ``close``, or a ``connect`` after
+    the first) wait until ``release`` is set, as over a slow round trip. A held ``connect`` emits
+    ``opening`` first, as a model that starts speaking at once. Counts the input frames each provider
+    session received."""
+
+    def __init__(
+        self,
+        script: Iterable[Mapping[str, Any]],
+        held: Iterable[str],
+        opening: Iterable[ProviderEvent] = (),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(script, **kwargs)
+        self.held = set(held)
+        self.release = asyncio.Event()
+        self.closing = False
+        self.frames_per_session: list[int] = []
+        self._opening = list(opening)
+
+    async def connect(self, instructions: str, voice: str | None, history_summary: str | None) -> None:
+        await super().connect(instructions, voice, history_summary)
+        self.frames_per_session.append(0)
+        if "connect" in self.held and len(self.frames_per_session) > 1:
+            for event in self._opening:
+                self._events.put_nowait(event)
+            self._opening.clear()
+            await self.release.wait()
+
+    async def send_audio(self, pcm16: bytes) -> None:
+        await super().send_audio(pcm16)
+        self.frames_per_session[-1] += 1
+
+    async def update_instructions(self, text: str) -> None:
+        await super().update_instructions(text)
+        if "update_instructions" in self.held:
+            await self.release.wait()
+
+    async def close(self) -> None:
+        self.closing = True
+        if "close" in self.held:
+            await self.release.wait()
+        await super().close()
+
+
+async def test_someone_joining_restarts_the_provider_even_behind_queued_instruction_updates(
+    harness: _Harness, api: FakeHermesApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each task change updates the open tasks in place; with one update slow and another queued
+    # behind it, the restart for alex must still come, and until it does the provider session that
+    # heard the owner's notes is sent nothing: no input, progress, results, or notices.
+    for _ in range(2):
+        api.run_scripts.append(
+            RunScript(
+                events=[
+                    {"event": "run.started"},
+                    {"event": "tool.started", "tool": "web_search", "preview": "step 1"},
+                    {"event": "run.completed", "output": "up 2%"},
+                ]
+            )
+        )
+    progress_held = asyncio.Event()
+    run_events = HermesApiClient.events
+
+    async def events_after_the_start_held(
+        client: HermesApiClient, profile: str, run_id: str
+    ) -> AsyncIterator[RunEvent]:
+        async for event in run_events(client, profile, run_id):
+            if event.kind != "started":
+                await progress_held.wait()
+            yield event
+
+    monkeypatch.setattr(HermesApiClient, "events", events_after_the_start_held)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _SlowProvider(
+        [
+            _delegation(100, "call_1", "how is my portfolio doing"),
+            _delegation(300, "call_2", "and what about Tesla"),
+        ],
+        held={"update_instructions"},
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(harness.sent("update_instructions")))  # the slow one
+    conversation.feed(_frames(140, _voiced("rob")))
+    await harness.wait_for(lambda: len(harness.tracker.active_for("rob")) == 2)  # the queued one
+    await asyncio.sleep(0.1)
+
+    frames_before_join = provider.frames_per_session[0]
+    sent_before_join = len(provider.calls)
+    conversation.company.add("alex")
+    conversation.feed(_frames(100, _voiced("alex")))  # speaking from his first frame on
+    progress_held.set()
+    await asyncio.sleep(0.3)
+    assert [call.method for call in provider.calls[sent_before_join:]] == []
+    assert provider.frames_per_session == [frames_before_join]
+
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await harness.wait_for(
+        lambda: len(harness.sent("report_progress")) == 2 and len(harness.sent("say")) >= 2
+    )
+
+    first, second = harness.sent("connect")
+    assert OWNER_FACTS in first.args["instructions"]
+    assert OWNER_FACTS not in second.args["instructions"]
+    after_join = [call.method for call in provider.calls[sent_before_join:]]
+    assert after_join[: after_join.index("connect")] == ["close"]
+    assert all(OWNER_FACTS not in text for text in harness.texts("update_instructions")[1:])
+
+
+async def test_someone_joining_while_the_provider_reconnects_with_the_owners_notes_restarts_it(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 0.05)  # for the restart once alone
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    conversation.company.add("alex")
+    provider = _SlowProvider(
+        [],
+        held={"connect"},
+        # What the provider session opened with the owner's notes says at once:
+        opening=[
+            OutputTranscript(delta="Your hearing is Friday."),
+            OutputAudio(pcm=bytes(2 * RATE), item_id=None),
+            OutputDone(),
+        ],
+        capabilities=GPT_LIVE_CAPABILITIES,
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 200)
+    conversation.company.clear()  # rob alone: a quiet restart brings his notes in
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    conversation.company.add("alex")  # back while that provider session opens
+    conversation.feed(_frames(100))
+    await asyncio.sleep(0.1)
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 3)
+    await asyncio.sleep(0.3)
+
+    _, alone, with_alex = harness.sent("connect")
+    assert OWNER_FACTS in alone.args["instructions"]
+    assert OWNER_FACTS not in with_alex.args["instructions"]
+    assert conversation.played == []
+    assert "hearing" not in with_alex.args["history_summary"]
+    assert all(
+        "hearing" not in event["transcript"]["text"]
+        for event in conversation.notified
+        if "transcript" in event
+    )
+
+
+@pytest.mark.parametrize("replaces_instructions", [False, True], ids=["gpt-live", "realtime"])
+async def test_someone_joining_while_the_provider_reconnects_keeps_what_was_said_alone_out_of_the_reseed(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, replaces_instructions: bool
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(400, _voiced("rob")))
+    harness.start(
+        [
+            {"at_input_ms": 100, "event": {"type": "output_transcript", "delta": "Your hearing is Friday."}},
+            {"at_input_ms": 100, "event": {"type": "output_done"}},
+            {"at_input_ms": 200, "event": {"type": "close", "reason": "expired"}},
+        ],
+        [],
+        person="rob",
+        conversation=conversation,
+        capabilities={"replaces_instructions": replaces_instructions, "supports_truncate": False},
+        prompt_context_for=_owner_context(harness),
+    )
+    provider = harness.provider
+    assert provider is not None
+    await harness.wait_for(lambda: provider.input_ms >= 200)  # it expires there
+    await asyncio.sleep(0.05)
+    assert len(harness.sent("connect")) == 1
+
+    conversation.company.add("alex")  # during the reconnect's first wait
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    second = harness.sent("connect")[1]
+    assert OWNER_FACTS not in second.args["instructions"]
+    assert "hearing" not in second.args["history_summary"]
+
+
+async def test_what_the_owner_said_alone_that_is_transcribed_after_someone_joins_is_not_reseeded(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _MemoryConversation(_frames(200, _voiced("rob")))
+    provider = _StillReplyingAsItCloses(
+        [],
+        [InputTranscript(delta="remind me to call my lawyer Ana", final=True, start_ms=0)],
+        capabilities=GPT_LIVE_CAPABILITIES,
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: provider.input_ms >= 100)
+
+    conversation.company.add("alex")
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+
+    assert "lawyer" not in harness.sent("connect")[1].args["history_summary"]
+    assert all(
+        "lawyer" not in event["transcript"]["text"]
+        for event in conversation.notified
+        if "transcript" in event
+    )
+
+
+class _HeldPlaybackConversation(_MemoryConversation):
+    """A ``_MemoryConversation`` with a playback queue (``audible``) that ``flush_playback`` empties,
+    whose ``play`` waits for ``release_play`` once ``hold_play`` is set, as a slow transport write."""
+
+    def __init__(self, frames: Sequence[InputFrame]) -> None:
+        super().__init__(frames)
+        self.audible: list[bytes] = []
+        self.hold_play = False
+        self.play_held = asyncio.Event()
+        self.release_play = asyncio.Event()
+
+    async def play(self, pcm16_mono: bytes, rate: int) -> None:
+        if self.hold_play:
+            self.play_held.set()
+            await self.release_play.wait()
+        await super().play(pcm16_mono, rate)
+        self.audible.append(pcm16_mono)
+
+    async def flush_playback(self) -> None:
+        self.audible.clear()
+
+
+async def test_audio_reaching_the_conversation_after_someone_joins_is_flushed_before_the_restarted_session(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "RESTART_QUIET_S", 60)
+    conversation = _HeldPlaybackConversation(_frames(200, _voiced("rob")))
+    provider = _SlowProvider(
+        [{"at_input_ms": 100, "event": {"type": "output_audio", "ms": 5000}}],
+        held={"close"},
+        capabilities={"replaces_instructions": False, "supports_truncate": False},
+    )
+    harness.start(
+        [],
+        [],
+        person="rob",
+        conversation=conversation,
+        provider=provider,
+        prompt_context_for=_owner_context(harness),
+    )
+    await harness.wait_for(lambda: bool(conversation.played))
+    conversation.hold_play = True
+    await harness.wait_for(conversation.play_held.is_set)
+
+    conversation.company.add("alex")  # the join's flush runs while a chunk is still on its way
+    conversation.feed(_frames(100))
+    await harness.wait_for(lambda: provider.closing)
+    conversation.hold_play = False
+    conversation.release_play.set()
+    await harness.wait_for(lambda: bool(conversation.audible))  # it arrived after the flush
+
+    provider.release.set()
+    await harness.wait_for(lambda: len(harness.sent("connect")) == 2)
+    await asyncio.sleep(0.1)
+    assert conversation.audible == []
 
 
 async def test_when_the_person_spoken_to_leaves_the_instructions_move_to_the_conversations_person(

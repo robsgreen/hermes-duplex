@@ -366,8 +366,8 @@ nothing meant for the owner alone. The restart, and every later reconnect, is se
 tasks only, not with what was said before they joined; on OpenAI Realtime and Grok the restart also
 leaves behind the model's own memory of the conversation so far. A request the model was handing
 off just then is not run; the assistant asks for it again. When the owner is alone again, the texts
-come back once the call is quiet (in place on OpenAI Realtime and Grok, with a quiet restart on
-GPT-Live). A person's own `voice_context` and their open tasks (queued and running, by topic and agent,
+come back: at once and in place on OpenAI Realtime and Grok, and on GPT-Live with a restart once the
+call has been quiet for 2 seconds. A person's own `voice_context` and their open tasks (queued and running, by topic and agent,
 the newest 10) go in while the conversation is with them: the person who signed in or brought the bot
 in, then whoever was last heard for the first time or last switched. When that person leaves, the
 prompt moves back to the person who brought the bot in, or to the one person left, if either is
@@ -499,7 +499,7 @@ Scoring `decisions` and `jev` needs their API keys, and has not been done yet.
 | Tier | Command | Needs |
 |---|---|---|
 | Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run pyright` | nothing |
-| Default (1315 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
+| Default (1321 tests: unit, contract, in-process end-to-end) | `uv run pytest -m "not live and not e2e"` | nothing |
 | Real Hermes end-to-end (6 tests) | `PATH=<hermes venv>/bin:$PATH uv run pytest -m e2e -rs` | hermes-agent installed (below) |
 | Live (1 test) | `PATH=<hermes venv>/bin:$PATH HERMES_DUPLEX_LIVE=1 uv run pytest -m live -rs` | hermes-agent, real API keys, the spoken WAV fixtures (below); spends money |
 | Router eval | `uv run hermes-duplex eval-router tests/fixtures/router_eval/phrases.yaml --backend knn` (or `descriptions_only.yaml`) | nothing for `knn` (it downloads its embedding model once); keys for `decisions` and `jev` |

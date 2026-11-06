@@ -469,7 +469,8 @@ stock-picker for voice" lines, then run `hermes-duplex voice-context show stock-
 2. On Discord, alone in the channel with the bot, ask the same three questions.
 3. Ask "tell me everything you know about me" and, while the answer plays, have person B join the
    channel (not speak); then ask the cheese question again; then have B leave and, after a quiet
-   moment, ask once more.
+   moment, ask once more. On `openai-realtime` or `xai-realtime`, repeat it with B speaking as they
+   join, right after you start a task (so an instruction update is under way).
 4. Start a slow task ("research three dividend stocks in depth") and, while it runs, ask "what's
    still running?" and edit `stock-picker`'s `USER.md`; on `openai-realtime` or `xai-realtime` check
    that the log shows an instruction update when it starts and ends, and on `gpt-live` that no
@@ -482,6 +483,6 @@ Expected: in steps 1 and 2 the answers follow the rewritten SOUL.md, the cheese 
 briefing's projects come up. In step 3 the answer stops as B joins (the log shows "someone joined: flushed playback"), and with B
 in the channel the cheese is not known (the log shows
 "voice instructions now speak for profile stock-picker, to <you>" without "alone" and a restart at
-once on every provider, and no more of the earlier answer is heard after it), and once B has left and the call is quiet it is known again. In step 4 the task is named by
+once on every provider, and no more of the earlier answer is heard after it), and once B has left it is known again (at once on `openai-realtime` and `xai-realtime`, once the call is quiet on `gpt-live`). In the repeat the restart still comes at once, and nothing is said before it. In step 4 the task is named by
 topic and no task number is said, and the edit reaches the prompt only at the next connect. In step 5 the edit is what the model goes by until `--force`
 replaces it. Neither the log nor `doctor` ever prints a file's text.

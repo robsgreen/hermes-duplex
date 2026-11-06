@@ -484,19 +484,26 @@ open:
 | OpenAI Realtime, xAI Grok | true | Restarts as GPT-Live does when someone joins the owner while their notes are in the instructions (below). Otherwise `update_instructions`: a `session.update` carrying only `instructions` and an `event_id`, meant to leave tools, voice, audio settings, and the conversation as they are. It waits up to `UPDATE_TIMEOUT_S` (5 s) for `session.updated`; an `error` naming its event id, a timeout, or the connection ending raises, the old instructions stay, and the session restarts instead. The rejection is not passed on as a provider error, so it does not count as a refused response. |
 | GPT-Live | false | The session closes the provider session and reconnects it with the new instructions and the reconnect summary (see Reconnect and re-seed). The restart counts neither as short-lived nor as a failure; Hermes tasks keep running. |
 
-A restart for an explicit switch, or for someone joining the owner, happens at once. When the person
-the instructions speak to stops being alone (someone joined, or they left) while the open provider
-session's instructions carry the owner's `USER.md` or briefing, the session mutes that provider
-session (`_drop_output_for_newcomers`: everything it outputs from then until the next connect is
-ignored, since GPT-Live sends no item ids and keeps streaming until its close handshake ends), drops
-the output not heard yet, as a barge-in does (pacer drop, `flush_playback`, `truncate` where
-supported), and restarts the provider at once, on OpenAI Realtime and Grok too: an update in place
-would keep the server-side conversation said with the owner's notes. The pacer is dropped and
-playback flushed once more as the muted session ends. A function call or live delegation the muted
-session sends is not acted on (nothing could answer it) and the people are asked to say it again
-(`NOT_HEARD`) once the new session is open; announcements wait for it too. Neither the restart nor
-any later re-seed carries the transcript lines from before the join: the summary holds the open
-tasks only. Without the owner's notes in the instructions, a join cuts nothing off and changes the
+A restart for an explicit switch, or for someone joining the owner, happens at once. One invariant
+covers the owner's notes: a provider session whose instructions carry the owner's `USER.md` or
+briefing and whose owner is no longer alone (someone joined, or the owner left) is always restarted,
+and until then nothing from it is played or recorded and nothing is sent to it. `_follow_presence`
+checks it on every input frame (`_owner_has_company`), whoever the instructions speak to by then (a
+newcomer heard in their very first frame has already moved them to the newcomer), and mutes that provider session
+(`_drop_output_for_newcomers`). The session counts as current from the moment `_connect` takes the
+instructions lock, so one still opening is muted too. Muting drops the output not heard yet, as a
+barge-in does (pacer drop, `flush_playback`, `truncate` where supported), and queues a restart that
+`_apply_prompt_context` always carries out for a muted session, after any instruction update already
+under way and whether or not the provider could replace its instructions in place (an update in place
+would keep the server-side conversation said with the owner's notes). Until the next connect,
+`_handle_events` ignores the muted session's audio, output and input transcripts (GPT-Live sends no
+item ids and keeps streaming until its close handshake ends), and `_provider_ready` holds back input,
+function outputs, announcements, and progress; the pacer is dropped and playback flushed once more as
+it ends, for audio that was on its way to the conversation. A function call or live delegation the
+muted session sends is not acted on (nothing could answer it) and the people are asked to say it again
+(`NOT_HEARD`) once the new session is open. Neither the restart nor any later re-seed carries the
+transcript lines from before the join: each connect attempt builds its summary under the lock, so the
+summary holds the open tasks only. Without the owner's notes in the instructions, a join cuts nothing off and changes the
 instructions in place where the provider can. One for a person first heard, for a
 person who left, or for the owner alone again (on GPT-Live, or after a failed update on Realtime or Grok)
 first waits until the call is quiet: nobody voiced for
