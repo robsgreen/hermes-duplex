@@ -184,3 +184,4 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-06 06:46 - Pushed d7ba585 (context files) to PR #1 at user's request before review finished
 - 2026-11-06 06:50 - Review 9 seat B in (1 high F1). Waiting seat A.
 - 2026-11-06 06:52 - Review 9 seat A: CRITICAL A1 (GPT-Live restarts every hand-off, pushed). Fix round dispatched with defaults for reseed/U2/U3 pending user.
+- 2026-11-06 07:25 - Review 9 fixes committed (1310 pass; coder e2e 6). Scoped re-review next.
