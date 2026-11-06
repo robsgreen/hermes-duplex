@@ -286,3 +286,20 @@ NF1, NF2/M-B1, M-B2/L1, L-B2 resolved; L-B1 partial (muted floor wait and _answe
 - F1 medium (run, pre-existing) — _rendered_context set only after update_instructions returns; join during an in-place update that brings the owner's notes back is never muted/restarted. Fix: set rendered before awaiting, restore on exception.
 - F2 medium (run, pre-existing, now reachable) — _barge_in truncate during a Realtime connect raises RuntimeError (no wire) → session dies. Fix: truncate only while provider open.
 Repros: scratchpad/rereview9d/repo/tests/unit/test_rr9d.py.
+
+## Review round 10 — 1a2fe8e..a9c4b5c (quiet switch, _switch + meaning-based resolution, privacy F1/F2)
+Seat B (opus):
+- H1 high (run, real model) — _switch bar/templates overfit to fixtures: held-out tasks mentioning agent/profile/different/connect ("find me a travel agent", "change my profile photo", "connect me with my accountant", "help me pick a different agent for my house sale" → switches to stock-picker) score 0.96–1.0 → dropped with which_profile or wrong switch. Fix: router _switch counts only when resolve finds a profile or near-exact match to a no-name switch example; held-out negatives; eval on held-out set.
+- M1 medium (run) — router-detected switch drops a clear rest ("connect me with the investing agent, what's Apple at"); target_words keeps rest words.
+- M2 medium (run) — switch line "heard" heuristic: a task result sent during the line is cut by the restart and never repeated.
+- M3 medium — Red flag Information Leakage: switch phrasings/target nouns defined in three places that disagree.
+- L1 low — 5 s max wait cuts the line; restarted session silent; speech-events branch unreachable/untested.
+- L2 low — "switch to finance" docs example now resolves by meaning.
+- U1 Decisions/Jev unmeasured for _switch; U2 description-topic matches for "talk to <role>" ("talk to my stock broker" → stock-picker).
+Seat A (opus):
+- A-H1 high (run) = H1 — "can I talk to Sarah about the stock picker" switches to stock-picker; "change my profile picture", "connect me with my broker", "use a different approach" → which_profile, nothing runs. target_words keeps words after "about".
+- A-M1 medium (run) — after the switch line, no re-check for quiet: speech right after the line (or a never-spoken line at the 5 s cap) is cut by the restart.
+- A-M2 medium (run) — switch during an in-flight connect: says switched_to but the new session has the old profile's instructions; nothing restarts.
+- A-M3 medium (run, pre-existing) — Realtime/Grok: owner switches profile (notes removed in place, server conversation kept), then someone joins → no restart. Fix: per-connection "ever carried owner texts" flag.
+- A-L1 low — _PHRASING_WORDS hand-copies parser sets (same root as M3).
+- A-L2 low — lazy model load inline / failed load not cached.

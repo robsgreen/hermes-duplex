@@ -198,3 +198,7 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-06 08:26 - User approved switch-by-meaning. One coder: quiet-switch then switch-by-meaning. Re-review of 1a2fe8e in parallel.
 - 2026-11-06 08:40 - Re-review 9d: 2 medium (F1 in-place update window, F2 truncate crash). Sent to the active coder as extra items.
 - 2026-11-06 09:13 - Quiet switch + switch-by-meaning + F1/F2 committed (1378 pass; coder e2e 6). Two-seat review next.
+- 2026-11-06 09:26 - Review 10 seat B: H1 high (overfit _switch), 3 medium. Waiting seat A.
+- 2026-11-06 09:27 - Review 10 complete (2 high same root, ~6 medium). Asking user: router _switch approach + description matching.
+- 2026-11-06 09:31 - User: remove router _switch (word rules from one table + meaning); descriptions only with agent nouns. Fix round 10 dispatched.
+- 2026-11-06 10:17 - Fix round 10 committed (1465 pass; coder e2e 6; held-out P 0.85 R 0.77 FP 0.06). Scoped re-review next.
