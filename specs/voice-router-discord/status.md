@@ -185,3 +185,8 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-06 06:50 - Review 9 seat B in (1 high F1). Waiting seat A.
 - 2026-11-06 06:52 - Review 9 seat A: CRITICAL A1 (GPT-Live restarts every hand-off, pushed). Fix round dispatched with defaults for reseed/U2/U3 pending user.
 - 2026-11-06 07:25 - Review 9 fixes committed (1310 pass; coder e2e 6). Scoped re-review next.
+- 2026-11-06 07:31 - User keeps defaults. Picard: Decisions misses 300 ms often + unretrieved task exceptions -> fixed (1311 pass), committed locally.
+- 2026-11-06 07:32 - Re-review 9 seat A: N1 high, N2 medium (join privacy leftovers), user decision on Realtime server-side history. Waiting seat B.
+- 2026-11-06 07:33 - Re-review 9 seat B in. Asking user on Realtime/Grok server-side history; then fix N1/N2/F-RR1/F-RR2.
+- 2026-11-06 07:35 - User: Realtime/Grok reconnect fresh on join with owner texts. Dispatching fix coder (change-review9b-fixes.md).
+- 2026-11-06 07:48 - Pushed 2fa5129 + 3219250 to PR #1 with user yes; join-privacy fix in progress (uncommitted)

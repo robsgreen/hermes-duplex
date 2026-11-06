@@ -1,0 +1,8 @@
+# Fix round — round 9 re-review leftovers (review.md "Round 9 fix (2fa5129) — scoped re-review")
+Base 3219250 (local; 2fa5129 + router abandoned-call fix). User decisions 2026-11-06: keep defaults (reseed open tasks only, refreshes wait until no call, Grok 2000); Realtime/Grok reconnect fresh on join when owner texts were in the prompt.
+1. N1/F-RR1 (high): when someone joins and owner texts were in the prompt, mute by connection: ignore OutputAudio/OutputTranscript/DelegationRequested (and any other output) from that provider connection from the drop until the next _connect; drop the pacer and flush again inside the newcomer restart; the reseed has open tasks only. Covers in-flight deltas during close and a response still generating when nothing plays. Realistic fixture: GPT-Live item_id=None, supports_truncate False, provider yields deltas during close(). Use both reviewers' repros (scratchpad/rereview9-A/repo/tests/unit/test_review9_repro.py, scratchpad/rereview9-B/repro_rr9B_gptlive_inflight_after_join.py).
+2. N2: muted item's OutputTranscript discarded (subsumed by connection mute on the join path; make sure Realtime truncate path records nothing of the muted item).
+3. User decision: on Realtime/Grok, a join with owner texts in the prompt restarts the provider (not in-place update), same reseed rule as GPT-Live. Without owner texts: unchanged (in place / no cut-off).
+4. F-RR2: delete RESEED_LINES_SAID_ALONE and REFRESH_CONTEXT_DURING_CALLS switches and their untested branches (defaults confirmed); update docs that called them "pending".
+5. Docs: README privacy paragraph and architecture.md accurate per provider.
+Gate + default tests + real-Hermes e2e; format only changed files; test counts.

@@ -258,3 +258,13 @@ Seat A (opus):
 - A5 medium — SOUL rewrite runs with the owner's memory in context; prompt doesn't forbid facts about the owner/people, yet SOUL goes to guests too.
 - A6 low mechanical — cache write OSError skips the failure backoff → repeated rewrite runs.
 - Needs user decision: reseed after someone joins (suggest: open tasks only, no transcript).
+
+### Round 9 fix (2fa5129) — scoped re-review
+Seat A: A1, A2/F1, A4–A6, F2, F4–F7 resolved; A3 partial; Preserve held. New:
+- N1 high (run, fake) — GPT-Live audio/transcript buffered until the close handshake ends is still pushed to the pacer and recorded after the reseed cutoff → played to the newcomer and reseeded. Fix: discard output events while provider not open; drop pacer at restart reconnect.
+- N2 medium (run) — muted item's OutputTranscript still recorded → later reseed carries it (Realtime/Grok). Fix: discard transcript of the muted item until OutputDone.
+- Needs user decision: Realtime/Grok in-place update keeps the server-side conversation (earlier replies from USER.md); restart on join when owner texts were in the prompt?
+Seat B: same verdicts; A3 partial. New:
+- F-RR1 medium (run) = A's N1 — GPT-Live has no item ids; in-flight deltas during close play to the newcomer and reach the reseed; also a response still being generated when nothing plays at the join. Test fixture used item ids/truncate GPT-Live never sends. Fix: mute by connection until next _connect; drop pacer in the newcomer restart; realistic fixture.
+- F-RR2 low mechanical — RESEED_LINES_SAID_ALONE / REFRESH_CONTEXT_DURING_CALLS True branches untested; delete once decided (user kept defaults 2026-11-06 → delete).
+- Same user decision as A: Realtime/Grok keep owner-only turns server-side after a join.
