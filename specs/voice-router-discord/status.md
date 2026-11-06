@@ -202,3 +202,6 @@ PR: https://github.com/robsgreen/hermes-duplex/pull/1
 - 2026-11-06 09:27 - Review 10 complete (2 high same root, ~6 medium). Asking user: router _switch approach + description matching.
 - 2026-11-06 09:31 - User: remove router _switch (word rules from one table + meaning); descriptions only with agent nouns. Fix round 10 dispatched.
 - 2026-11-06 10:17 - Fix round 10 committed (1465 pass; coder e2e 6; held-out P 0.85 R 0.77 FP 0.06). Scoped re-review next.
+- 2026-11-06 10:27 - Re-review 10: N1 phrasing gaps, N2 bare-target meaning matches; asking user.
+- 2026-11-06 13:27 - User: names-only without agent noun, else task; add phrasings; push after checks without another full review. Dispatching coder.
+- 2026-11-06 13:51 - Fix round 10b committed; verified gate, 1530 default, 6 real-Hermes e2e myself; pushed 6bc2771..HEAD to PR #1 with user's approval

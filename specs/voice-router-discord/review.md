@@ -303,3 +303,10 @@ Seat A (opus):
 - A-M3 medium (run, pre-existing) — Realtime/Grok: owner switches profile (notes removed in place, server conversation kept), then someone joins → no restart. Fix: per-connection "ever carried owner texts" flag.
 - A-L1 low — _PHRASING_WORDS hand-copies parser sets (same root as M3).
 - A-L2 low — lazy model load inline / failed load not cached.
+
+### Fix round 10 (5b54b48) — scoped re-review (single reviewer)
+All round-10 findings resolved except U2 partial. New:
+- N1 medium (run) — missing phrasings now that the router doesn't catch them ("switch me to …", "switch over to", "put me through to the … agent", "get me the … agent", "can I have the …", "I'd like the …"): 11 of 27 natural switch requests became tasks; none went wrong.
+- N2 medium (run, pre-existing = U2) — bare targets with no agent noun match profile names by meaning ("talk to my stock broker/trader", "switch to stock photos", "talk to my travel buddy", "talk to a programmer") → wrong switch; 6 of 20.
+- Needs user decision: N2 rule; bare non-agent targets ("change to Celsius", "talk to my dad", "can I speak to a human") ask "which agent?" and never run (15 of 65).
+Held-out test floors equal current scores (regression-only).
